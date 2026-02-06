@@ -1,0 +1,53 @@
+# Racecar Gym PPO Training Configuration
+
+# Environment settings
+environment:
+  track: circle
+  scenario: null  # Will use default SingleAgentCircle-v0
+  render_mode: null  # Set to 'human' or 'rgb_array' for visualization
+  render_options:
+    width: 320
+    height: 240
+
+# Agent configuration
+agent:
+  sensors: [lidar, pose, velocity, acceleration]
+  actuators: [motor, steering]
+  color: blue
+
+# PPO hyperparameters
+ppo:
+  learning_rate: 3.0e-4
+  n_steps: 2048
+  batch_size: 64
+  n_epochs: 10
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_range: 0.2
+  ent_coef: 0.01
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  use_sde: false
+  sde_sample_freq: -1
+
+# Policy network architecture
+policy:
+  net_arch: [256, 256]  # Two hidden layers with 256 units each
+  activation_fn: tanh
+
+# Training settings
+training:
+  total_timesteps: 1000000
+  eval_freq: 10000
+  n_eval_episodes: 5
+  save_freq: 50000
+  log_interval: 10
+
+# Paths
+paths:
+  model_dir: ./models
+  log_dir: ./logs
+  results_dir: ./results
+
+# Device
+device: auto  # 'auto', 'cpu', or 'cuda'
