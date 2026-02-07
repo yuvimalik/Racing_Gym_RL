@@ -2,6 +2,8 @@
 
 A reinforcement learning project for training a Proximal Policy Optimization (PPO) agent to drive a car in the `multi_car_racing` environment using Stable-Baselines3.
 
+Google Colab: https://colab.research.google.com/drive/18B9vCAqM9xmiXearYYa3bdq415TytHJg?usp=sharing
+
 ## Project Overview
 
 This project implements a complete training pipeline for a single-agent car racing setup using:
