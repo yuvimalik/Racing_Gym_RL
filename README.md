@@ -1,30 +1,30 @@
 # Racing Gym RL - PPO Training Project
 
-A reinforcement learning project for training a Proximal Policy Optimization (PPO) agent to drive a racecar optimally on various tracks using the racecar_gym environment and Stable-Baselines3.
+A reinforcement learning project for training a Proximal Policy Optimization (PPO) agent to drive a car in the `multi_car_racing` environment using Stable-Baselines3.
 
 ## Project Overview
 
-This project implements a complete training pipeline for a single-agent racecar using:
-- **Environment**: racecar_gym (Gymnasium-compatible environment using PyBullet physics)
+This project implements a complete training pipeline for a single-agent car racing setup using:
+- **Environment**: `multi_car_racing` (Gym-based multi-agent car racing)
 - **Algorithm**: Proximal Policy Optimization (PPO) from Stable-Baselines3
-- **Track**: Circle track (configurable to other tracks)
-- **Observation Space**: Dict containing lidar, pose, velocity, and acceleration sensors
-- **Action Space**: Dict containing motor and steering actuators
+- **Observation Space**: 96x96 RGB image
+- **Action Space**: Continuous controls (steer, gas, brake)
 
 ## Project Structure
 
 ```
 Racing_Gym_RL/
-├── README.md                 # This file
-├── requirements.txt          # Python dependencies
-├── train.py                  # Main training script
-├── evaluate.py               # Model evaluation script
-├── colab_training.ipynb      # Google Colab notebook for training
+├── README.md                      # This file
+├── requirements.txt               # Python dependencies
+├── train.py                       # Main training script
+├── evaluate.py                    # Model evaluation script
+├── colab_training.ipynb           # Google Colab notebook for training
 ├── config/
-│   └── circle_config.yaml    # Training configuration file
-├── models/                   # Saved model checkpoints (gitignored)
-├── logs/                     # Training logs and TensorBoard data (gitignored)
-└── results/                  # Evaluation results and videos (gitignored)
+│   ├── circle_config.yaml         # Legacy config (racecar_gym)
+│   └── multi_car_config.yaml      # Training configuration for multi_car_racing
+├── models/                        # Saved model checkpoints (gitignored)
+├── logs/                          # Training logs and TensorBoard data (gitignored)
+└── results/                       # Evaluation results and videos (gitignored)
 ```
 
 ## Installation
@@ -48,7 +48,12 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-Note: On first use, racecar_gym will automatically download track files. This may take a few minutes.
+4. Install `multi_car_racing` (no-deps to avoid shapely/box2d build issues):
+```bash
+pip install git+https://github.com/igilitschenski/multi_car_racing.git --no-deps
+```
+
+Note: `multi_car_racing` is installed from GitHub and registers the environment during import.
 
 ### Google Colab
 
@@ -62,24 +67,20 @@ The notebook will install all dependencies and create necessary directories auto
 
 ## Configuration
 
-Training parameters are configured in `config/circle_config.yaml`. Key settings include:
+Training parameters are configured in `config/multi_car_config.yaml`. Key settings include:
 
 - **Environment**: Track selection, rendering options
 - **PPO Hyperparameters**: Learning rate, batch size, number of epochs, etc.
 - **Policy Network**: Architecture and activation functions
 - **Training**: Total timesteps, evaluation frequency, checkpoint saving
 
-### Changing Tracks
+### Environment Options
 
-To train on a different track, modify the `track` field in `config/circle_config.yaml`:
-- `circle` - Simple circular track (good for initial testing)
-- `austria` - Austria Formula 1 track
-- `berlin` - Berlin track
-- `montreal` - Montreal track
-- `torino` - Torino track
-- `plechaty` - Plechaty track
-
-The environment ID will automatically be set to `SingleAgent{Track}-v0`.
+Key options in `config/multi_car_config.yaml`:
+- `num_agents`: Set to 1 for single-agent training
+- `direction`: Track direction (`CW` or `CCW`)
+- `use_random_direction`: Randomize direction
+- `backwards_flag`, `h_ratio`, `use_ego_color`: Rendering/visual options
 
 ## Usage
 
@@ -87,12 +88,12 @@ The environment ID will automatically be set to `SingleAgent{Track}-v0`.
 
 Train a new model:
 ```bash
-python train.py --config config/circle_config.yaml --seed 42
+python train.py --config config/multi_car_config.yaml --seed 42
 ```
 
 Resume training from a checkpoint:
 ```bash
-python train.py --config config/circle_config.yaml --resume models/ppo_racecar_50000_steps.zip
+python train.py --config config/multi_car_config.yaml --resume models/ppo_racecar_50000_steps.zip
 ```
 
 Training will:
@@ -110,7 +111,7 @@ python evaluate.py --model models/best_model/best_model.zip --episodes 10
 
 Options:
 - `--model`: Path to model checkpoint
-- `--config`: Configuration file (default: `config/circle_config.yaml`)
+- `--config`: Configuration file (default: `config/multi_car_config.yaml`)
 - `--episodes`: Number of evaluation episodes (default: 10)
 - `--no-video`: Disable video recording
 - `--seed`: Random seed for evaluation
@@ -131,29 +132,23 @@ Then open `http://localhost:6006` in your browser.
 
 ## Observation and Action Spaces
 
-### Observation Space (Dict)
+### Observation Space
 
-The agent receives observations from multiple sensors:
+The agent receives a 96x96 RGB image observation:
+- **shape**: `(96, 96, 3)`
+- **type**: uint8 image
 
-- **lidar**: Box(1080,) - LiDAR range scans (1080 points)
-- **pose**: Box(6,) - Position (x, y, z) and orientation (roll, pitch, yaw)
-- **velocity**: Box(6,) - Translational and rotational velocity components
-- **acceleration**: Box(6,) - Translational and rotational acceleration components
-- **time**: float - Current simulation time
+### Action Space
 
-### Action Space (Dict)
-
-The agent controls the racecar through:
-
-- **motor**: Box(low=-1, high=1, shape=(1,)) - Throttle command (-1 to 1)
-- **steering**: Box(low=-1, high=1, shape=(1,)) - Steering angle (-1 to 1)
+The agent controls the car via continuous actions:
+- **steering**: left/right steering
+- **gas**: acceleration
+- **brake**: braking force
 
 ## Model Architecture
 
 The PPO model uses:
-- **Policy**: MultiInputPolicy (for Dict observation spaces)
-- **Network Architecture**: Two hidden layers with 256 units each (configurable)
-- **Activation Function**: Tanh (configurable)
+- **Policy**: CnnPolicy (for image observations)
 - **Device**: Automatically detects GPU/CPU availability
 
 ## Training Details
@@ -172,8 +167,8 @@ The PPO model uses:
 
 ### Training Process
 
-1. Environment creation with specified track and sensors
-2. Model initialization with MultiInputPolicy for Dict observations
+1. Environment creation with `MultiCarRacing-v0` and `num_agents=1`
+2. Model initialization with `CnnPolicy`
 3. Training loop with periodic evaluation
 4. Automatic checkpointing and best model saving
 5. TensorBoard logging for monitoring
@@ -198,27 +193,25 @@ The PPO model uses:
 
 ### Common Issues
 
-**Import Error for racecar_gym**
-- Ensure racecar_gym is installed: `pip install git+https://github.com/axelbr/racecar_gym.git`
-- Tracks are downloaded automatically on first use
+**Import Error for multi_car_racing**
+- Ensure it is installed: `pip install git+https://github.com/igilitschenski/multi_car_racing.git`
+- Make sure `gym` is installed (not just gymnasium)
 
 **CUDA/GPU Issues**
 - Set `device: cpu` in config file to force CPU usage
 - Check PyTorch CUDA installation: `python -c "import torch; print(torch.cuda.is_available())"`
 
-**Dict Observation Space Errors**
-- Ensure using MultiInputPolicy (automatically selected in train.py)
-- Check that all required sensors are specified in config
+**Image Observation Issues**
+- Ensure `CnnPolicy` is used (default in config)
+- Ensure `VecTransposeImage` is applied (handled in `train.py`)
 
 **Memory Issues**
 - Reduce `batch_size` or `n_steps` in config
 - Use CPU instead of GPU if GPU memory is limited
 - Reduce number of evaluation episodes
 
-**Track Download Issues**
-- Tracks download automatically, but if issues occur, manually download from:
-  https://github.com/axelbr/racecar_gym/releases/download/tracks-v1.0.0/all.zip
-- Extract to `~/.racecar_gym/scenes/` (or equivalent)
+**Environment Not Found**
+- Ensure `gym_multi_car_racing` is imported before `gym.make`
 
 ## Google Colab Specific Notes
 
@@ -240,20 +233,20 @@ After initial training, consider:
 
 ## Dependencies
 
-- gymnasium >= 0.29.0
-- stable-baselines3[extra] >= 2.0.0
-- numpy >= 1.24.0
-- pybullet >= 3.2.0
+- numpy >= 1.22.0,<1.23.0
+- gym == 0.17.3
+- stable-baselines3[extra] == 1.8.0
 - matplotlib >= 3.7.0
 - opencv-python >= 4.8.0
 - tensorboard >= 2.13.0
 - pyyaml >= 6.0
+- pyglet == 1.5.27
 - torch >= 2.0.0
-- racecar_gym (from GitHub)
+- multi_car_racing (from GitHub)
 
 ## References
 
-- Racecar Gym: https://github.com/axelbr/racecar_gym
+- Multi-Car Racing: https://github.com/igilitschenski/multi_car_racing
 - Stable-Baselines3: https://github.com/DLR-RM/stable-baselines3
 - Gymnasium: https://gymnasium.farama.org/
 

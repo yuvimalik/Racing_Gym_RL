@@ -1,20 +1,13 @@
 # Core dependencies
-# Note: numpy 1.22.3 is not available for Python 3.11+, so we use compatible versions
-# stable-baselines3 2.4.0+ supports gymnasium 0.29.1+ and numpy>=1.20,<2.0
-# gymnasium 0.29.1+ requires numpy>=1.21.0
-# racecar-gym may require numpy==1.22.3, but we'll install it with --no-deps first
-# then install other packages, allowing pip to resolve conflicts
-numpy>=1.23.0,<2.0
-gymnasium>=0.29.1
-stable-baselines3[extra]>=2.4.0
-# pybullet - try to get pre-built wheel, if not available install build tools
-# Alternative: install via conda: conda install -c conda-forge pybullet
-pybullet>=3.2.0
+# Core dependencies for multi_car_racing
+numpy>=1.22.0,<1.23.0
+gym==0.17.3
+stable-baselines3[extra]==1.8.0
 
-# Racecar gym - install from GitHub
-# Install without dependencies first, then let pip resolve
-# If this fails, we may need to patch racecar-gym's setup.py
-git+https://github.com/axelbr/racecar_gym.git
+# multi_car_racing dependencies (install package separately with --no-deps)
+shapely==1.8.5.post1
+box2d-py==2.3.8
+pyglet==1.5.27
 
 # Visualization and logging
 matplotlib>=3.7.0

@@ -60,9 +60,9 @@ def check_installed_packages():
     print(f"{'='*70}")
     
     packages_to_check = [
-        'numpy', 'gymnasium', 'stable_baselines3', 
-        'pybullet', 'torch', 'matplotlib', 'opencv-python', 
-        'tensorboard', 'yaml', 'racecar_gym'
+        'numpy', 'gym', 'gymnasium', 'shimmy', 'stable_baselines3',
+        'torch', 'matplotlib', 'opencv-python',
+        'tensorboard', 'yaml', 'gym_multi_car_racing'
     ]
     
     installed = {}
@@ -168,23 +168,15 @@ def generate_installation_plan(installed):
     # Step 3: Install core packages
     plan.append({
         'step': 3,
-        'command': 'pip install --prefer-binary "gymnasium>=0.29.1" "stable-baselines3[extra]>=2.4.0" "matplotlib>=3.7.0" "opencv-python>=4.8.0" "tensorboard>=2.13.0" "pyyaml>=6.0" "torch>=2.0.0"',
+        'command': 'pip install --prefer-binary "gym==0.17.3" "stable-baselines3[extra]==1.8.0" "matplotlib>=3.7.0" "opencv-python>=4.8.0" "tensorboard>=2.13.0" "pyyaml>=6.0" "pyglet==1.5.27" "torch>=2.0.0"',
         'description': 'Install core ML packages'
     })
     
-    # Step 4: Install pybullet
+    # Step 4: Install multi_car_racing
     plan.append({
         'step': 4,
-        'command': 'pip install --prefer-binary pybullet',
-        'description': 'Install pybullet (may require C++ build tools if no wheel available)',
-        'fallback': 'If this fails, install Visual C++ Build Tools or use: conda install -c conda-forge pybullet'
-    })
-    
-    # Step 5: Install racecar-gym
-    plan.append({
-        'step': 5,
-        'command': 'pip install git+https://github.com/axelbr/racecar_gym.git --no-deps',
-        'description': 'Install racecar-gym without dependency checking (to avoid numpy conflict)'
+        'command': 'pip install git+https://github.com/igilitschenski/multi_car_racing.git --no-deps',
+        'description': 'Install multi_car_racing environment (no-deps)'
     })
     
     # Print plan

@@ -1,0 +1,46 @@
+# Multi-Car Racing PPO Training Configuration
+
+# Environment settings
+environment:
+  env_id: MultiCarRacing-v0
+  num_agents: 1
+  direction: CCW
+  use_random_direction: true
+  backwards_flag: true
+  h_ratio: 0.25
+  use_ego_color: false
+  render_mode: null  # "human" or "rgb_array"
+
+# PPO hyperparameters (image-based)
+ppo:
+  learning_rate: 3.0e-4
+  n_steps: 2048  # Standard value for stable policy updates
+  batch_size: 64  # Standard batch size for image-based policies
+  n_epochs: 10  # Standard epochs for full training
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_range: 0.2
+  ent_coef: 0.01
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+
+# Policy network architecture
+policy:
+  policy_type: CnnPolicy
+
+# Training settings
+training:
+  total_timesteps: 500000  # Full training run
+  eval_freq: 50000  # Evaluate every 10% of training (less frequent)
+  n_eval_episodes: 5  # More episodes for reliable evaluation stats
+  save_freq: 100000  # Save checkpoints every 100k steps
+  log_interval: 10  # Standard logging frequency
+
+# Paths
+paths:
+  model_dir: ./models
+  log_dir: ./logs
+  results_dir: ./results
+
+# Device
+device: cuda  # "auto", "cpu", or "cuda" - explicitly set to cuda to use GPU

@@ -1,5 +1,5 @@
 """
-Evaluation script for trained Racecar Gym PPO models.
+Evaluation script for trained Multi-Car Racing PPO models.
 
 This script loads a trained model and evaluates its performance,
 generating metrics and optionally recording videos.
@@ -10,11 +10,11 @@ import yaml
 import argparse
 import numpy as np
 from pathlib import Path
-import gymnasium as gym
-import racecar_gym.envs.gym_api
+import gym
+import gym_multi_car_racing
 from stable_baselines3 import PPO
 from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.vec_env import DummyVecEnv
+from stable_baselines3.common.vec_env import DummyVecEnv, VecTransposeImage
 import cv2
 from datetime import datetime
 
@@ -26,17 +26,74 @@ def load_config(config_path):
     return config
 
 
+class SingleAgentWrapper(gym.Wrapper):
+    """Wrap MultiCarRacing to expose a single-agent view."""
+
+    def __init__(self, env):
+        super().__init__(env)
+        obs_space = env.observation_space
+        act_space = env.action_space
+
+        if len(obs_space.shape) == 4 and obs_space.shape[0] == 1:
+            self.observation_space = gym.spaces.Box(
+                low=obs_space.low[0],
+                high=obs_space.high[0],
+                shape=obs_space.shape[1:],
+                dtype=obs_space.dtype
+            )
+        if len(act_space.shape) == 2 and act_space.shape[0] == 1:
+            self.action_space = gym.spaces.Box(
+                low=act_space.low[0],
+                high=act_space.high[0],
+                shape=act_space.shape[1:],
+                dtype=act_space.dtype
+            )
+
+    def reset(self, **kwargs):
+        # Gym 0.17.3 reset() returns just obs, not (obs, info)
+        obs = self.env.reset(**kwargs)
+        # Extract single agent observation if multi-agent format (num_agents, H, W, C)
+        if hasattr(obs, "shape") and len(obs.shape) == 4 and obs.shape[0] == 1:
+            obs = obs[0]  # Remove first dimension: (1, H, W, C) -> (H, W, C)
+        elif isinstance(obs, (list, tuple)) and len(obs) == 1:
+            obs = obs[0]
+        # Gym 0.17.3: return just obs (not tuple)
+        return obs
+
+    def step(self, action):
+        if hasattr(self.env.action_space, "shape") and len(self.env.action_space.shape) == 2:
+            action = action.reshape(1, -1)
+        obs, reward, done, info = self.env.step(action)
+        # Extract single agent observation if multi-agent format (num_agents, H, W, C)
+        if hasattr(obs, "shape") and len(obs.shape) == 4 and obs.shape[0] == 1:
+            obs = obs[0]  # Remove first dimension: (1, H, W, C) -> (H, W, C)
+        elif isinstance(obs, (list, tuple)) and len(obs) == 1:
+            obs = obs[0]
+        # Extract single agent reward if multi-agent format
+        if isinstance(reward, (list, tuple)) or (hasattr(reward, "shape") and len(reward.shape) > 0 and reward.shape[0] == 1):
+            reward = float(reward[0] if isinstance(reward, (list, tuple)) else reward[0])
+        return obs, reward, done, info
+
+
 def create_env(config, render_mode='rgb_array'):
     """Create evaluation environment with rendering."""
     env_config = config['environment']
-    track = env_config['track']
-    env_id = f'SingleAgent{track.capitalize()}-v0'
+    env_id = env_config.get('env_id', 'MultiCarRacing-v0')
     
+    # Note: Gym 0.17.3 doesn't support render_mode in gym.make()
+    # Rendering is handled via env.render() calls instead
     env = gym.make(
         env_id,
-        render_mode=render_mode,
-        render_options=env_config.get('render_options', {})
+        num_agents=env_config.get('num_agents', 1),
+        direction=env_config.get('direction', 'CCW'),
+        use_random_direction=env_config.get('use_random_direction', True),
+        backwards_flag=env_config.get('backwards_flag', True),
+        h_ratio=env_config.get('h_ratio', 0.25),
+        use_ego_color=env_config.get('use_ego_color', False)
     )
+
+    if env_config.get('num_agents', 1) == 1:
+        env = SingleAgentWrapper(env)
     
     return env
 
@@ -47,7 +104,11 @@ def evaluate_model(model_path, config, n_episodes=10, record_video=True, seed=42
     model = PPO.load(model_path)
     
     # Create environment
-    env = create_env(config, render_mode='rgb_array' if record_video else None)
+    # Note: render_mode parameter is ignored in create_env for Gym 0.17.3 compatibility
+    # Rendering is handled via env.render() calls
+    base_env = create_env(config, render_mode='rgb_array' if record_video else None)
+    env = DummyVecEnv([lambda: base_env])
+    env = VecTransposeImage(env)
     
     # Evaluation metrics
     episode_rewards = []
@@ -58,56 +119,48 @@ def evaluate_model(model_path, config, n_episodes=10, record_video=True, seed=42
     results_dir = Path(config['paths']['results_dir'])
     results_dir.mkdir(parents=True, exist_ok=True)
     
-    # Create video writer if recording
+    # Create video writer lazily after first frame
     video_writer = None
     video_path = None
     if record_video:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         video_path = results_dir / f'evaluation_{timestamp}.mp4'
-        render_options = config['environment'].get('render_options', {})
-        width = render_options.get('width', 320)
-        height = render_options.get('height', 240)
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        video_writer = cv2.VideoWriter(str(video_path), fourcc, 30.0, (width, height))
     
     print(f"Evaluating model for {n_episodes} episodes...")
     
     for episode in range(n_episodes):
-        obs, info = env.reset(seed=seed + episode)
+        obs = env.reset()
         done = False
         episode_reward = 0
         episode_length = 0
         start_time = None
         
         while not done:
-            # Get action from model
-            if isinstance(obs, dict):
-                # Handle Dict observation
-                action, _ = model.predict(obs, deterministic=True)
-            else:
-                action, _ = model.predict(obs, deterministic=True)
+            action, _ = model.predict(obs, deterministic=True)
             
-            # Step environment
-            obs, reward, terminated, truncated, info = env.step(action)
-            done = terminated or truncated
+            obs, reward, done, info = env.step(action)
             
-            episode_reward += reward
+            episode_reward += float(reward[0])
             episode_length += 1
             
             # Record first frame time
-            if start_time is None and 'time' in info:
-                start_time = info['time']
+            info0 = info[0] if isinstance(info, (list, tuple)) else info
+            if start_time is None and isinstance(info0, dict) and 'time' in info0:
+                start_time = info0['time']
             
             # Record video frame
-            if record_video and video_writer is not None:
-                frame = env.render()
+            if record_video:
+                frame = base_env.render()
                 if frame is not None:
-                    # Convert RGB to BGR for OpenCV
+                    if video_writer is None:
+                        height, width = frame.shape[:2]
+                        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                        video_writer = cv2.VideoWriter(str(video_path), fourcc, 30.0, (width, height))
                     frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
                     video_writer.write(frame_bgr)
         
         # Extract final metrics from info
-        final_info = info
+        final_info = info0 if isinstance(info0, dict) else {}
         progress = final_info.get('progress', 0.0)
         final_time = final_info.get('time', 0.0)
         episode_time = final_time - start_time if start_time is not None else 0.0
@@ -129,6 +182,7 @@ def evaluate_model(model_path, config, n_episodes=10, record_video=True, seed=42
         print(f"Video saved to {video_path}")
     
     env.close()
+    base_env.close()
     
     # Calculate statistics
     stats = {
@@ -203,7 +257,7 @@ def main():
     parser.add_argument(
         '--config',
         type=str,
-        default='config/circle_config.yaml',
+        default='config/multi_car_config.yaml',
         help='Path to configuration file'
     )
     parser.add_argument(

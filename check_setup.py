@@ -10,13 +10,12 @@ def check_imports():
     print("-" * 50)
     
     required_packages = {
-        'gymnasium': 'gymnasium',
+        'gym': 'gym',
         'stable_baselines3': 'stable_baselines3',
         'numpy': 'numpy',
-        'pybullet': 'pybullet',
         'torch': 'torch',
         'yaml': 'yaml',
-        'racecar_gym': 'racecar_gym.envs.gym_api'
+        'gym_multi_car_racing': 'gym_multi_car_racing'
     }
     
     missing = []

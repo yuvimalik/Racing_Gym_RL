@@ -1,20 +1,20 @@
 """
-Training script for Racecar Gym using PPO from Stable-Baselines3.
+Training script for Multi-Car Racing using PPO from Stable-Baselines3.
 
-This script handles single-agent training on racecar_gym environments
-with Dict observation and action spaces.
+This script handles single-agent training on multi_car_racing with
+image observations and continuous actions.
 """
 
 import os
 import yaml
 import argparse
 from pathlib import Path
-import gymnasium as gym
-import racecar_gym.envs.gym_api
+import gym
+import gym_multi_car_racing
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import EvalCallback, CheckpointCallback, CallbackList, BaseCallback
 from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.vec_env import DummyVecEnv
+from stable_baselines3.common.vec_env import DummyVecEnv, VecTransposeImage
 from stable_baselines3.common.utils import set_random_seed
 import torch
 import time
@@ -28,20 +28,72 @@ def load_config(config_path):
     return config
 
 
+class SingleAgentWrapper(gym.Wrapper):
+    """Wrap MultiCarRacing to expose a single-agent view."""
+
+    def __init__(self, env):
+        super().__init__(env)
+        obs_space = env.observation_space
+        act_space = env.action_space
+
+        if len(obs_space.shape) == 4 and obs_space.shape[0] == 1:
+            self.observation_space = gym.spaces.Box(
+                low=obs_space.low[0],
+                high=obs_space.high[0],
+                shape=obs_space.shape[1:],
+                dtype=obs_space.dtype
+            )
+        if len(act_space.shape) == 2 and act_space.shape[0] == 1:
+            self.action_space = gym.spaces.Box(
+                low=act_space.low[0],
+                high=act_space.high[0],
+                shape=act_space.shape[1:],
+                dtype=act_space.dtype
+            )
+
+    def reset(self, **kwargs):
+        # Gym 0.17.3 reset() returns just obs, not (obs, info)
+        obs = self.env.reset(**kwargs)
+        # Extract single agent observation if multi-agent format (num_agents, H, W, C)
+        if hasattr(obs, "shape") and len(obs.shape) == 4 and obs.shape[0] == 1:
+            obs = obs[0]  # Remove first dimension: (1, H, W, C) -> (H, W, C)
+        elif isinstance(obs, (list, tuple)) and len(obs) == 1:
+            obs = obs[0]
+        # Gym 0.17.3: return just obs (not tuple)
+        return obs
+
+    def step(self, action):
+        if hasattr(self.env.action_space, "shape") and len(self.env.action_space.shape) == 2:
+            action = action.reshape(1, -1)
+        obs, reward, done, info = self.env.step(action)
+        # Extract single agent observation if multi-agent format (num_agents, H, W, C)
+        if hasattr(obs, "shape") and len(obs.shape) == 4 and obs.shape[0] == 1:
+            obs = obs[0]  # Remove first dimension: (1, H, W, C) -> (H, W, C)
+        elif isinstance(obs, (list, tuple)) and len(obs) == 1:
+            obs = obs[0]
+        # Extract single agent reward if multi-agent format
+        if isinstance(reward, (list, tuple)) or (hasattr(reward, "shape") and len(reward.shape) > 0 and reward.shape[0] == 1):
+            reward = float(reward[0] if isinstance(reward, (list, tuple)) else reward[0])
+        return obs, reward, done, info
+
+
 def create_env(config, rank=0, seed=0):
-    """Create and wrap the racecar_gym environment."""
+    """Create and wrap the multi_car_racing environment."""
     env_config = config['environment']
-    
-    # Create environment ID based on track
-    track = env_config['track']
-    env_id = f'SingleAgent{track.capitalize()}-v0'
-    
-    # Create environment
+
+    env_id = env_config.get('env_id', 'MultiCarRacing-v0')
     env = gym.make(
         env_id,
-        render_mode=env_config.get('render_mode'),
-        render_options=env_config.get('render_options')
+        num_agents=env_config.get('num_agents', 1),
+        direction=env_config.get('direction', 'CCW'),
+        use_random_direction=env_config.get('use_random_direction', True),
+        backwards_flag=env_config.get('backwards_flag', True),
+        h_ratio=env_config.get('h_ratio', 0.25),
+        use_ego_color=env_config.get('use_ego_color', False)
     )
+
+    if env_config.get('num_agents', 1) == 1:
+        env = SingleAgentWrapper(env)
     
     # Wrap with Monitor for logging
     log_dir = config['paths']['log_dir']
@@ -49,7 +101,12 @@ def create_env(config, rank=0, seed=0):
     env = Monitor(env, filename=os.path.join(log_dir, f'monitor_{rank}'))
     
     # Set seed
-    env.reset(seed=seed)
+    try:
+        env.reset(seed=seed)
+    except TypeError:
+        if hasattr(env, "seed"):
+            env.seed(seed)
+        env.reset()
     
     return env
 
@@ -60,11 +117,26 @@ def get_device(config):
     
     if device_config == 'auto':
         if torch.cuda.is_available():
-            return 'cuda'
+            device = 'cuda'
         else:
-            return 'cpu'
+            device = 'cpu'
+    elif device_config == 'cuda':
+        if torch.cuda.is_available():
+            device = 'cuda'
+        else:
+            print("WARNING: CUDA requested but not available. Falling back to CPU.")
+            device = 'cpu'
     else:
-        return device_config
+        device = device_config
+    
+    # Print device info
+    if device == 'cuda':
+        print(f"GPU detected: {torch.cuda.get_device_name(0)}")
+        print(f"CUDA version: {torch.version.cuda}")
+    else:
+        print("Using CPU for training")
+    
+    return device
 
 
 class ProgressCallback(BaseCallback):
@@ -145,32 +217,29 @@ class ProgressCallback(BaseCallback):
 
 
 def create_model(config, env, device):
-    """Create PPO model with appropriate policy for Dict observation spaces."""
+    """Create PPO model for image-based observations."""
     ppo_config = config['ppo']
     policy_config = config['policy']
-    
-    # Check if observation space is Dict
-    if isinstance(env.observation_space, gym.spaces.Dict):
-        # Use MultiInputPolicy for Dict observation spaces
-        policy = 'MultiInputPolicy'
-    else:
-        # Use MlpPolicy for Box observation spaces
-        policy = 'MlpPolicy'
-    
-    # Get activation function
-    activation_fn_map = {
-        'tanh': torch.nn.Tanh,
-        'relu': torch.nn.ReLU,
-        'elu': torch.nn.ELU
-    }
-    activation_fn = activation_fn_map.get(
-        policy_config.get('activation_fn', 'tanh'),
-        torch.nn.Tanh
-    )
-    
-    # Create model
+
+    policy_type = policy_config.get('policy_type', 'CnnPolicy')
+    policy_kwargs = None
+    if policy_type != 'CnnPolicy':
+        activation_fn_map = {
+            'tanh': torch.nn.Tanh,
+            'relu': torch.nn.ReLU,
+            'elu': torch.nn.ELU
+        }
+        activation_fn = activation_fn_map.get(
+            policy_config.get('activation_fn', 'tanh'),
+            torch.nn.Tanh
+        )
+        policy_kwargs = dict(
+            net_arch=policy_config.get('net_arch', [256, 256]),
+            activation_fn=activation_fn
+        )
+
     model = PPO(
-        policy=policy,
+        policy=policy_type,
         env=env,
         learning_rate=ppo_config['learning_rate'],
         n_steps=ppo_config['n_steps'],
@@ -184,10 +253,7 @@ def create_model(config, env, device):
         max_grad_norm=ppo_config['max_grad_norm'],
         use_sde=ppo_config.get('use_sde', False),
         sde_sample_freq=ppo_config.get('sde_sample_freq', -1),
-        policy_kwargs=dict(
-            net_arch=policy_config['net_arch'],
-            activation_fn=activation_fn
-        ),
+        policy_kwargs=policy_kwargs,
         device=device,
         verbose=1,
         tensorboard_log=config['paths']['log_dir']
@@ -197,11 +263,11 @@ def create_model(config, env, device):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Train PPO agent on Racecar Gym')
+    parser = argparse.ArgumentParser(description='Train PPO agent on Multi-Car Racing')
     parser.add_argument(
         '--config',
         type=str,
-        default='config/circle_config.yaml',
+        default='config/multi_car_config.yaml',
         help='Path to configuration file'
     )
     parser.add_argument(
@@ -247,16 +313,16 @@ def main():
     
     # Create environment
     print("Creating environment...")
-    track = config['environment']['track']
-    env_id = f'SingleAgent{track.capitalize()}-v0'
-    print(f"Track: {track}")
+    env_id = config['environment'].get('env_id', 'MultiCarRacing-v0')
     print(f"Environment ID: {env_id}")
     
     # Wrap in vectorized environment (required for SB3)
     env = DummyVecEnv([lambda: create_env(config, rank=0, seed=args.seed)])
+    env = VecTransposeImage(env)
     
     # Create evaluation environment
     eval_env = DummyVecEnv([lambda: create_env(config, rank=1, seed=args.seed + 1000)])
+    eval_env = VecTransposeImage(eval_env)
     print("Environment created successfully!\n")
     
     # Create model
