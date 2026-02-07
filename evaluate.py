@@ -60,6 +60,13 @@ class SingleAgentWrapper(gym.Wrapper):
         # Gym 0.17.3: return just obs (not tuple)
         return obs
 
+    def render(self, mode='human', **kwargs):
+        out = self.env.render(mode=mode, **kwargs)
+        # Extract single agent frame if multi-agent format (num_agents, H, W, C)
+        if hasattr(out, "shape") and len(out.shape) == 4 and out.shape[0] == 1:
+            out = out[0]
+        return out
+
     def step(self, action):
         if hasattr(self.env.action_space, "shape") and len(self.env.action_space.shape) == 2:
             action = action.reshape(1, -1)
@@ -72,6 +79,9 @@ class SingleAgentWrapper(gym.Wrapper):
         # Extract single agent reward if multi-agent format
         if isinstance(reward, (list, tuple)) or (hasattr(reward, "shape") and len(reward.shape) > 0 and reward.shape[0] == 1):
             reward = float(reward[0] if isinstance(reward, (list, tuple)) else reward[0])
+        # Extract single agent info
+        if isinstance(info, (list, tuple)) and len(info) == 1:
+            info = info[0]
         return obs, reward, done, info
 
 
@@ -145,12 +155,20 @@ def evaluate_model(model_path, config, n_episodes=10, record_video=True, seed=42
             
             # Record first frame time
             info0 = info[0] if isinstance(info, (list, tuple)) else info
+            if episode == 0 and episode_length == 1:
+                print(f"DEBUG info type: {type(info)}, info0 type: {type(info0)}", flush=True)
+                if isinstance(info0, dict):
+                    print(f"DEBUG info0 keys: {list(info0.keys())}", flush=True)
+                else:
+                    print(f"DEBUG info0 content: {info0}", flush=True)
             if start_time is None and isinstance(info0, dict) and 'time' in info0:
                 start_time = info0['time']
             
+            # Get frame for video or live view
+            frame = base_env.render(mode='rgb_array')
+            
             # Record video frame
             if record_video:
-                frame = base_env.render()
                 if frame is not None:
                     if video_writer is None:
                         height, width = frame.shape[:2]
@@ -158,6 +176,19 @@ def evaluate_model(model_path, config, n_episodes=10, record_video=True, seed=42
                         video_writer = cv2.VideoWriter(str(video_path), fourcc, 30.0, (width, height))
                     frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
                     video_writer.write(frame_bgr)
+            
+            # Show live window
+            if frame is not None:
+                # Convert if not already done
+                if 'frame_bgr' not in locals():
+                     frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                
+                # Debug frame stats on first frame
+                if episode == 0 and episode_length == 1:
+                    print(f"DEBUG Frame stats: dtype={frame.dtype}, min={np.min(frame)}, max={np.max(frame)}", flush=True)
+                
+                cv2.imshow("Racecar Gym Evaluation", frame_bgr)
+                cv2.waitKey(1)
         
         # Extract final metrics from info
         final_info = info0 if isinstance(info0, dict) else {}
@@ -183,6 +214,7 @@ def evaluate_model(model_path, config, n_episodes=10, record_video=True, seed=42
     
     env.close()
     base_env.close()
+    cv2.destroyAllWindows()
     
     # Calculate statistics
     stats = {

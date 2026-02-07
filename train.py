@@ -62,6 +62,13 @@ class SingleAgentWrapper(gym.Wrapper):
         # Gym 0.17.3: return just obs (not tuple)
         return obs
 
+    def render(self, mode='human', **kwargs):
+        out = self.env.render(mode=mode, **kwargs)
+        # Extract single agent frame if multi-agent format (num_agents, H, W, C)
+        if hasattr(out, "shape") and len(out.shape) == 4 and out.shape[0] == 1:
+            out = out[0]
+        return out
+
     def step(self, action):
         if hasattr(self.env.action_space, "shape") and len(self.env.action_space.shape) == 2:
             action = action.reshape(1, -1)
