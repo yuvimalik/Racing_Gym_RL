@@ -14,27 +14,28 @@ environment:
 # PPO hyperparameters (image-based)
 ppo:
   learning_rate: 3.0e-4
-  n_steps: 2048  # Standard value for stable policy updates
-  batch_size: 64  # Standard batch size for image-based policies
+  n_steps: 1024  # Shorter per-env rollout to improve throughput with 8 envs
+  batch_size: 1024  # Larger batch size to increase GPU utilization
   n_epochs: 10  # Standard epochs for full training
-  gamma: 0.99
+  gamma: 0.999
   gae_lambda: 0.95
   clip_range: 0.2
-  ent_coef: 0.01
+  ent_coef: 0.02
   vf_coef: 0.5
   max_grad_norm: 0.5
 
 # Policy network architecture
 policy:
-  policy_type: CnnPolicy
+  policy_type: MultiInputPolicy
 
 # Training settings
 training:
-  total_timesteps: 500000  # Full training run
-  eval_freq: 50000  # Evaluate every 10% of training (less frequent)
+  total_timesteps: 1000000  # Shorter training run to cover more of the circuit
+  eval_freq: 150000  # Evaluate roughly every 15% of training
   n_eval_episodes: 5  # More episodes for reliable evaluation stats
-  save_freq: 100000  # Save checkpoints every 100k steps
+  save_freq: 200000  # Save checkpoints every 200k steps
   log_interval: 10  # Standard logging frequency
+  num_envs: 8  # Parallel environments to boost throughput while keeping CPU usable
 
 # Paths
 paths:
@@ -44,3 +45,38 @@ paths:
 
 # Device
 device: cuda  # "auto", "cpu", or "cuda" - explicitly set to cuda to use GPU
+
+# Reward shaping (extra penalties)
+reward_shaping:
+  enabled: true
+  off_track_penalty: 1.0  # Additional penalty per step on grass
+  wrong_way_penalty: 2.0  # Additional penalty per step when driving backward
+  spinning_penalty: 0.5  # Additional penalty per step when spinning in place
+  spinning_speed_threshold: 1.0  # Below this speed, count as potential spinning
+  spinning_angular_velocity_threshold: 2.0  # Above this angular velocity, count as spinning
+  brake_on_sharp_turn_enabled: true
+  brake_reward_scale: 0.4  # Reward scale for braking on sharp turns
+  sharp_turn_threshold: 0.35  # Radians; larger means only very sharp turns qualify
+  sharp_turn_lookahead: 6  # Track points ahead to measure curvature
+  brake_min_speed: 5.0  # Only reward braking when moving fast enough
+  brake_max_reward: 0.5  # Cap bonus per step to avoid overpowering other signals
+  steer_smoothness_penalty: 0.05  # Penalize large steering changes (reduces jitter)
+  steer_delta_cap: 0.5  # Cap delta per step so sharp corrections aren't over-penalized
+  use_custom_reward: true
+  cornering_lambda: 0.1
+  centerline_inner_ratio: 0.1
+  centerline_outer_ratio: 0.5
+  centerline_inner_bonus: 0.5
+  centerline_outer_bonus: 0.1
+  off_track_terminal_penalty: -100.0
+
+# Observation augmentation
+observation:
+  enabled: false
+
+# Safety governor
+safety_governor:
+  enabled: true
+  speed_cap_ratio: 0.5
+  speed_cap_top_speed: 30.0
+  speed_cap_brake: 0.2

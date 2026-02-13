@@ -12,6 +12,7 @@ import numpy as np
 from pathlib import Path
 import gym
 import gym_multi_car_racing
+from gym_multi_car_racing import multi_car_racing as mcr
 from stable_baselines3 import PPO
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv, VecTransposeImage
@@ -85,6 +86,113 @@ class SingleAgentWrapper(gym.Wrapper):
         return obs, reward, done, info
 
 
+class SafetyGovernorWrapper(gym.Wrapper):
+    """Optional speed cap to keep the agent below a target velocity."""
+
+    def __init__(self, env, governor_config):
+        super().__init__(env)
+        governor_config = governor_config or {}
+        self.enabled = bool(
+            governor_config.get('enabled', governor_config.get('speed_cap_enabled', False))
+        )
+        self.speed_cap_ratio = float(governor_config.get('speed_cap_ratio', 0.5))
+        self.speed_cap_top_speed = float(governor_config.get('speed_cap_top_speed', 30.0))
+        self.speed_cap_brake = float(governor_config.get('speed_cap_brake', 0.2))
+
+    def step(self, action):
+        if self.enabled and action is not None:
+            base_env = self.env.unwrapped
+            if hasattr(base_env, "cars") and base_env.cars:
+                car = base_env.cars[0]
+                vel = car.hull.linearVelocity
+                speed = float(np.linalg.norm([vel[0], vel[1]]))
+                speed_cap = self.speed_cap_ratio * self.speed_cap_top_speed
+                if speed_cap > 0.0 and speed > speed_cap:
+                    action_arr = np.asarray(action).copy()
+                    orig_shape = action_arr.shape
+                    action_arr = action_arr.reshape(-1)
+                    if action_arr.size >= 3:
+                        action_arr[1] = 0.0
+                        action_arr[2] = max(float(action_arr[2]), self.speed_cap_brake)
+                    action = action_arr.reshape(orig_shape)
+        return self.env.step(action)
+
+
+class ObservationAugmentWrapper(gym.Wrapper):
+    """Augment observations with angular velocity, centerline distance, and look-ahead angles."""
+
+    def __init__(self, env, obs_config):
+        super().__init__(env)
+        obs_config = obs_config or {}
+        self.enabled = bool(obs_config.get('enabled', False))
+        if not self.enabled:
+            return
+
+        image_space = env.observation_space
+        if len(image_space.shape) != 3:
+            raise ValueError("Expected image observations of shape (H, W, C)")
+
+        c, h, w = image_space.shape[2], image_space.shape[0], image_space.shape[1]
+        self.observation_space = gym.spaces.Dict({
+            "image": gym.spaces.Box(
+                low=0,
+                high=255,
+                shape=(c, h, w),
+                dtype=image_space.dtype
+            ),
+            "state": gym.spaces.Box(
+                low=-np.inf,
+                high=np.inf,
+                shape=(4,),
+                dtype=np.float32
+            )
+        })
+
+    def _compute_state(self):
+        base_env = self.env.unwrapped
+        ang_vel = 0.0
+        dist_norm = 0.0
+        beta10 = 0.0
+        beta20 = 0.0
+
+        if hasattr(base_env, "cars") and base_env.cars:
+            car = base_env.cars[0]
+            ang_vel = float(car.hull.angularVelocity)
+            if hasattr(base_env, "track") and base_env.track:
+                car_pos = np.array(car.hull.position).reshape((1, 2))
+                track_xy = np.array(base_env.track)[:, 2:]
+                distances = np.linalg.norm(car_pos - track_xy, ord=2, axis=1)
+                track_index = int(np.argmin(distances))
+                lane_half_width = float(mcr.TRACK_WIDTH) / 2.0
+                if lane_half_width > 0.0:
+                    dist_norm = float(distances[track_index]) / lane_half_width
+
+                offset_10 = int(round(10.0 / float(mcr.TRACK_DETAIL_STEP)))
+                offset_20 = int(round(20.0 / float(mcr.TRACK_DETAIL_STEP)))
+                idx_10 = (track_index + offset_10) % len(base_env.track)
+                idx_20 = (track_index + offset_20) % len(base_env.track)
+                beta10 = float(base_env.track[idx_10][1])
+                beta20 = float(base_env.track[idx_20][1])
+
+        return np.array([ang_vel, dist_norm, beta10, beta20], dtype=np.float32)
+
+    def reset(self, **kwargs):
+        obs = self.env.reset(**kwargs)
+        if not self.enabled:
+            return obs
+        image = np.transpose(obs, (2, 0, 1))
+        state = self._compute_state()
+        return {"image": image, "state": state}
+
+    def step(self, action):
+        obs, reward, done, info = self.env.step(action)
+        if not self.enabled:
+            return obs, reward, done, info
+        image = np.transpose(obs, (2, 0, 1))
+        state = self._compute_state()
+        return {"image": image, "state": state}, reward, done, info
+
+
 def create_env(config, render_mode='rgb_array'):
     """Create evaluation environment with rendering."""
     env_config = config['environment']
@@ -104,6 +212,14 @@ def create_env(config, render_mode='rgb_array'):
 
     if env_config.get('num_agents', 1) == 1:
         env = SingleAgentWrapper(env)
+
+    governor_config = config.get('safety_governor', {})
+    if governor_config.get('enabled', False):
+        env = SafetyGovernorWrapper(env, governor_config)
+
+    obs_config = config.get('observation', {})
+    if obs_config.get('enabled', False):
+        env = ObservationAugmentWrapper(env, obs_config)
     
     return env
 
@@ -118,7 +234,8 @@ def evaluate_model(model_path, config, n_episodes=10, record_video=True, seed=42
     # Rendering is handled via env.render() calls
     base_env = create_env(config, render_mode='rgb_array' if record_video else None)
     env = DummyVecEnv([lambda: base_env])
-    env = VecTransposeImage(env)
+    if not config.get('observation', {}).get('enabled', False):
+        env = VecTransposeImage(env)
     
     # Evaluation metrics
     episode_rewards = []

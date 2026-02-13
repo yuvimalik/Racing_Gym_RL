@@ -11,10 +11,12 @@ import argparse
 from pathlib import Path
 import gym
 import gym_multi_car_racing
+import numpy as np
+from gym_multi_car_racing import multi_car_racing as mcr
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import EvalCallback, CheckpointCallback, CallbackList, BaseCallback
 from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.vec_env import DummyVecEnv, VecTransposeImage
+from stable_baselines3.common.vec_env import DummyVecEnv, VecTransposeImage, SubprocVecEnv
 from stable_baselines3.common.utils import set_random_seed
 import torch
 import time
@@ -84,6 +86,284 @@ class SingleAgentWrapper(gym.Wrapper):
         return obs, reward, done, info
 
 
+class RewardShapingWrapper(gym.Wrapper):
+    """Apply extra penalties for off-track, wrong-way, and spinning behavior."""
+
+    def __init__(self, env, reward_config):
+        super().__init__(env)
+        reward_config = reward_config or {}
+        self.enabled = reward_config.get('enabled', True)
+        self.off_track_penalty = float(reward_config.get('off_track_penalty', 0.0))
+        self.wrong_way_penalty = float(reward_config.get('wrong_way_penalty', 0.0))
+        self.spinning_penalty = float(reward_config.get('spinning_penalty', 0.0))
+        self.spinning_speed_threshold = float(reward_config.get('spinning_speed_threshold', 1.0))
+        self.spinning_angular_velocity_threshold = float(
+            reward_config.get('spinning_angular_velocity_threshold', 2.0)
+        )
+        self.brake_on_sharp_turn_enabled = bool(
+            reward_config.get('brake_on_sharp_turn_enabled', False)
+        )
+        self.brake_reward_scale = float(reward_config.get('brake_reward_scale', 0.0))
+        self.sharp_turn_threshold = float(reward_config.get('sharp_turn_threshold', 0.35))
+        self.sharp_turn_lookahead = int(reward_config.get('sharp_turn_lookahead', 6))
+        self.brake_min_speed = float(reward_config.get('brake_min_speed', 5.0))
+        self.brake_max_reward = float(reward_config.get('brake_max_reward', 0.5))
+        self.steer_smoothness_penalty = float(
+            reward_config.get('steer_smoothness_penalty', 0.0)
+        )
+        self.steer_delta_cap = float(reward_config.get('steer_delta_cap', 1.0))
+        self._prev_steer = None
+        self.use_custom_reward = bool(reward_config.get('use_custom_reward', False))
+        self.cornering_lambda = float(reward_config.get('cornering_lambda', 0.1))
+        self.centerline_inner_ratio = float(reward_config.get('centerline_inner_ratio', 0.1))
+        self.centerline_outer_ratio = float(reward_config.get('centerline_outer_ratio', 0.5))
+        self.centerline_inner_bonus = float(reward_config.get('centerline_inner_bonus', 0.5))
+        self.centerline_outer_bonus = float(reward_config.get('centerline_outer_bonus', 0.1))
+        self.off_track_terminal_penalty = float(
+            reward_config.get('off_track_terminal_penalty', -100.0)
+        )
+
+    def reset(self, **kwargs):
+        self._prev_steer = None
+        return self.env.reset(**kwargs)
+
+    def step(self, action):
+        obs, reward, done, info = self.env.step(action)
+
+        if not self.enabled:
+            return obs, reward, done, info
+
+        shaped_reward = float(reward)
+        base_env = self.env.unwrapped
+
+        # Custom reward: v * cos(theta) - lambda * v * |theta|
+        if self.use_custom_reward and action is not None:
+            action_arr = np.asarray(action).reshape(-1)
+            steer_norm = float(np.clip(action_arr[0], -1.0, 1.0)) if action_arr.size >= 1 else 0.0
+            theta = steer_norm
+            if hasattr(base_env, "cars") and base_env.cars:
+                car = base_env.cars[0]
+                vel = car.hull.linearVelocity
+                speed = float(np.linalg.norm([vel[0], vel[1]]))
+            else:
+                speed = 0.0
+            shaped_reward = speed * np.cos(theta) - (self.cornering_lambda * speed * abs(theta))
+
+        # Tiered centerline bonus based on distance to track centerline
+        if hasattr(base_env, "cars") and base_env.cars and hasattr(base_env, "track") and base_env.track:
+            car = base_env.cars[0]
+            car_pos = np.array(car.hull.position).reshape((1, 2))
+            track_xy = np.array(base_env.track)[:, 2:]
+            distance = float(np.min(np.linalg.norm(car_pos - track_xy, ord=2, axis=1)))
+            lane_half_width = float(mcr.TRACK_WIDTH) / 2.0
+            if lane_half_width > 0.0:
+                if distance <= self.centerline_inner_ratio * lane_half_width:
+                    shaped_reward += self.centerline_inner_bonus
+                elif distance <= self.centerline_outer_ratio * lane_half_width:
+                    shaped_reward += self.centerline_outer_bonus
+
+        # Off-track terminal penalty
+        driving_on_grass = getattr(base_env, "driving_on_grass", None)
+        if (
+            driving_on_grass is not None
+            and len(driving_on_grass) > 0
+            and bool(driving_on_grass[0])
+        ):
+            return obs, float(self.off_track_terminal_penalty), True, info
+
+        # Penalize off-track driving (on grass)
+        driving_on_grass = getattr(base_env, "driving_on_grass", None)
+        if (
+            self.off_track_penalty > 0.0
+            and driving_on_grass is not None
+            and len(driving_on_grass) > 0
+            and bool(driving_on_grass[0])
+        ):
+            shaped_reward -= self.off_track_penalty
+
+        # Penalize wrong-way driving
+        driving_backward = getattr(base_env, "driving_backward", None)
+        if (
+            self.wrong_way_penalty > 0.0
+            and driving_backward is not None
+            and len(driving_backward) > 0
+            and bool(driving_backward[0])
+        ):
+            shaped_reward -= self.wrong_way_penalty
+
+        # Penalize spinning/circling in place
+        if self.spinning_penalty > 0.0 and hasattr(base_env, "cars") and base_env.cars:
+            car = base_env.cars[0]
+            vel = car.hull.linearVelocity
+            speed = float(np.linalg.norm([vel[0], vel[1]]))
+            ang_vel = float(abs(car.hull.angularVelocity))
+            if (
+                speed < self.spinning_speed_threshold
+                and ang_vel > self.spinning_angular_velocity_threshold
+            ):
+                shaped_reward -= self.spinning_penalty
+
+        # Reward braking on sharp turns
+        if (
+            self.brake_on_sharp_turn_enabled
+            and self.brake_reward_scale > 0.0
+            and hasattr(base_env, "cars")
+            and base_env.cars
+            and hasattr(base_env, "track")
+            and base_env.track
+        ):
+            brake_value = 0.0
+            if action is not None:
+                action_arr = np.asarray(action).reshape(-1)
+                if action_arr.size >= 3:
+                    brake_value = float(np.clip(action_arr[2], 0.0, 1.0))
+
+            car = base_env.cars[0]
+            vel = car.hull.linearVelocity
+            speed = float(np.linalg.norm([vel[0], vel[1]]))
+
+            if brake_value > 0.0 and speed >= self.brake_min_speed:
+                car_pos = np.array(car.hull.position).reshape((1, 2))
+                track_xy = np.array(base_env.track)[:, 2:]
+                track_index = int(np.argmin(np.linalg.norm(
+                    car_pos - track_xy, ord=2, axis=1
+                )))
+
+                lookahead_index = (track_index + self.sharp_turn_lookahead) % len(base_env.track)
+                beta_now = float(base_env.track[track_index][1])
+                beta_next = float(base_env.track[lookahead_index][1])
+                angle_diff = abs(beta_next - beta_now)
+                if angle_diff > np.pi:
+                    angle_diff = abs(angle_diff - 2 * np.pi)
+
+                if angle_diff >= self.sharp_turn_threshold:
+                    sharpness = min(angle_diff / np.pi, 1.0)
+                    bonus = self.brake_reward_scale * sharpness * brake_value
+                    bonus = min(bonus, self.brake_max_reward)
+                    shaped_reward += bonus
+
+        # Penalize sharp steering changes (jitter)
+        if self.steer_smoothness_penalty > 0.0 and action is not None:
+            action_arr = np.asarray(action).reshape(-1)
+            if action_arr.size >= 1:
+                steer_value = float(action_arr[0])
+                if self._prev_steer is not None:
+                    delta = abs(steer_value - self._prev_steer)
+                    if self.steer_delta_cap > 0.0:
+                        delta = min(delta, self.steer_delta_cap)
+                    shaped_reward -= self.steer_smoothness_penalty * delta
+                self._prev_steer = steer_value
+
+        return obs, shaped_reward, done, info
+
+
+class SafetyGovernorWrapper(gym.Wrapper):
+    """Optional speed cap to keep the agent below a target velocity."""
+
+    def __init__(self, env, governor_config):
+        super().__init__(env)
+        governor_config = governor_config or {}
+        self.enabled = bool(
+            governor_config.get('enabled', governor_config.get('speed_cap_enabled', False))
+        )
+        self.speed_cap_ratio = float(governor_config.get('speed_cap_ratio', 0.5))
+        self.speed_cap_top_speed = float(governor_config.get('speed_cap_top_speed', 30.0))
+        self.speed_cap_brake = float(governor_config.get('speed_cap_brake', 0.2))
+
+    def step(self, action):
+        if self.enabled and action is not None:
+            base_env = self.env.unwrapped
+            if hasattr(base_env, "cars") and base_env.cars:
+                car = base_env.cars[0]
+                vel = car.hull.linearVelocity
+                speed = float(np.linalg.norm([vel[0], vel[1]]))
+                speed_cap = self.speed_cap_ratio * self.speed_cap_top_speed
+                if speed_cap > 0.0 and speed > speed_cap:
+                    action_arr = np.asarray(action).copy()
+                    orig_shape = action_arr.shape
+                    action_arr = action_arr.reshape(-1)
+                    if action_arr.size >= 3:
+                        action_arr[1] = 0.0
+                        action_arr[2] = max(float(action_arr[2]), self.speed_cap_brake)
+                    action = action_arr.reshape(orig_shape)
+        return self.env.step(action)
+
+
+class ObservationAugmentWrapper(gym.Wrapper):
+    """Augment observations with angular velocity, centerline distance, and look-ahead angles."""
+
+    def __init__(self, env, obs_config):
+        super().__init__(env)
+        obs_config = obs_config or {}
+        self.enabled = bool(obs_config.get('enabled', False))
+        if not self.enabled:
+            return
+
+        image_space = env.observation_space
+        if len(image_space.shape) != 3:
+            raise ValueError("Expected image observations of shape (H, W, C)")
+
+        c, h, w = image_space.shape[2], image_space.shape[0], image_space.shape[1]
+        self.observation_space = gym.spaces.Dict({
+            "image": gym.spaces.Box(
+                low=0,
+                high=255,
+                shape=(c, h, w),
+                dtype=image_space.dtype
+            ),
+            "state": gym.spaces.Box(
+                low=-np.inf,
+                high=np.inf,
+                shape=(4,),
+                dtype=np.float32
+            )
+        })
+
+    def _compute_state(self):
+        base_env = self.env.unwrapped
+        ang_vel = 0.0
+        dist_norm = 0.0
+        beta10 = 0.0
+        beta20 = 0.0
+
+        if hasattr(base_env, "cars") and base_env.cars:
+            car = base_env.cars[0]
+            ang_vel = float(car.hull.angularVelocity)
+            if hasattr(base_env, "track") and base_env.track:
+                car_pos = np.array(car.hull.position).reshape((1, 2))
+                track_xy = np.array(base_env.track)[:, 2:]
+                distances = np.linalg.norm(car_pos - track_xy, ord=2, axis=1)
+                track_index = int(np.argmin(distances))
+                lane_half_width = float(mcr.TRACK_WIDTH) / 2.0
+                if lane_half_width > 0.0:
+                    dist_norm = float(distances[track_index]) / lane_half_width
+
+                offset_10 = int(round(10.0 / float(mcr.TRACK_DETAIL_STEP)))
+                offset_20 = int(round(20.0 / float(mcr.TRACK_DETAIL_STEP)))
+                idx_10 = (track_index + offset_10) % len(base_env.track)
+                idx_20 = (track_index + offset_20) % len(base_env.track)
+                beta10 = float(base_env.track[idx_10][1])
+                beta20 = float(base_env.track[idx_20][1])
+
+        return np.array([ang_vel, dist_norm, beta10, beta20], dtype=np.float32)
+
+    def reset(self, **kwargs):
+        obs = self.env.reset(**kwargs)
+        if not self.enabled:
+            return obs
+        image = np.transpose(obs, (2, 0, 1))
+        state = self._compute_state()
+        return {"image": image, "state": state}
+
+    def step(self, action):
+        obs, reward, done, info = self.env.step(action)
+        if not self.enabled:
+            return obs, reward, done, info
+        image = np.transpose(obs, (2, 0, 1))
+        state = self._compute_state()
+        return {"image": image, "state": state}, reward, done, info
+
+
 def create_env(config, rank=0, seed=0):
     """Create and wrap the multi_car_racing environment."""
     env_config = config['environment']
@@ -101,7 +381,22 @@ def create_env(config, rank=0, seed=0):
 
     if env_config.get('num_agents', 1) == 1:
         env = SingleAgentWrapper(env)
-    
+
+    # Safety governor (optional)
+    governor_config = config.get('safety_governor', {})
+    if governor_config.get('enabled', False):
+        env = SafetyGovernorWrapper(env, governor_config)
+
+    # Reward shaping wrapper (optional)
+    reward_config = config.get('reward_shaping', {})
+    if reward_config.get('enabled', False):
+        env = RewardShapingWrapper(env, reward_config)
+
+    # Observation augmentation (optional)
+    obs_config = config.get('observation', {})
+    if obs_config.get('enabled', False):
+        env = ObservationAugmentWrapper(env, obs_config)
+
     # Wrap with Monitor for logging
     log_dir = config['paths']['log_dir']
     os.makedirs(log_dir, exist_ok=True)
@@ -116,6 +411,13 @@ def create_env(config, rank=0, seed=0):
         env.reset()
     
     return env
+
+
+def make_env(config, rank, seed):
+    def _init():
+        env = create_env(config, rank=rank, seed=seed + rank)
+        return env
+    return _init
 
 
 def get_device(config):
@@ -317,19 +619,38 @@ def main():
     if args.resume:
         print(f"Resuming from: {args.resume}")
     print("="*70 + "\n")
+
+    # GPU performance knobs
+    if device == 'cuda':
+        torch.backends.cudnn.benchmark = True
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        if hasattr(torch, "set_float32_matmul_precision"):
+            torch.set_float32_matmul_precision("high")
     
     # Create environment
     print("Creating environment...")
     env_id = config['environment'].get('env_id', 'MultiCarRacing-v0')
     print(f"Environment ID: {env_id}")
-    
-    # Wrap in vectorized environment (required for SB3)
-    env = DummyVecEnv([lambda: create_env(config, rank=0, seed=args.seed)])
-    env = VecTransposeImage(env)
+
+    # Vectorized environments for higher throughput
+    num_envs = int(config.get('training', {}).get('num_envs', 1))
+    if num_envs < 1:
+        num_envs = 1
+    obs_config = config.get('observation', {})
+    if num_envs > 1:
+        env = SubprocVecEnv([make_env(config, rank=i, seed=args.seed) for i in range(num_envs)])
+        print(f"Using SubprocVecEnv with {num_envs} parallel environments")
+    else:
+        env = DummyVecEnv([lambda: create_env(config, rank=0, seed=args.seed)])
+        print("Using DummyVecEnv with 1 environment")
+    if not obs_config.get('enabled', False):
+        env = VecTransposeImage(env)
     
     # Create evaluation environment
     eval_env = DummyVecEnv([lambda: create_env(config, rank=1, seed=args.seed + 1000)])
-    eval_env = VecTransposeImage(eval_env)
+    if not obs_config.get('enabled', False):
+        eval_env = VecTransposeImage(eval_env)
     print("Environment created successfully!\n")
     
     # Create model
@@ -338,14 +659,14 @@ def main():
         print(f"Loading model from {args.resume}")
         model = PPO.load(args.resume, env=env, device=device)
     else:
-        model = create_model(config, env.envs[0], device)
+        model = create_model(config, env, device)
     
     # Print model info
     print("\n" + "-"*70)
     print("MODEL INFORMATION")
     print("-"*70)
-    print(f"Observation space: {env.envs[0].observation_space}")
-    print(f"Action space: {env.envs[0].action_space}")
+    print(f"Observation space: {env.observation_space}")
+    print(f"Action space: {env.action_space}")
     print(f"Policy: {model.policy}")
     
     # Print hyperparameters
