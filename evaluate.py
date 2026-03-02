@@ -18,6 +18,14 @@ from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv, VecTransposeImage
 import cv2
 from datetime import datetime
+import torch
+
+# Import Torch policy and wrappers from training module for consistency
+try:
+    from train import CnnActorCritic, RewardShapingWrapper
+except ImportError:
+    CnnActorCritic = None
+    RewardShapingWrapper = None
 
 
 def load_config(config_path):
@@ -213,6 +221,12 @@ def create_env(config, render_mode='rgb_array'):
     if env_config.get('num_agents', 1) == 1:
         env = SingleAgentWrapper(env)
 
+    reward_config = config.get('reward_shaping', {})
+    if reward_config.get('enabled', False):
+        if RewardShapingWrapper is None:
+            raise RuntimeError("RewardShapingWrapper unavailable. Ensure train.py is importable.")
+        env = RewardShapingWrapper(env, reward_config)
+
     governor_config = config.get('safety_governor', {})
     if governor_config.get('enabled', False):
         env = SafetyGovernorWrapper(env, governor_config)
@@ -224,8 +238,118 @@ def create_env(config, render_mode='rgb_array'):
     return env
 
 
+def evaluate_torch_model(model_path, config, n_episodes=10, record_video=True, seed=42):
+    """Evaluate a Torch .pt checkpoint with live window and optional video."""
+    if CnnActorCritic is None:
+        raise RuntimeError("Cannot load Torch model: train.py CnnActorCritic not available")
+    model_path = Path(model_path)
+    if not model_path.is_file():
+        raise FileNotFoundError(f"Torch checkpoint not found: {model_path}")
+    print(f"Loading Torch checkpoint from {model_path}")
+    payload = torch.load(str(model_path), map_location="cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    base_env = create_env(config)
+    # Observation from env is (H, W, C); policy expects (C, H, W)
+    raw_shape = base_env.observation_space.shape
+    obs_shape = (raw_shape[2], raw_shape[0], raw_shape[1])  # (C, H, W)
+    action_dim = int(np.prod(base_env.action_space.shape))
+    action_low = np.array(base_env.action_space.low, dtype=np.float32)
+    action_high = np.array(base_env.action_space.high, dtype=np.float32)
+
+    policy = CnnActorCritic(obs_shape, action_dim)
+    policy.load_state_dict(payload["policy_state_dict"])
+    policy.to(device)
+    policy.eval()
+
+    episode_rewards = []
+    episode_lengths = []
+    episode_progress = []
+    episode_times = []
+    episode_offtrack = []
+    episode_steer_variance = []
+    results_dir = Path(config["paths"]["results_dir"])
+    results_dir.mkdir(parents=True, exist_ok=True)
+    video_writer = None
+    video_path = results_dir / f"evaluation_torch_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4" if record_video else None
+
+    np.random.seed(seed)
+    print(f"Evaluating Torch model for {n_episodes} episodes (live window + {'video' if record_video else 'no video'})...")
+    for episode in range(n_episodes):
+        obs = base_env.reset()
+        done = False
+        episode_reward = 0.0
+        episode_length = 0
+        start_time = None
+        offtrack_seen = False
+        steer_values = []
+        while not done:
+            # (H,W,C) -> (1,C,H,W), normalize to [0,1]
+            obs_t = torch.as_tensor(obs, dtype=torch.float32, device=device) / 255.0
+            obs_t = obs_t.permute(2, 0, 1).unsqueeze(0)  # HWC -> CHW, add batch
+            with torch.no_grad():
+                raw_action, _, _ = policy.act(obs_t, deterministic=True)
+            env_action = CnnActorCritic.raw_to_env_action(raw_action).cpu().numpy().squeeze(0)
+            env_action = np.clip(env_action, action_low, action_high)
+            obs, reward, done, info = base_env.step(env_action)
+            episode_reward += float(reward)
+            episode_length += 1
+            steer_values.append(float(env_action[0]))
+            info = info if isinstance(info, dict) else {}
+            if int(info.get("events/offtrack", 0)) > 0:
+                offtrack_seen = True
+            if start_time is None and info.get("time") is not None:
+                start_time = info["time"]
+            frame = base_env.render(mode="rgb_array")
+            if frame is not None:
+                if record_video:
+                    if video_writer is None:
+                        h, w = frame.shape[:2]
+                        video_writer = cv2.VideoWriter(str(video_path), cv2.VideoWriter_fourcc(*"mp4v"), 30.0, (w, h))
+                    video_writer.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+                frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                cv2.imshow("Racecar Gym (Torch policy)", frame_bgr)
+                cv2.waitKey(1)
+        progress = info.get("progress", 0.0)
+        final_time = info.get("time", 0.0)
+        episode_time = final_time - start_time if start_time is not None else 0.0
+        episode_rewards.append(episode_reward)
+        episode_lengths.append(episode_length)
+        episode_progress.append(progress)
+        episode_times.append(episode_time)
+        episode_offtrack.append(int(offtrack_seen))
+        episode_steer_variance.append(float(np.var(steer_values)) if len(steer_values) > 1 else 0.0)
+        print(f"Episode {episode + 1}/{n_episodes}: Reward={episode_reward:.2f}, Length={episode_length}, Progress={progress:.2%}, Time={episode_time:.2f}s")
+    if video_writer is not None:
+        video_writer.release()
+        print(f"Video saved to {video_path}")
+    base_env.close()
+    cv2.destroyAllWindows()
+    stats = {
+        "mean_reward": float(np.mean(episode_rewards)),
+        "std_reward": float(np.std(episode_rewards)),
+        "min_reward": float(np.min(episode_rewards)),
+        "max_reward": float(np.max(episode_rewards)),
+        "mean_length": float(np.mean(episode_lengths)),
+        "std_length": float(np.std(episode_lengths)),
+        "mean_progress": float(np.mean(episode_progress)),
+        "std_progress": float(np.std(episode_progress)),
+        "mean_time": float(np.mean(episode_times)),
+        "std_time": float(np.std(episode_times)),
+        "offtrack_rate": float(np.mean(episode_offtrack)),
+        "mean_steer_variance": float(np.mean(episode_steer_variance)),
+        "episode_rewards": episode_rewards,
+        "episode_lengths": episode_lengths,
+        "episode_progress": episode_progress,
+        "episode_times": episode_times,
+        "episode_offtrack": episode_offtrack,
+        "episode_steer_variance": episode_steer_variance,
+    }
+    return stats, str(video_path) if video_path else None
+
+
 def evaluate_model(model_path, config, n_episodes=10, record_video=True, seed=42):
-    """Evaluate a trained model."""
+    """Evaluate a trained SB3 model."""
     print(f"Loading model from {model_path}")
     model = PPO.load(model_path)
     
@@ -242,6 +366,8 @@ def evaluate_model(model_path, config, n_episodes=10, record_video=True, seed=42
     episode_lengths = []
     episode_progress = []
     episode_times = []
+    episode_offtrack = []
+    episode_steer_variance = []
     
     results_dir = Path(config['paths']['results_dir'])
     results_dir.mkdir(parents=True, exist_ok=True)
@@ -261,9 +387,12 @@ def evaluate_model(model_path, config, n_episodes=10, record_video=True, seed=42
         episode_reward = 0
         episode_length = 0
         start_time = None
+        offtrack_seen = False
+        steer_values = []
         
         while not done:
             action, _ = model.predict(obs, deterministic=True)
+            steer_values.append(float(np.asarray(action).reshape(-1)[0]))
             
             obs, reward, done, info = env.step(action)
             
@@ -272,14 +401,10 @@ def evaluate_model(model_path, config, n_episodes=10, record_video=True, seed=42
             
             # Record first frame time
             info0 = info[0] if isinstance(info, (list, tuple)) else info
-            if episode == 0 and episode_length == 1:
-                print(f"DEBUG info type: {type(info)}, info0 type: {type(info0)}", flush=True)
-                if isinstance(info0, dict):
-                    print(f"DEBUG info0 keys: {list(info0.keys())}", flush=True)
-                else:
-                    print(f"DEBUG info0 content: {info0}", flush=True)
             if start_time is None and isinstance(info0, dict) and 'time' in info0:
                 start_time = info0['time']
+            if isinstance(info0, dict) and int(info0.get("events/offtrack", 0)) > 0:
+                offtrack_seen = True
             
             # Get frame for video or live view
             frame = base_env.render(mode='rgb_array')
@@ -299,11 +424,6 @@ def evaluate_model(model_path, config, n_episodes=10, record_video=True, seed=42
                 # Convert if not already done
                 if 'frame_bgr' not in locals():
                      frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-                
-                # Debug frame stats on first frame
-                if episode == 0 and episode_length == 1:
-                    print(f"DEBUG Frame stats: dtype={frame.dtype}, min={np.min(frame)}, max={np.max(frame)}", flush=True)
-                
                 cv2.imshow("Racecar Gym Evaluation", frame_bgr)
                 cv2.waitKey(1)
         
@@ -317,6 +437,8 @@ def evaluate_model(model_path, config, n_episodes=10, record_video=True, seed=42
         episode_lengths.append(episode_length)
         episode_progress.append(progress)
         episode_times.append(episode_time)
+        episode_offtrack.append(int(offtrack_seen))
+        episode_steer_variance.append(float(np.var(steer_values)) if len(steer_values) > 1 else 0.0)
         
         print(f"Episode {episode + 1}/{n_episodes}: "
               f"Reward={episode_reward:.2f}, "
@@ -345,10 +467,14 @@ def evaluate_model(model_path, config, n_episodes=10, record_video=True, seed=42
         'std_progress': np.std(episode_progress),
         'mean_time': np.mean(episode_times),
         'std_time': np.std(episode_times),
+        'offtrack_rate': np.mean(episode_offtrack),
+        'mean_steer_variance': np.mean(episode_steer_variance),
         'episode_rewards': episode_rewards,
         'episode_lengths': episode_lengths,
         'episode_progress': episode_progress,
-        'episode_times': episode_times
+        'episode_times': episode_times,
+        'episode_offtrack': episode_offtrack,
+        'episode_steer_variance': episode_steer_variance,
     }
     
     return stats, video_path
@@ -359,11 +485,15 @@ def print_stats(stats):
     print("\n" + "="*50)
     print("EVALUATION RESULTS")
     print("="*50)
-    print(f"Mean Reward: {stats['mean_reward']:.2f} ± {stats['std_reward']:.2f}")
+    print(f"Mean Reward: {stats['mean_reward']:.2f} +/- {stats['std_reward']:.2f}")
     print(f"Reward Range: [{stats['min_reward']:.2f}, {stats['max_reward']:.2f}]")
-    print(f"Mean Episode Length: {stats['mean_length']:.1f} ± {stats['std_length']:.1f}")
-    print(f"Mean Progress: {stats['mean_progress']:.2%} ± {stats['std_progress']:.2%}")
-    print(f"Mean Episode Time: {stats['mean_time']:.2f}s ± {stats['std_time']:.2f}s")
+    print(f"Mean Episode Length: {stats['mean_length']:.1f} +/- {stats['std_length']:.1f}")
+    print(f"Mean Progress: {stats['mean_progress']:.2%} +/- {stats['std_progress']:.2%}")
+    print(f"Mean Episode Time: {stats['mean_time']:.2f}s +/- {stats['std_time']:.2f}s")
+    if 'offtrack_rate' in stats:
+        print(f"Off-track Rate: {stats['offtrack_rate']:.2%}")
+    if 'mean_steer_variance' in stats:
+        print(f"Mean Steering Variance: {stats['mean_steer_variance']:.5f}")
     print("="*50)
 
 
@@ -383,10 +513,14 @@ def save_stats(stats, output_path):
         'std_progress': float(stats['std_progress']),
         'mean_time': float(stats['mean_time']),
         'std_time': float(stats['std_time']),
+        'offtrack_rate': float(stats.get('offtrack_rate', 0.0)),
+        'mean_steer_variance': float(stats.get('mean_steer_variance', 0.0)),
         'episode_rewards': [float(r) for r in stats['episode_rewards']],
         'episode_lengths': [int(l) for l in stats['episode_lengths']],
         'episode_progress': [float(p) for p in stats['episode_progress']],
-        'episode_times': [float(t) for t in stats['episode_times']]
+        'episode_times': [float(t) for t in stats['episode_times']],
+        'episode_offtrack': [int(v) for v in stats.get('episode_offtrack', [])],
+        'episode_steer_variance': [float(v) for v in stats.get('episode_steer_variance', [])],
     }
     
     with open(output_path, 'w') as f:
@@ -432,14 +566,24 @@ def main():
     # Load configuration
     config = load_config(args.config)
     
-    # Evaluate model
-    stats, video_path = evaluate_model(
-        args.model,
-        config,
-        n_episodes=args.episodes,
-        record_video=not args.no_video,
-        seed=args.seed
-    )
+    # Evaluate model (Torch .pt or SB3 .zip)
+    model_path = Path(args.model)
+    if model_path.suffix.lower() == ".pt":
+        stats, video_path = evaluate_torch_model(
+            model_path,
+            config,
+            n_episodes=args.episodes,
+            record_video=not args.no_video,
+            seed=args.seed,
+        )
+    else:
+        stats, video_path = evaluate_model(
+            args.model,
+            config,
+            n_episodes=args.episodes,
+            record_video=not args.no_video,
+            seed=args.seed,
+        )
     
     # Print statistics
     print_stats(stats)
@@ -453,3 +597,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+

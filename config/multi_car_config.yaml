@@ -5,37 +5,58 @@ environment:
   env_id: MultiCarRacing-v0
   num_agents: 1
   direction: CCW
-  use_random_direction: true
+  use_random_direction: false
   backwards_flag: true
   h_ratio: 0.25
   use_ego_color: false
-  render_mode: null  # "human" or "rgb_array"
+  render_mode: null
 
-# PPO hyperparameters (image-based)
+# PPO hyperparameters
 ppo:
-  learning_rate: 3.0e-4
-  n_steps: 1024  # Shorter per-env rollout to improve throughput with 8 envs
-  batch_size: 1024  # Larger batch size to increase GPU utilization
-  n_epochs: 10  # Standard epochs for full training
-  gamma: 0.999
-  gae_lambda: 0.95
-  clip_range: 0.2
-  ent_coef: 0.02
-  vf_coef: 0.5
+  learning_rate: 2.5e-4
+  n_steps: 1024       # Longer rollouts for better advantage estimation
+  batch_size: 256      # Larger batch for stable gradients
+  n_epochs: 4          # Fewer epochs to prevent over-fitting each rollout
+  gamma: 0.99          # Standard discount factor
+  gae_lambda: 0.95     # Standard GAE lambda
+  clip_range: 0.2      # Standard PPO clip range
+  ent_coef: 0.05       # Higher entropy to prevent steering from collapsing to one direction (donut fix)
+  vf_coef: 0.25        # Lower value loss weight (separate heads handle most of it)
   max_grad_norm: 0.5
+  min_log_std: -1.0       # Global floor for throttle/brake std
+  max_log_std: 0.5        # Global ceiling for throttle/brake std
+  steer_min_log_std: -0.5 # Steer floor: exp(-0.5)=0.61 — enough variance to explore corners
+  steer_max_log_std: 0.3  # Steer ceiling: exp(0.3)=1.35 — prevents wildly chaotic steering
 
 # Policy network architecture
 policy:
-  policy_type: MultiInputPolicy
+  policy_type: CnnPolicy
 
 # Training settings
 training:
-  total_timesteps: 1000000  # Shorter training run to cover more of the circuit
-  eval_freq: 150000  # Evaluate roughly every 15% of training
-  n_eval_episodes: 5  # More episodes for reliable evaluation stats
-  save_freq: 200000  # Save checkpoints every 200k steps
-  log_interval: 10  # Standard logging frequency
-  num_envs: 8  # Parallel environments to boost throughput while keeping CPU usable
+  trainer_backend: torch
+  total_timesteps: 500000
+  eval_freq: 5000
+  n_eval_episodes: 5
+  save_freq: 25000
+  log_interval: 5
+  num_envs: 8
+  fail_fast:
+    enabled: true
+    min_timesteps_before_check: 40000   # Give more time before checking
+    min_mean_progress: 0.05
+    min_mean_speed: 1.0
+    patience_evals: 5                   # More patience
+  visual_eval:
+    enabled: true
+    freq: 50000
+    n_episodes: 1
+  success_gate:
+    enabled: true
+    mean_reward_threshold: 150.0
+    mean_progress_threshold: 0.95
+    max_offtrack_rate: 0.05
+    min_eval_episodes: 5
 
 # Paths
 paths:
@@ -44,31 +65,43 @@ paths:
   results_dir: ./results
 
 # Device
-device: cuda  # "auto", "cpu", or "cuda" - explicitly set to cuda to use GPU
+device: cuda
 
-# Reward shaping (extra penalties)
+# Reward shaping - simplified for stable learning
 reward_shaping:
   enabled: true
-  off_track_penalty: 1.0  # Additional penalty per step on grass
-  wrong_way_penalty: 2.0  # Additional penalty per step when driving backward
-  spinning_penalty: 0.5  # Additional penalty per step when spinning in place
-  spinning_speed_threshold: 1.0  # Below this speed, count as potential spinning
-  spinning_angular_velocity_threshold: 2.0  # Above this angular velocity, count as spinning
-  brake_on_sharp_turn_enabled: true
-  brake_reward_scale: 0.4  # Reward scale for braking on sharp turns
-  sharp_turn_threshold: 0.35  # Radians; larger means only very sharp turns qualify
-  sharp_turn_lookahead: 6  # Track points ahead to measure curvature
-  brake_min_speed: 5.0  # Only reward braking when moving fast enough
-  brake_max_reward: 0.5  # Cap bonus per step to avoid overpowering other signals
-  steer_smoothness_penalty: 0.05  # Penalize large steering changes (reduces jitter)
-  steer_delta_cap: 0.5  # Cap delta per step so sharp corrections aren't over-penalized
   use_custom_reward: true
-  cornering_lambda: 0.1
-  centerline_inner_ratio: 0.1
-  centerline_outer_ratio: 0.5
-  centerline_inner_bonus: 0.5
-  centerline_outer_bonus: 0.1
-  off_track_terminal_penalty: -100.0
+  forward_progress_scale: 300.0        # Scales tile-progress delta (0→1/lap → ~300 reward/lap)
+  straight_speed_scale: 0.05           # On-track speed bonus (gated: 0 while off-track)
+  sharp_turn_threshold: 0.35
+  sharp_turn_lookahead: 6
+  corner_target_speed: 8.0
+  corner_overspeed_penalty_scale: 0.2  # Gentle corner penalty
+  apex_decel_reward_scale: 0.2
+  apex_decel_reward_cap: 0.5
+  steer_smoothness_penalty: 0.02
+  steer_delta_cap: 0.5
+  steer_magnitude_penalty: 0.03      # Penalises |steer|² — small turns cheap, full-lock expensive
+  time_penalty: -0.02                  # Gentle time pressure (was -0.08)
+  idle_speed_threshold: 1.0
+  idle_penalty: -0.5                   # Stronger nudge to keep moving (can't game speed off-track now)
+  throttle_bonus_scale: 0.0            # Disabled — was gamed by driving off-track at full throttle
+  brake_penalty_scale: 0.05
+  launch_boost_steps: 150              # Longer launch window
+  launch_speed_target: 5.0
+  launch_bonus_scale: 0.8              # Strong launch incentive
+  stuck_speed_threshold: 0.8
+  stuck_progress_epsilon: 0.001
+  stuck_max_steps: 150                 # More patience before stuck termination
+  stuck_terminal_penalty: -30.0        # Reduced from -80
+  no_progress_max_steps: 200           # Terminate if zero tile progress for 200 steps (catches donuts)
+  no_progress_terminal_penalty: -15.0  # Penalty for donut/stall termination
+  yaw_rate_penalty: 0.1               # Per-step penalty on angular velocity (discourages spinning)
+  off_track_mode: terminate            # Instant termination — off-track reward-gaming is fixed
+  off_track_terminal_penalty: -10.0   # Small penalty since episode ends anyway
+  off_track_step_penalty: -3.0        # Unused in terminate mode
+  curriculum:
+    enabled: false                     # Disable curriculum until basics work
 
 # Observation augmentation
 observation:
@@ -76,7 +109,7 @@ observation:
 
 # Safety governor
 safety_governor:
-  enabled: true
+  enabled: false
   speed_cap_ratio: 0.5
   speed_cap_top_speed: 30.0
   speed_cap_brake: 0.2

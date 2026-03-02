@@ -1,392 +1,169 @@
-# Training History and Iterations
+# Training History & Debug Log
 
-This document tracks the evolution of the racing RL agent, including reward function revisions, hyperparameter changes, and lessons learned throughout the training process.
-
-## Overview
-
-The project trains a PPO agent to drive a car in the `multi_car_racing` environment. The training process involved multiple iterations focused on addressing specific behavioral issues through reward shaping and hyperparameter tuning.
+Tracks every training run, problem encountered, root-cause diagnosis, and code/config change made.
 
 ---
 
-## Initial Training Phase
+## Architecture Timeline
 
-### Baseline Configuration
-- **Total Timesteps**: 500,000
-- **n_steps**: 2048
-- **batch_size**: 64
-- **n_epochs**: 10
-- **Learning Rate**: 3.0e-4
-- **Policy**: CnnPolicy (image-based)
-
-### Initial Observations
-- Agent learned basic driving behavior
-- Successfully completed laps
-- Mean reward improved from -61.5 to 282+ over training
-- Episodes consistently reached max length (1000 steps)
+### Phase 0 — Stable-Baselines3 (SB3) Backend (historical)
+- Used SB3 `PPO` with `CnnPolicy` directly.
+- **Result**: Car successfully drove laps. Reward improved from −61.5 → 282+ over 500k steps.
+- **Problem**: Teacher required switching to custom PyTorch backend.
 
 ---
 
-## Issue 1: Speed Overweighting
+### Phase 1 — Custom PyTorch PPO (first attempt)
+**Backend**: `TorchPPOTrainer` in `train.py`
+**Architecture**: `CnnActorCritic` with shared CNN + single `self.shared` MLP (512-dim) feeding both policy head and value head.
 
-### Problem Description
-The agent was prioritizing high speeds over safe driving, leading to:
-- Excessive speed on straight sections
-- Inability to slow down appropriately for turns
-- Frequent crashes when encountering sharp corners
-- Poor cornering performance
-
-### Root Cause Analysis
-The base reward function from `multi_car_racing` environment:
-- Rewards track progress (touching new tiles)
-- Small time penalty (-0.1 per step)
-- No explicit speed regulation
-- Agent learned that faster = more tiles touched = higher reward
-
-### Initial Attempts
-1. **Speed Penalty**: Added negative reward proportional to speed
-   - Result: Agent learned to drive very slowly everywhere
-   - Issue: Global speed reduction, not selective braking
-
-2. **Speed Cap**: Implemented safety governor to cap maximum speed
-   - Result: Reduced crashes but didn't solve cornering issue
-   - Issue: Still no incentive for optimal speed management
+#### Run 1 — Donut / No Movement
+- **Observed**: Car either did donut-like behaviour off-track or did not move at all.
+- **Cause**: Multiple compounding bugs (see below).
 
 ---
 
-## Issue 2: Sharp Turn Handling
+## Bug Log
 
-### Problem Description
-Agent struggled specifically with sharp turns:
-- Would maintain high speed entering corners
-- Would crash or go off-track on tight turns
-- No understanding of when to brake vs. accelerate
-
-### Reward Shaping Approach
-
-#### Sharp Turn Detection
-Implemented curvature-based detection:
-```python
-# Calculate track curvature ahead
-curvature = measure_track_curvature(track_points_ahead)
-is_sharp_turn = curvature > sharp_turn_threshold  # 0.35 radians
-```
-
-#### Braking Reward for Sharp Turns
-Added positive reward for braking when approaching sharp turns:
-```python
-if is_sharp_turn and speed > brake_min_speed:
-    brake_reward = brake_action * brake_reward_scale
-    # Reward scale: 0.4
-    # Only applies when speed > 5.0
-    # Capped at 0.5 per step
-```
-
-**Parameters**:
-- `sharp_turn_threshold`: 0.35 radians (very sharp turns only)
-- `sharp_turn_lookahead`: 6 track points ahead
-- `brake_reward_scale`: 0.4
-- `brake_min_speed`: 5.0 (only reward braking when moving fast)
-- `brake_max_reward`: 0.5 (cap to avoid overpowering)
-
-### Results
-- Some improvement in cornering behavior
-- Agent began to slow down before sharp turns
-- Still struggled with optimal speed management
+### Bug 1 — GAE Off-by-One
+**File**: `train.py` → `RolloutBuffer.compute_returns_advantages()`
+**Symptom**: Policy instability, rewards not improving.
+**Root cause**: `self.dones[step + 1]` used instead of `self.dones[step]`, causing value bootstraps to leak across episode boundaries.
+**Fix**: Changed to `self.dones[step]`.
 
 ---
 
-## Issue 3: Off-Track Behavior
-
-### Problem Description
-Agent would frequently go off-track:
-- Would cut corners too aggressively
-- Would drive on grass to "shortcut"
-- Episodes would continue even after going off-track
-- No strong disincentive for leaving the track
-
-### Solution: Terminal Off-Track Penalty
-
-#### Implementation
-Made going off-track a terminal event with large penalty:
-```python
-if car_on_grass:
-    reward += off_track_penalty  # -1.0 per step
-    if terminal:
-        reward += off_track_terminal_penalty  # -100.0
-        done = True  # End episode immediately
+### Bug 2 — Steering Collapse (shared log_std)
+**Observed** (step 57,344 eval):
 ```
-
-**Parameters**:
-- `off_track_penalty`: 1.0 (per-step penalty while on grass)
-- `off_track_terminal_penalty`: -100.0 (large penalty when episode terminates)
-- Episode terminates immediately when going off-track
-
-### Results
-- Strong disincentive for leaving track
-- Agent learned to stay on track more consistently
-- Reduced corner-cutting behavior
-- Episodes ended immediately on off-track events
+throttle=1.00, brake=0.00, speed=11.28
+steer_var=0.00000, progress=0.00%, offtrack_rate=100%
+```
+**Root cause**: Single shared `log_std` parameter — throttle saturated quickly, pulling all dimensions toward low std. Steering collapsed to one fixed direction.
+**Fix**:
+- Per-dimension `log_std` init: steer=0.0, throttle=−0.5, brake=−1.0
+- Raised `min_log_std` −1.5 → −1.0
+- Raised `ent_coef` 0.01 → 0.03
 
 ---
 
-## Issue 4: Speed Management Optimization
-
-### Problem Description
-After implementing speed penalties, agent exhibited:
-- **Global low speeds**: Consistently slow everywhere, not just in corners
-- **No optimized braking**: Would brake unnecessarily on straights
-- **Poor lap times**: Too conservative overall
-- **Lack of speed variation**: No understanding of when to speed up vs. slow down
-
-### Training Run: 1,000,000 Steps with 1024 Batch Size
-
-#### Configuration Changes
-- **Total Timesteps**: Increased to 1,000,000
-- **batch_size**: Increased to 1024 (from 64)
-- **n_steps**: Reduced to 1024 (from 2048)
-- **num_envs**: 8 parallel environments
-- **gamma**: Increased to 0.999 (from 0.99) for longer-term planning
-
-#### Reward Shaping Attempts
-
-**Attempt 1: Speed-Based Penalties**
-```python
-# Penalty proportional to speed
-speed_penalty = -speed * speed_penalty_coefficient
+### Bug 3 — Policy Collapse (shared MLP head)
+**Observed** (step 73,728 eval):
 ```
-- **Result**: Agent learned to minimize speed globally
-- **Issue**: No differentiation between appropriate speeds for different track sections
-
-**Attempt 2: Conditional Speed Penalties**
-```python
-# Only penalize high speed on sharp turns
-if is_sharp_turn and speed > threshold:
-    speed_penalty = -(speed - threshold) * penalty_coefficient
+throttle=0.00, brake=0.19, speed=0.00
+steer_var=0.00000, progress=0.00%
+FailFast triggered
 ```
-- **Result**: Some improvement but still too conservative
-- **Issue**: Threshold tuning was difficult
+**Root cause**: Value function gradient flowing back through the single shared MLP (`self.shared`) corrupted policy features. SB3's `CnnPolicy` avoids this with separate MLP heads for actor and critic — our custom net did not.
+**Fix**: Replaced `self.shared → Linear(n_flatten, 512)` with separate:
+- `self.policy_mlp`: `n_flatten → 256 → 128` (feeds `policy_mean`)
+- `self.value_mlp`: `n_flatten → 256 → 128` (feeds `value_head`)
 
-**Attempt 3: Braking Reward (Current)**
-```python
-# Reward braking specifically on sharp turns
-if is_sharp_turn and speed > brake_min_speed:
-    brake_reward = brake_action * brake_reward_scale
-```
-- **Result**: Agent learned to brake for turns but still maintains low speeds globally
-- **Issue**: No incentive to speed up on straights
-
-### Current State
-The agent demonstrates:
-- ✅ Proper braking behavior on sharp turns
-- ✅ Staying on track (terminal penalty working)
-- ❌ Consistently low speeds everywhere
-- ❌ No speed optimization (slow on straights, slow in corners)
-- ❌ Poor lap time performance
+`_latent()` removed; `get_dist_and_value()` routes through separate paths.
+**Also**: `n_epochs` 10 → 4, `vf_coef` 0.5 → 0.25.
 
 ---
 
-## Mathematical Formulation
+### Bug 4 — Reward Hacking via Velocity·Track (off-track driving)
+**Observed** (eval of `best_model_torch.pt`):
+```
+Mean Reward: 6861.91, Progress: 0.00%, Off-track Rate: 100%
+Episode Length: 953 steps, Steer Variance: 0.05178
+```
+**Root cause**: `comp_forward = forward_progress_scale × dot(velocity, track_dir)`
+This rewards moving fast in the approximate track direction regardless of whether the car is on the track. The car learned to drive at full throttle on grass in the track direction, earning ~12 reward/step vs. only −3/step off-track penalty. Result: 6861 reward, 0% actual lap progress.
 
-### Base Reward Function
-```
-R_base = track_progress_reward - time_penalty - backward_penalty
-```
+**Fix**:
+- Changed `comp_forward` to use **actual tile progress delta**: `forward_progress_scale × progress_delta`
+- `forward_progress_scale`: 1.5 → **300.0** (scales progress 0→1 to meaningful reward per lap)
+- Gated `comp_straight_speed` to **on-track only** (`× 0 if is_offtrack`)
+- `throttle_bonus_scale`: 0.3 → **0.0** (was also gamed off-track)
+- `off_track_mode`: penalty → **terminate** (instant episode end on grass)
+- `idle_penalty`: −0.2 → **−0.5**
 
-Where:
-- `track_progress_reward`: +1000.0 / track_length per new tile touched
-- `time_penalty`: -0.1 per step
-- `backward_penalty`: -K_BACKWARD * angle_diff if driving wrong direction
-
-### Enhanced Reward Function (Current)
-```
-R_total = R_base + R_shaping
-```
-
-Where `R_shaping` includes:
-
-#### Off-Track Penalties
-```
-R_off_track = {
-    -1.0 * steps_on_grass,           if on grass
-    -100.0,                           if episode terminates off-track
-    0,                                otherwise
-}
-```
-
-#### Sharp Turn Braking Reward
-```
-R_brake = {
-    brake_action * 0.4,               if is_sharp_turn AND speed > 5.0
-    0,                                otherwise
-}
-```
-
-Capped at 0.5 per step.
-
-#### Steering Smoothness Penalty
-```
-R_steer = -0.05 * min(|steer_delta|, 0.5)
-```
-
-Penalizes large steering changes to reduce jitter.
-
-#### Cornering and Centerline Rewards
-```
-R_cornering = cornering_lambda * cornering_score
-R_centerline = {
-    +0.5,                             if near inner edge (10% of track width)
-    +0.1,                             if near outer edge (50% of track width)
-    0,                                otherwise
-}
-```
+Progress_delta computation moved to top of `step()` so it is available for both reward and stuck detection.
 
 ---
 
-## Key Lessons Learned
+### Bug 5 — Donut Behaviour (spinning on track)
+**Observed**: Car moves forward briefly then spins in circles on the track for the rest of the episode.
+**Root cause**: Stuck detection only fires when `speed < 0.8 AND progress < 0.001`. A car doing donuts has high speed (passes the speed check) but zero tile progress — counter never increments, car spins forever with no termination.
 
-### 1. Reward Shaping Balance
-- **Too much penalty**: Agent becomes overly conservative (global low speeds)
-- **Too little penalty**: Agent takes risks and crashes frequently
-- **Solution needed**: Context-aware rewards that vary by track conditions
+**Fixes**:
+1. **No-progress termination** (new `_no_progress_steps` counter):
+   Increments every step `progress_delta < epsilon`, regardless of speed.
+   Terminates after `no_progress_max_steps` (200) steps. Catches fast-spinning that old stuck detector missed.
+   - `no_progress_max_steps: 200`, `no_progress_terminal_penalty: −15.0`
 
-### 2. Speed Management
-- **Problem**: Speed is a global behavior, hard to condition on local track geometry
-- **Challenge**: Agent needs to learn speed profiles (fast on straights, slow in corners)
-- **Current limitation**: Reward function doesn't explicitly encode this pattern
+2. **Yaw-rate penalty** (`comp_yaw = −yaw_rate_penalty × |angular_velocity|`):
+   Directly taxes spinning via Box2D `hull.angularVelocity`. Normal cornering has mild yaw; sustained donuts have very high yaw.
+   - `yaw_rate_penalty: 0.1`
 
-### 3. Terminal Events
-- **Success**: Making off-track terminal with large penalty worked well
-- **Benefit**: Clear signal that going off-track is catastrophic
-- **Trade-off**: Episodes end immediately, reducing data collection
-
-### 4. Batch Size and Training Efficiency
-- **1024 batch size**: Improved GPU utilization
-- **8 parallel envs**: Increased sample throughput
-- **Trade-off**: Larger batches may require more samples to converge
+3. **Higher entropy**: `ent_coef` 0.03 → **0.05** to prevent steering from collapsing to a fixed angle.
 
 ---
 
-## Current Configuration Summary
+## Current Configuration (as of latest changes)
 
-### Hyperparameters
-- **total_timesteps**: 1,000,000
-- **n_steps**: 1024
-- **batch_size**: 1024
-- **n_epochs**: 10
-- **learning_rate**: 3.0e-4
-- **gamma**: 0.999
-- **num_envs**: 8
+### PPO Hyperparameters
+| Param | Value |
+|---|---|
+| learning_rate | 2.5e-4 |
+| n_steps | 1024 |
+| batch_size | 256 |
+| n_epochs | 4 |
+| gamma | 0.99 |
+| gae_lambda | 0.95 |
+| clip_range | 0.2 |
+| ent_coef | 0.05 |
+| vf_coef | 0.25 |
+| max_grad_norm | 0.5 |
+| min_log_std | −1.0 |
+| max_log_std | 0.5 |
 
-### Reward Shaping Parameters
-- **off_track_penalty**: 1.0 per step
-- **off_track_terminal_penalty**: -100.0
-- **brake_reward_scale**: 0.4
-- **sharp_turn_threshold**: 0.35 radians
-- **brake_min_speed**: 5.0
-- **steer_smoothness_penalty**: 0.05
+### Reward Components (per step)
+| Component | Formula | Purpose |
+|---|---|---|
+| `comp_forward` | `300 × progress_delta` | Actual lap tile progress (primary signal) |
+| `comp_straight_speed` | `0.05 × speed × (on_track)` | Speed bonus, gated to track only |
+| `comp_corner_overspeed` | `−0.2 × max(0, speed−8)` (corners) | Slow down for turns |
+| `comp_apex_decel` | `+0.2 × speed_delta` (corners) | Reward braking into turns |
+| `comp_steer_smooth` | `−0.02 × |steer_delta|` | Smooth steering |
+| `comp_yaw` | `−0.1 × |yaw_rate|` | Penalise spinning/donuts |
+| `comp_time` | `−0.02` | Time pressure |
+| `comp_idle` | `−0.5` (if speed < 1.0) | Discourage stopping |
+| `comp_launch` | `+0.8 × throttle` (first 150 steps) | Launch boost |
+| `comp_brake` | `−0.05 × brake` (straights) | Discourage braking off-corners |
 
-### Policy Architecture
-- **Policy Type**: MultiInputPolicy (supports multiple observation types)
-- **Observation**: 96x96 RGB image
-- **Action Space**: Continuous [steering, gas, brake] ∈ [-1, 1]³
+### Termination Events
+| Event | Condition | Penalty |
+|---|---|---|
+| Off-track | `driving_on_grass[0] == True` | −10 + done |
+| Stuck | `speed < 0.8 AND progress < 0.001` for 150 steps | −30 + done |
+| No-progress | `progress < 0.001` for 200 steps (any speed) | −15 + done |
 
----
-
-## Future Directions
-
-### Potential Solutions for Speed Optimization
-
-1. **Speed Profile Learning**
-   - Add reward for maintaining optimal speed for current track section
-   - Use track curvature to define speed targets
-   - Reward agent for matching target speed profile
-
-2. **Differential Rewards**
-   - High reward for fast speeds on low-curvature sections
-   - Low/no penalty for slow speeds on high-curvature sections
-   - Explicit speed targets based on track geometry
-
-3. **Curriculum Learning**
-   - Start with simple tracks (few sharp turns)
-   - Gradually increase track complexity
-   - Allow agent to learn speed management incrementally
-
-4. **Multi-Objective Optimization**
-   - Separate rewards for speed and safety
-   - Use Pareto optimization to balance objectives
-   - Allow agent to learn trade-offs explicitly
-
-5. **Velocity-Based Rewards**
-   - Reward forward velocity (not just speed)
-   - Penalize lateral velocity (sliding)
-   - Encourage smooth, controlled cornering
+### Architecture
+- **Shared CNN**: Conv(32,8,4) → Conv(64,4,2) → Conv(64,3,1) → Flatten
+- **Policy MLP**: n_flatten → 256 → 128 → `policy_mean(3)`
+- **Value MLP**: n_flatten → 256 → 128 → `value_head(1)`
+- **log_std**: Per-dimension learnable parameter (steer=0.0, throttle=−0.5, brake=−1.0 init)
 
 ---
 
-## Training Iterations Timeline
+## Benchmarks
 
-1. **Initial Training** (500k steps)
-   - Baseline PPO with standard hyperparameters
-   - No reward shaping
-   - Result: Basic driving, speed overweighting
-
-2. **Speed Penalty Phase**
-   - Added speed-based penalties
-   - Result: Global low speeds
-
-3. **Sharp Turn Detection**
-   - Implemented curvature-based turn detection
-   - Added braking rewards for sharp turns
-   - Result: Improved cornering, but still conservative
-
-4. **Terminal Off-Track Penalty**
-   - Made off-track episodes terminal
-   - Large penalty (-100) for going off-track
-   - Result: Agent stays on track consistently
-
-5. **Large-Scale Training** (1M steps, 1024 batch)
-   - Increased training scale
-   - Attempted speed optimization
-   - Result: Still global low speeds, no optimized braking
+| Run | Steps | Mean Reward | Progress | Off-track | Notes |
+|---|---|---|---|---|---|
+| SB3 baseline | 500k | 282+ | ~100% | low | Working reference |
+| Torch run 1 (GAE bug) | 57k | −1872 | 0% | 100% | Steering collapsed |
+| Torch run 2 (shared head) | 73k | −64 | 0% | 0% | Policy collapsed, no movement |
+| Torch run 3 (best_model_torch) | ~933k | 6861 | 0% | 100% | Velocity reward exploit, donuts |
+| **Target** | 500k+ | >500 | >50% | <20% | Car stays on track and makes laps |
 
 ---
 
-## Technical Notes
-
-### Reward Function Implementation
-The reward shaping is implemented in a custom wrapper that:
-- Monitors car position relative to track
-- Calculates track curvature ahead
-- Detects off-track conditions
-- Applies penalties and bonuses accordingly
-
-### Observation Space
-- **Format**: 96x96x3 RGB image (uint8)
-- **Preprocessing**: Normalized to [0, 1] float32
-- **Augmentation**: Currently disabled (can be enabled for robustness)
-
-### Action Space
-- **Steering**: [-1, 1] (left to right)
-- **Gas**: [0, 1] (no acceleration to full acceleration)
-- **Brake**: [0, 1] (no braking to full braking)
-
----
-
-## Conclusion
-
-The training process has successfully addressed several key issues:
-- ✅ Off-track behavior (terminal penalty)
-- ✅ Sharp turn handling (braking rewards)
-- ✅ Basic driving competence
-
-However, speed optimization remains a challenge:
-- ❌ Global speed management (too conservative)
-- ❌ Lack of speed variation (no fast/slow differentiation)
-- ❌ No optimized braking (brakes everywhere, not just corners)
-
-Future work should focus on context-aware speed rewards that encourage appropriate speed profiles for different track sections rather than global speed penalties.
-
----
-
-*Last Updated: [Current Date]*
-*Training Status: Ongoing - Speed optimization phase*
+## Known Remaining Issues / Watchlist
+- Steering still tends toward low variance after enough training — monitor `steer_var` in eval logs
+- `no_progress_max_steps=200` may be too tight or too loose — adjust if car terminates too early on slow corners
+- Need more total training steps (currently capped at 500k) once basic track-following works
+- Visual eval (50k interval) shows raw behaviour — key signal is `progress > 0` in early evals
