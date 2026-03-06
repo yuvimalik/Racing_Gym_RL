@@ -103,6 +103,25 @@ Progress_delta computation moved to top of `step()` so it is available for both 
 
 ---
 
+### Bug 6 — Speed=29 Tailspin / Steering Overcorrection
+**Observed** (step 499,712 eval):
+```
+throttle=0.93, speed=29.05, progress=0.00%, offtrack_rate=100%
+steer_var=0.10761, episode_length=53–314 steps
+```
+**Root cause**: Car learned to apply full throttle from launch bonus (`launch_bonus_scale: 0.8`, `launch_boost_steps: 150`) reaching speed=29. At that speed, ANY steering input (even small correction) causes a physics tailspin — the car slides laterally, overshoots, and immediately goes off-track. There was no penalty for sliding or for raw high speed, and no speed ceiling.
+
+**Fixes**:
+1. **Safety governor enabled**: caps speed at `0.5 × 24 = 12 units/s` — keeps car in physically controllable range
+2. **Launch bonus removed**: `launch_boost_steps: 150 → 0`, `launch_bonus_scale: 0.8 → 0.0` — was the reason the car immediately floored throttle
+3. **Straight speed reward removed**: `straight_speed_scale: 0.05 → 0.0` — don't incentivise raw speed
+4. **Lateral velocity penalty added** (`lateral_velocity_penalty: 0.15`): penalises `|velocity · lateral_dir|` — directly taxes the sideways-sliding physics of tailspins
+5. **Throttle init bias reduced**: `3.0 → 2.0` (sigmoid(2)=0.88 vs 0.95) — less aggressive initial throttle
+6. **Steer magnitude penalty raised**: 0.03 → 0.05
+7. **Steer max log_std tightened**: 0.3 → 0.0 (max steer std = 1.0)
+
+---
+
 ## Current Configuration (as of latest changes)
 
 ### PPO Hyperparameters
@@ -162,8 +181,42 @@ Progress_delta computation moved to top of `step()` so it is available for both 
 
 ---
 
+---
+
+### Bug 7 — Forward Progress Reward Never Fired (empty info dict)
+**Observed**: Training eval always reports `progress=0.00%`. Car driven entirely by `track_alignment_scale`.
+**Root cause**: `MultiCarRacing.step()` returns `info = {}` (always empty). `info.get("progress")` returned `None` every step, so `progress_delta = 0` always. Consequences:
+- `comp_forward = 600 × 0 = 0` — the PRIMARY reward signal never fired.
+- `_no_progress_steps` incremented every step → episodes terminated after 400 steps even while car was making real track progress.
+- `_update_lap_count` always returned early (no progress key in info).
+
+**Fix**: Compute progress directly from `base_env.tile_visited_count[0] / len(base_env.track)` at the top of `step()`, before `_update_lap_count`. Write it back to `info["progress"]` so eval metrics and lap counter also work.
+
+---
+
+## Phase 2 — Race Pace Tuning (resumed from checkpoint)
+
+**Status at resume**: Car makes lap progress but jitters side-to-side and is too slow.
+
+### Changes applied for race pace:
+
+| Parameter | Before | After | Reason |
+|---|---|---|---|
+| `ent_coef` | 0.05 | 0.03 | Car now makes progress; less exploration reduces jitter |
+| `steer_min_log_std` | -0.5 (std≥0.61) | -0.8 (std≥0.45) | Tighter steering floor → less side-to-side oscillation |
+| `steer_smoothness_penalty` | 0.02 | 0.05 | Penalise rapid steering changes more strongly |
+| `straight_speed_scale` | 0.10 | 0.20 | Doubled — incentivises driving at race pace |
+| `time_penalty` | -0.05 | -0.08 | More urgency to complete the lap fast |
+| `speed_cap_top_speed` | 40.0 (cap=20) | 50.0 (cap=25) | Allow higher racing speed without tailspin risk |
+| `corner_target_speed` | 8.0 | 6.0 | Enforce harder braking before turns |
+| `corner_overspeed_penalty_scale` | 0.2 | 0.5 | Stiffer penalty for entering corners too fast |
+| `apex_decel_reward_scale` | 0.2 | 0.4 | Reward braking into turns more strongly |
+| `apex_decel_reward_cap` | 0.5 | 1.0 | Larger per-step braking reward allowed |
+
+---
+
 ## Known Remaining Issues / Watchlist
 - Steering still tends toward low variance after enough training — monitor `steer_var` in eval logs
-- `no_progress_max_steps=200` may be too tight or too loose — adjust if car terminates too early on slow corners
-- Need more total training steps (currently capped at 500k) once basic track-following works
+- `no_progress_max_steps=400` — adjust if car terminates too early on slow corners
+- Speed cap at 25 units/s — raise further if car proves stable at that speed
 - Visual eval (50k interval) shows raw behaviour — key signal is `progress > 0` in early evals

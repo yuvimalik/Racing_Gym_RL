@@ -1,4 +1,4 @@
-# Multi-Car Racing PPO Training Configuration
+# Multi-Car Racing PPO Training Configuration — Clean Slate (progress fix applied)
 
 # Environment settings
 environment:
@@ -14,19 +14,19 @@ environment:
 # PPO hyperparameters
 ppo:
   learning_rate: 2.5e-4
-  n_steps: 1024       # Longer rollouts for better advantage estimation
-  batch_size: 256      # Larger batch for stable gradients
-  n_epochs: 4          # Fewer epochs to prevent over-fitting each rollout
-  gamma: 0.99          # Standard discount factor
-  gae_lambda: 0.95     # Standard GAE lambda
-  clip_range: 0.2      # Standard PPO clip range
-  ent_coef: 0.05       # Higher entropy to prevent steering from collapsing to one direction (donut fix)
-  vf_coef: 0.25        # Lower value loss weight (separate heads handle most of it)
+  n_steps: 1024
+  batch_size: 256
+  n_epochs: 4
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_range: 0.2
+  ent_coef: 0.05       # Back to 0.05 — fresh start needs more exploration
+  vf_coef: 0.25
   max_grad_norm: 0.5
-  min_log_std: -1.0       # Global floor for throttle/brake std
-  max_log_std: 0.5        # Global ceiling for throttle/brake std
-  steer_min_log_std: -0.5 # Steer floor: exp(-0.5)=0.61 — enough variance to explore corners
-  steer_max_log_std: 0.3  # Steer ceiling: exp(0.3)=1.35 — prevents wildly chaotic steering
+  min_log_std: -1.0
+  max_log_std: 0.5
+  steer_min_log_std: -0.5   # Looser floor (exp(-0.5)=0.61) — more steering freedom to explore
+  steer_max_log_std: 0.0
 
 # Policy network architecture
 policy:
@@ -35,7 +35,7 @@ policy:
 # Training settings
 training:
   trainer_backend: torch
-  total_timesteps: 500000
+  total_timesteps: 2000000
   eval_freq: 5000
   n_eval_episodes: 5
   save_freq: 25000
@@ -43,10 +43,10 @@ training:
   num_envs: 8
   fail_fast:
     enabled: true
-    min_timesteps_before_check: 40000   # Give more time before checking
+    min_timesteps_before_check: 50000
     min_mean_progress: 0.05
     min_mean_speed: 1.0
-    patience_evals: 5                   # More patience
+    patience_evals: 5
   visual_eval:
     enabled: true
     freq: 50000
@@ -67,49 +67,77 @@ paths:
 # Device
 device: cuda
 
-# Reward shaping - simplified for stable learning
+# Reward shaping — minimal, let progress do the work
+# NOTE: progress is now computed from tile_visited_count (Bug 7 fix) — it actually fires.
 reward_shaping:
   enabled: true
   use_custom_reward: true
-  forward_progress_scale: 300.0        # Scales tile-progress delta (0→1/lap → ~300 reward/lap)
-  straight_speed_scale: 0.05           # On-track speed bonus (gated: 0 while off-track)
+
+  # PRIMARY: tile progress — this is the core signal, now correctly computed
+  forward_progress_scale: 600.0
+
+  # SECONDARY: directional guidance (keeps car pointing the right way each step)
+  track_alignment_scale: 0.3
+
+  # SPEED: on-track only, moderate incentive
+  straight_speed_scale: 0.20
   sharp_turn_threshold: 0.35
   sharp_turn_lookahead: 6
+
+  # CORNERS: disabled for now — let car discover braking naturally from progress signal
   corner_target_speed: 8.0
-  corner_overspeed_penalty_scale: 0.2  # Gentle corner penalty
-  apex_decel_reward_scale: 0.2
-  apex_decel_reward_cap: 0.5
+  corner_overspeed_penalty_scale: 0.0
+  apex_decel_reward_scale: 0.0
+  apex_decel_reward_cap: 1.0
+
+  # STEERING SMOOTHNESS: light touch only
   steer_smoothness_penalty: 0.02
   steer_delta_cap: 0.5
-  steer_magnitude_penalty: 0.03      # Penalises |steer|² — small turns cheap, full-lock expensive
-  time_penalty: -0.02                  # Gentle time pressure (was -0.08)
+  steer_magnitude_penalty: 0.0
+
+  # ANTI-SLIDE: moderate
+  lateral_velocity_penalty: 0.10
+
+  # TIME PRESSURE: gentle — car needs time to learn before rushing it
+  time_penalty: -0.05
+
+  # IDLE: keep car moving
   idle_speed_threshold: 1.0
-  idle_penalty: -0.5                   # Stronger nudge to keep moving (can't game speed off-track now)
-  throttle_bonus_scale: 0.0            # Disabled — was gamed by driving off-track at full throttle
-  brake_penalty_scale: 0.05
-  launch_boost_steps: 150              # Longer launch window
+  idle_penalty: -0.5
+
+  # DISABLED extras
+  throttle_bonus_scale: 0.0
+  brake_penalty_scale: 0.0
+  launch_boost_steps: 0
   launch_speed_target: 5.0
-  launch_bonus_scale: 0.8              # Strong launch incentive
+  launch_bonus_scale: 0.0
+
+  # TERMINATION: patient — let car explore the full track
   stuck_speed_threshold: 0.8
   stuck_progress_epsilon: 0.001
-  stuck_max_steps: 150                 # More patience before stuck termination
-  stuck_terminal_penalty: -30.0        # Reduced from -80
-  no_progress_max_steps: 200           # Terminate if zero tile progress for 200 steps (catches donuts)
-  no_progress_terminal_penalty: -15.0  # Penalty for donut/stall termination
-  yaw_rate_penalty: 0.1               # Per-step penalty on angular velocity (discourages spinning)
-  off_track_mode: terminate            # Instant termination — off-track reward-gaming is fixed
-  off_track_terminal_penalty: -10.0   # Small penalty since episode ends anyway
-  off_track_step_penalty: -3.0        # Unused in terminate mode
+  stuck_max_steps: 200
+  stuck_terminal_penalty: -20.0
+  no_progress_max_steps: 500
+  no_progress_terminal_penalty: -10.0
+
+  # ANTI-DONUT
+  yaw_rate_penalty: 0.04
+
+  # OFF-TRACK: penalty mode — brief clips allowed, exploitation blocked by tile_visited_count
+  off_track_mode: penalty
+  off_track_terminal_penalty: -50.0   # unused
+  off_track_step_penalty: -8.0        # heavy enough to deter, light enough to recover
+
   curriculum:
-    enabled: false                     # Disable curriculum until basics work
+    enabled: false
 
 # Observation augmentation
 observation:
   enabled: false
 
-# Safety governor
+# Safety governor — moderate cap, can be loosened once car is stable
 safety_governor:
-  enabled: false
+  enabled: true
   speed_cap_ratio: 0.5
-  speed_cap_top_speed: 30.0
-  speed_cap_brake: 0.2
+  speed_cap_top_speed: 60.0   # Cap = 30 units/s — safe starting point, raise once stable
+  speed_cap_brake: 0.4

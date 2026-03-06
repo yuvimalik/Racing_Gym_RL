@@ -90,7 +90,7 @@ class CnnActorCritic(nn.Module):
 
         # Bias exploration toward moving forward initially: throttle high, brake low.
         if action_dim >= 3:
-            nn.init.constant_(self.policy_mean.bias[1], 3.0)   # throttle ~= sigmoid(3) = 0.95
+            nn.init.constant_(self.policy_mean.bias[1], 2.0)   # throttle ~= sigmoid(2) = 0.88 (was 3.0=0.95, too fast)
             nn.init.constant_(self.policy_mean.bias[2], -3.0)  # brake ~= sigmoid(-3) = 0.05
 
     def _features(self, obs: torch.Tensor) -> torch.Tensor:
@@ -105,10 +105,13 @@ class CnnActorCritic(nn.Module):
         mean = self.policy_mean(policy_latent)
         # Per-dimension log_std clamping: steer uses its own bounds so its exploration
         # range can be tuned independently of throttle/brake.
-        log_std = self.log_std.clone()
-        log_std[0] = torch.clamp(log_std[0], self.steer_min_log_std, self.steer_max_log_std)
-        if log_std.shape[0] > 1:
-            log_std[1:] = torch.clamp(log_std[1:], self.min_log_std, self.max_log_std)
+        # Use torch.cat (NOT in-place indexing) to avoid breaking autograd.
+        steer_ls = torch.clamp(self.log_std[0:1], self.steer_min_log_std, self.steer_max_log_std)
+        if self.log_std.shape[0] > 1:
+            other_ls = torch.clamp(self.log_std[1:], self.min_log_std, self.max_log_std)
+            log_std = torch.cat([steer_ls, other_ls])
+        else:
+            log_std = steer_ls
         std = log_std.exp().expand_as(mean)
         dist = Normal(mean, std)
         value_latent = self.value_mlp(shared)
@@ -510,7 +513,10 @@ class TorchPPOTrainer:
                 np.random.set_state(np_state)
             torch_cpu_state = rng_state.get("torch_cpu")
             if torch_cpu_state is not None:
-                torch.set_rng_state(torch_cpu_state)
+                try:
+                    torch.set_rng_state(torch_cpu_state)
+                except (TypeError, RuntimeError):
+                    pass  # RNG state format mismatch (e.g. saved on different device); non-fatal
             torch_cuda_all = rng_state.get("torch_cuda_all")
             if torch_cuda_all is not None and torch.cuda.is_available():
                 try:
@@ -787,6 +793,10 @@ class RewardShapingWrapper(gym.Wrapper):
         self.use_custom_reward = bool(reward_config.get('use_custom_reward', True))
 
         self.forward_progress_scale = float(reward_config.get('forward_progress_scale', 1.0))
+        # Dense alignment reward: velocity · track_dir. Gives step-by-step directional feedback
+        # so the policy learns WHICH WAY to steer before it ever sees a tile progress signal.
+        # Safe with off_track_mode=terminate since grass contact ends episode immediately.
+        self.track_alignment_scale = float(reward_config.get('track_alignment_scale', 0.0))
         self.straight_speed_scale = float(reward_config.get('straight_speed_scale', 0.05))
         self.sharp_turn_threshold = float(reward_config.get('sharp_turn_threshold', 0.35))
         self.sharp_turn_lookahead = int(reward_config.get('sharp_turn_lookahead', 6))
@@ -799,6 +809,9 @@ class RewardShapingWrapper(gym.Wrapper):
         self.time_penalty = float(reward_config.get('time_penalty', -0.1))
         self.steer_smoothness_penalty = float(reward_config.get('steer_smoothness_penalty', 0.05))
         self.steer_delta_cap = float(reward_config.get('steer_delta_cap', 0.5))
+        # Lateral velocity penalty: penalises sliding/spinning perpendicular to track direction.
+        # At speed=29 with steering, the car slides hard — this directly penalises that physics.
+        self.lateral_velocity_penalty = float(reward_config.get('lateral_velocity_penalty', 0.0))
         # Magnitude penalty: penalises |steer|² to discourage full-lock steering / donuts.
         # Squared so small adjustments are cheap, extreme angles are costly.
         self.steer_magnitude_penalty = float(reward_config.get('steer_magnitude_penalty', 0.0))
@@ -925,10 +938,15 @@ class RewardShapingWrapper(gym.Wrapper):
         return track_dir, is_sharp_turn, float(angle_diff)
 
     def _update_lap_count(self, info):
+        # info["progress"] is written by step() before this is called on subsequent steps,
+        # but on the very first call it may be absent — safe to skip if missing.
         progress = info.get("progress")
-        if not isinstance(progress, (int, float)):
+        if progress is None:
             return
-        progress = float(progress)
+        try:
+            progress = float(progress)
+        except (TypeError, ValueError):
+            return
         if self._prev_progress is not None and progress < (self._prev_progress - 0.5):
             self._lap_count += 1
         if progress >= 0.999 and not self._lap_completion_latched:
@@ -944,8 +962,14 @@ class RewardShapingWrapper(gym.Wrapper):
             info = {}
         self._episode_steps += 1
 
-        self._update_lap_count(info)
+        # Compute and inject progress BEFORE _update_lap_count so it has correct data.
+        # The base env always returns info={} — we read tile_visited_count directly.
         base_env = self.env.unwrapped
+        if (hasattr(base_env, "tile_visited_count") and hasattr(base_env, "track")
+                and base_env.track and len(base_env.track) > 0):
+            info["progress"] = float(base_env.tile_visited_count[0]) / float(len(base_env.track))
+
+        self._update_lap_count(info)
 
         speed = 0.0
         track_dir = np.zeros(2, dtype=np.float32)
@@ -971,11 +995,11 @@ class RewardShapingWrapper(gym.Wrapper):
         throttle_value = float(np.clip(action_arr[1], 0.0, 1.0)) if action_arr.size >= 2 else 0.0
         brake_value = float(np.clip(action_arr[2], 0.0, 1.0)) if action_arr.size >= 3 else 0.0
 
-        # Compute tile progress delta FIRST — used for both reward and stuck detection.
-        progress_now = info.get("progress")
+        # Read progress from info (written at top of step from tile_visited_count).
+        progress_now = info.get("progress")  # float or None
+
         progress_delta = 0.0
-        if isinstance(progress_now, (int, float)):
-            progress_now = float(progress_now)
+        if progress_now is not None:
             if self._last_stuck_progress is not None:
                 progress_delta = max(0.0, progress_now - self._last_stuck_progress)
             self._last_stuck_progress = progress_now
@@ -989,12 +1013,24 @@ class RewardShapingWrapper(gym.Wrapper):
         )
 
         # Primary reward: actual tile progress (0→1 per lap). Scaled up so one full
-        # lap ≈ forward_progress_scale total reward. Previously used velocity·track_dir
-        # which rewarded driving fast off-track — now tied to the real objective.
+        # lap ≈ forward_progress_scale total reward.
         comp_forward = self.forward_progress_scale * progress_delta
+
+        # Dense directional guidance: velocity · track_dir. Tells the policy which way
+        # to steer every step — without this, progress_delta=0 for "wrong direction"
+        # AND "not moving", so the policy gets no steering correction signal.
+        # Safe because off_track_mode=terminate prevents off-track exploitation.
+        comp_alignment = self.track_alignment_scale * float(np.dot(velocity_vec, track_dir))
 
         # Speed bonus only while ON track — prevents gaming it by driving on grass.
         comp_straight_speed = self.straight_speed_scale * speed * (0.0 if is_offtrack else 1.0) if not is_sharp_turn else 0.0
+
+        # Lateral velocity penalty: penalises sliding perpendicular to the track.
+        # When car goes fast and oversteers (speed=29), it slides sideways — this directly
+        # penalises the loss-of-control physics that causes tailspins and off-track.
+        lateral_dir = np.array([-track_dir[1], track_dir[0]], dtype=np.float32)
+        lateral_speed = float(np.dot(velocity_vec, lateral_dir))
+        comp_lateral = -self.lateral_velocity_penalty * abs(lateral_speed)
         corner_overspeed = max(0.0, speed - self.corner_target_speed) if is_sharp_turn else 0.0
         comp_corner_overspeed = -self.corner_overspeed_penalty_scale * corner_overspeed
 
@@ -1029,7 +1065,9 @@ class RewardShapingWrapper(gym.Wrapper):
         comp_yaw = -self.yaw_rate_penalty * yaw_rate
         shaped_reward = (
             comp_forward
+            + comp_alignment
             + comp_straight_speed
+            + comp_lateral
             + comp_corner_overspeed
             + comp_apex_decel
             + comp_steer_smooth
@@ -1083,11 +1121,13 @@ class RewardShapingWrapper(gym.Wrapper):
         info["telemetry/throttle"] = float(throttle_value)
         info["telemetry/brake"] = float(brake_value)
         info["rewards/forward_progress"] = float(comp_forward)
+        info["rewards/alignment"] = float(comp_alignment)
         info["rewards/straight_speed"] = float(comp_straight_speed)
         info["rewards/corner_overspeed"] = float(comp_corner_overspeed)
         info["rewards/apex_decel"] = float(comp_apex_decel)
         info["rewards/steer_smoothness"] = float(comp_steer_smooth)
         info["rewards/steer_magnitude"] = float(comp_steer_mag)
+        info["rewards/lateral"] = float(comp_lateral)
         info["rewards/time"] = float(comp_time)
         info["rewards/idle"] = float(comp_idle)
         info["rewards/throttle"] = float(comp_throttle)
