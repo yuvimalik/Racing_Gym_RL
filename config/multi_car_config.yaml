@@ -1,4 +1,4 @@
-# Multi-Car Racing PPO Training Configuration — Clean Slate (progress fix applied)
+# Multi-Car Racing PPO Training Configuration — v2 (minimal reward, progress fix applied)
 
 # Environment settings
 environment:
@@ -20,12 +20,12 @@ ppo:
   gamma: 0.99
   gae_lambda: 0.95
   clip_range: 0.2
-  ent_coef: 0.05       # Back to 0.05 — fresh start needs more exploration
+  ent_coef: 0.05       # Fresh start — needs exploration
   vf_coef: 0.25
   max_grad_norm: 0.5
   min_log_std: -1.0
   max_log_std: 0.5
-  steer_min_log_std: -0.5   # Looser floor (exp(-0.5)=0.61) — more steering freedom to explore
+  steer_min_log_std: -0.5   # exp(-0.5)=0.61 — enough freedom to explore cornering lines
   steer_max_log_std: 0.0
 
 # Policy network architecture
@@ -55,78 +55,81 @@ training:
     enabled: true
     mean_reward_threshold: 150.0
     mean_progress_threshold: 0.95
-    max_offtrack_rate: 0.05
+    max_offtrack_rate: 0.10
     min_eval_episodes: 5
 
-# Paths
+# Paths — NEW directory so existing models/best_model_torch.pt is never overwritten
 paths:
-  model_dir: ./models
-  log_dir: ./logs
-  results_dir: ./results
+  model_dir: ./models/v2_progress
+  log_dir: ./logs/v2_progress
+  results_dir: ./results/v2_progress
 
 # Device
 device: cuda
 
-# Reward shaping — minimal, let progress do the work
-# NOTE: progress is now computed from tile_visited_count (Bug 7 fix) — it actually fires.
+# Reward shaping — MINIMAL: progress + time pressure + anti-donut only
+#
+# Philosophy: the env returns tile_visited_count (road only). With only a time
+# penalty and the progress signal, off-track driving is self-penalising:
+#   on-track:  +progress_reward - 0.1/step → net positive
+#   off-track: +0               - 0.1/step → net negative
+# No explicit off-track penalty, alignment reward, or corner engineering needed.
 reward_shaping:
   enabled: true
   use_custom_reward: true
 
-  # PRIMARY: tile progress — this is the core signal, now correctly computed
+  # Core signal — now correctly computed from tile_visited_count (Bug 7 fix)
   forward_progress_scale: 600.0
 
-  # SECONDARY: directional guidance (keeps car pointing the right way each step)
-  track_alignment_scale: 0.3
+  # Disabled — was needed only when progress was always 0
+  track_alignment_scale: 0.0
+  straight_speed_scale: 0.0
 
-  # SPEED: on-track only, moderate incentive
-  straight_speed_scale: 0.20
+  # Corner logic — disabled, let car discover braking naturally
   sharp_turn_threshold: 0.35
   sharp_turn_lookahead: 6
-
-  # CORNERS: disabled for now — let car discover braking naturally from progress signal
   corner_target_speed: 8.0
   corner_overspeed_penalty_scale: 0.0
   apex_decel_reward_scale: 0.0
   apex_decel_reward_cap: 1.0
 
-  # STEERING SMOOTHNESS: light touch only
-  steer_smoothness_penalty: 0.02
+  # Steering — no constraints during fresh exploration
+  steer_smoothness_penalty: 0.0
   steer_delta_cap: 0.5
   steer_magnitude_penalty: 0.0
 
-  # ANTI-SLIDE: moderate
-  lateral_velocity_penalty: 0.10
+  # Anti-slide — disabled (no speed exploit with correct progress reward)
+  lateral_velocity_penalty: 0.0
 
-  # TIME PRESSURE: gentle — car needs time to learn before rushing it
-  time_penalty: -0.05
+  # Time pressure — makes every step cost something; off-track is net-negative
+  time_penalty: -0.1
 
-  # IDLE: keep car moving
+  # Idle — extra push for truly stationary car
   idle_speed_threshold: 1.0
-  idle_penalty: -0.5
+  idle_penalty: -0.3
 
-  # DISABLED extras
+  # Disabled
   throttle_bonus_scale: 0.0
   brake_penalty_scale: 0.0
   launch_boost_steps: 0
   launch_speed_target: 5.0
   launch_bonus_scale: 0.0
 
-  # TERMINATION: patient — let car explore the full track
+  # Termination
   stuck_speed_threshold: 0.8
   stuck_progress_epsilon: 0.001
   stuck_max_steps: 200
   stuck_terminal_penalty: -20.0
-  no_progress_max_steps: 500
+  no_progress_max_steps: 500     # catch genuine donuts/stalls
   no_progress_terminal_penalty: -10.0
 
-  # ANTI-DONUT
-  yaw_rate_penalty: 0.04
+  # Anti-donut — time_penalty alone may not deter high-speed spinning
+  yaw_rate_penalty: 0.05
 
-  # OFF-TRACK: penalty mode — brief clips allowed, exploitation blocked by tile_visited_count
+  # Off-track — penalty mode so car can recover from corner clips
   off_track_mode: penalty
-  off_track_terminal_penalty: -50.0   # unused
-  off_track_step_penalty: -8.0        # heavy enough to deter, light enough to recover
+  off_track_terminal_penalty: -50.0   # unused in penalty mode
+  off_track_step_penalty: 0.0         # time_penalty is sufficient deterrent
 
   curriculum:
     enabled: false
@@ -135,9 +138,9 @@ reward_shaping:
 observation:
   enabled: false
 
-# Safety governor — moderate cap, can be loosened once car is stable
+# Safety governor — moderate starting cap, raise once car is stable
 safety_governor:
   enabled: true
   speed_cap_ratio: 0.5
-  speed_cap_top_speed: 60.0   # Cap = 30 units/s — safe starting point, raise once stable
+  speed_cap_top_speed: 60.0   # Cap = 30 units/s
   speed_cap_brake: 0.4

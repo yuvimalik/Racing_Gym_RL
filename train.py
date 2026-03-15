@@ -22,6 +22,9 @@ from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv, VecTransposeImage, SubprocVecEnv
 from stable_baselines3.common.utils import set_random_seed
 import torch
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+import threading
 import time
 from datetime import datetime, timedelta
 import torch.nn as nn
@@ -145,6 +148,10 @@ class CnnActorCritic(nn.Module):
         entropy = dist.entropy().sum(dim=-1)
         return value, log_prob, entropy
 
+    def forward(self, obs: torch.Tensor, actions: torch.Tensor):
+        """DDP-compatible entry point for training updates (evaluate_actions path)."""
+        return self.evaluate_actions(obs, actions)
+
 
 class RolloutBuffer:
     """Rollout storage for PPO."""
@@ -185,7 +192,8 @@ class RolloutBuffer:
             self.advantages[step] = last_gae
         self.returns = self.advantages + self.values
 
-    def batches(self, batch_size, device, normalize_advantage=True) -> Iterable[Dict[str, torch.Tensor]]:
+    def batches(self, batch_size, device, normalize_advantage=True,
+                distributed=False) -> Iterable[Dict[str, torch.Tensor]]:
         n_samples = self.n_steps * self.n_envs
         obs = self.obs.reshape(n_samples, *self.obs.shape[2:])
         actions = self.actions.reshape(n_samples, self.actions.shape[-1])
@@ -195,7 +203,18 @@ class RolloutBuffer:
         old_values = self.values.reshape(n_samples)
 
         if normalize_advantage and advantages.size > 1:
-            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+            if distributed and dist.is_available() and dist.is_initialized():
+                # Global advantage normalization across all ranks — ensures consistent
+                # gradient scaling when each GPU holds a different subset of rollout data.
+                adv_t = torch.as_tensor(advantages, dtype=torch.float32, device=device)
+                adv_mean = adv_t.mean()
+                adv_sq_mean = (adv_t ** 2).mean()
+                dist.all_reduce(adv_mean, op=dist.ReduceOp.AVG)
+                dist.all_reduce(adv_sq_mean, op=dist.ReduceOp.AVG)
+                adv_std = (adv_sq_mean - adv_mean ** 2).clamp(min=0).sqrt()
+                advantages = ((adv_t - adv_mean) / (adv_std + 1e-8)).cpu().numpy()
+            else:
+                advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
         indices = np.arange(n_samples)
         np.random.shuffle(indices)
@@ -214,11 +233,16 @@ class RolloutBuffer:
 class TorchPPOTrainer:
     """PPO training loop implemented locally in PyTorch."""
 
-    def __init__(self, env, eval_env, config, device, model_dir: Path, log_dir: Path):
+    def __init__(self, env, eval_env, config, device, model_dir: Path, log_dir: Path,
+                 local_rank: int = 0, world_size: int = 1):
         self.env = env
         self.eval_env = eval_env
         self.config = config
-        self.device = torch.device(device)
+        self.local_rank = int(local_rank)
+        self.world_size = int(world_size)
+        self.rank = local_rank  # within-node rank; for multi-node use dist.get_rank()
+        self.distributed = world_size > 1
+        self.device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
         self.model_dir = Path(model_dir)
         self.log_dir = Path(log_dir)
 
@@ -255,9 +279,16 @@ class TorchPPOTrainer:
             min_log_std=min_log_std, max_log_std=max_log_std,
             steer_min_log_std=steer_min_log_std, steer_max_log_std=steer_max_log_std,
         ).to(self.device)
+        if self.distributed:
+            self.policy = DDP(self.policy, device_ids=[self.local_rank])
         self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=self.learning_rate)
         self.num_timesteps = 0
         self.eval_history_path = self.log_dir / "torch_eval_history.jsonl"
+
+    @property
+    def _policy(self) -> CnnActorCritic:
+        """Return the underlying CnnActorCritic, unwrapping DDP if present."""
+        return self.policy.module if isinstance(self.policy, DDP) else self.policy
 
     def _raw_to_env_action_np(self, raw_action_np: np.ndarray) -> np.ndarray:
         raw_t = torch.as_tensor(raw_action_np, dtype=torch.float32)
@@ -273,7 +304,7 @@ class TorchPPOTrainer:
         for _ in range(self.n_steps):
             obs_tensor = torch.as_tensor(obs, dtype=torch.float32, device=self.device) / 255.0
             with torch.no_grad():
-                raw_action, log_prob, value = self.policy.act(obs_tensor, deterministic=False)
+                raw_action, log_prob, value = self._policy.act(obs_tensor, deterministic=False)
 
             raw_action_np = raw_action.cpu().numpy()
             env_actions = self._raw_to_env_action_np(raw_action_np)
@@ -302,7 +333,7 @@ class TorchPPOTrainer:
 
         with torch.no_grad():
             last_obs_tensor = torch.as_tensor(obs, dtype=torch.float32, device=self.device) / 255.0
-            _, last_values = self.policy.get_dist_and_value(last_obs_tensor)
+            _, last_values = self._policy.get_dist_and_value(last_obs_tensor)
         buffer.compute_returns_advantages(
             last_values=last_values.cpu().numpy().astype(np.float32),
             last_dones=last_dones,
@@ -319,8 +350,13 @@ class TorchPPOTrainer:
         approx_kls = []
 
         for _ in range(self.n_epochs):
-            for batch in buffer.batches(self.batch_size, self.device, normalize_advantage=True):
-                values, new_log_probs, entropy = self.policy.evaluate_actions(batch["obs"], batch["actions"])
+            for batch in buffer.batches(self.batch_size, self.device, normalize_advantage=True,
+                                        distributed=self.distributed):
+                if self.distributed:
+                    # Call through DDP so it intercepts forward and syncs gradients via AllReduce
+                    values, new_log_probs, entropy = self.policy(batch["obs"], batch["actions"])
+                else:
+                    values, new_log_probs, entropy = self._policy.evaluate_actions(batch["obs"], batch["actions"])
                 ratio = torch.exp(new_log_probs - batch["old_log_probs"])
 
                 policy_loss_1 = batch["advantages"] * ratio
@@ -394,7 +430,7 @@ class TorchPPOTrainer:
                 obs_t = torch.as_tensor(obs, dtype=torch.float32, device=self.device) / 255.0
                 obs_t = obs_t.permute(2, 0, 1).unsqueeze(0)
                 with torch.no_grad():
-                    raw_action, _, _ = self.policy.act(obs_t, deterministic=True)
+                    raw_action, _, _ = self._policy.act(obs_t, deterministic=True)
                 env_action_np = self._raw_to_env_action_np(raw_action.cpu().numpy().squeeze(0))
                 obs, reward, done, info = base_env.step(env_action_np)
                 ep_reward += float(reward)
@@ -441,7 +477,7 @@ class TorchPPOTrainer:
             while not bool(done[0]):
                 obs_tensor = torch.as_tensor(obs, dtype=torch.float32, device=self.device) / 255.0
                 with torch.no_grad():
-                    raw_action, _, _ = self.policy.act(obs_tensor, deterministic=True)
+                    raw_action, _, _ = self._policy.act(obs_tensor, deterministic=True)
                 raw_action_np = raw_action.cpu().numpy()
                 env_actions = self._raw_to_env_action_np(raw_action_np)
                 obs, reward, done, info = self.eval_env.step(env_actions)
@@ -484,12 +520,18 @@ class TorchPPOTrainer:
         }
 
     def save(self, path: Path):
+        # In distributed mode only rank 0 writes — all ranks hold identical weights
+        # (DDP guarantees this) so one checkpoint is sufficient.
+        if self.distributed and self.rank != 0:
+            return
         cuda_rng_state_all = None
         if torch.cuda.is_available():
             cuda_rng_state_all = torch.cuda.get_rng_state_all()
+        # DDP wraps the module under .module; unwrap for portable checkpoints.
+        raw_policy = self.policy.module if isinstance(self.policy, DDP) else self.policy
         payload = {
             "checkpoint_format_version": 2,
-            "policy_state_dict": self.policy.state_dict(),
+            "policy_state_dict": raw_policy.state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict(),
             "num_timesteps": self.num_timesteps,
             "config": self.config,
@@ -503,7 +545,8 @@ class TorchPPOTrainer:
 
     def load(self, path: Path):
         payload = torch.load(str(path), map_location=self.device)
-        self.policy.load_state_dict(payload["policy_state_dict"])
+        raw_policy = self.policy.module if isinstance(self.policy, DDP) else self.policy
+        raw_policy.load_state_dict(payload["policy_state_dict"])
         self.optimizer.load_state_dict(payload["optimizer_state_dict"])
         self.num_timesteps = int(payload.get("num_timesteps", 0))
         rng_state = payload.get("rng_state")
@@ -586,11 +629,39 @@ class TorchPPOTrainer:
         visual_episodes = int(visual_cfg.get("n_episodes", 1))
         last_visual_eval_step = self.num_timesteps
 
+        # Async double-buffer: collect next rollout on CPU while GPU updates current
+        buffers = [None, None]
+        buf_idx = 0
+        # Seed the first buffer synchronously before the loop
+        obs, buffers[0] = self._collect_rollout(obs)
+
         while self.num_timesteps < total_timesteps:
             lr_now = self._set_learning_rate(total_timesteps)
-            obs, buffer = self._collect_rollout(obs)
+
+            # Start collecting NEXT rollout in a background thread
+            next_obs_holder = [obs]
+            collect_exc_holder = [None]
+
+            def _collect_next(holder=next_obs_holder, exc_holder=collect_exc_holder, idx=1 - buf_idx):
+                try:
+                    holder[0], buffers[idx] = self._collect_rollout(holder[0])
+                except Exception as e:
+                    exc_holder[0] = e
+
+            collect_thread = threading.Thread(target=_collect_next, daemon=True)
+            collect_thread.start()
+
+            # GPU update on the current buffer while CPUs collect the next one
+            train_metrics = self._update(buffers[buf_idx])
+
+            collect_thread.join()
+            if collect_exc_holder[0] is not None:
+                raise collect_exc_holder[0]
+            obs = next_obs_holder[0]
+
+            # Swap buffers
+            buf_idx = 1 - buf_idx
             update_idx += 1
-            train_metrics = self._update(buffer)
 
             # Log progress every update (steps, iters/s, GPU) so progress is always visible
             now = time.time()
