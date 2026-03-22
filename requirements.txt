@@ -1,13 +1,23 @@
-# Core dependencies
-# Core dependencies for multi_car_racing
+# ── Dependency reference for Racing Gym RL ───────────────────────────────────
+#
+# LOCAL INSTALL: Use setup_local.sh instead of "pip install -r requirements.txt".
+#   stable-baselines3 declares gym>=0.21 in its PyPI metadata, which conflicts
+#   with gym==0.17.3 required by multi_car_racing.  setup_local.sh installs
+#   each conflicting package with --no-deps; they work fine together at runtime.
+#
+# GOOGLE COLAB: pip install -r requirements.txt works there because Colab's
+#   pre-installed packages satisfy the resolver differently.  If it fails on
+#   Colab too, run the cells in colab_training.ipynb which handle this inline.
+#
+# Core
 numpy>=1.22.0,<1.23.0
 gym==0.17.3
-stable-baselines3[extra]==1.8.0
+stable-baselines3[extra]==1.5.0
 
-# multi_car_racing dependencies (install package separately with --no-deps)
+# multi_car_racing dependencies (install package itself separately with --no-deps)
 shapely==1.8.5.post1
 box2d-py==2.3.8
-pyglet==1.5.27
+pyglet==1.5.0
 
 # Visualization and logging
 matplotlib>=3.7.0
@@ -17,5 +27,9 @@ tensorboard>=2.13.0
 # Configuration
 pyyaml>=6.0
 
-# Optional: For better performance
+# Deep learning
 torch>=2.0.0
+
+# stable-baselines3 [extra] transitive deps (skipped by --no-deps; must be explicit)
+pandas
+seaborn

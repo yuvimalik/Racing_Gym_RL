@@ -246,8 +246,13 @@ def evaluate_torch_model(model_path, config, n_episodes=10, record_video=True, s
     if not model_path.is_file():
         raise FileNotFoundError(f"Torch checkpoint not found: {model_path}")
     print(f"Loading Torch checkpoint from {model_path}")
-    payload = torch.load(str(model_path), map_location="cpu")
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+    elif torch.backends.mps.is_available():
+        device = torch.device("mps")
+    else:
+        device = torch.device("cpu")
+    payload = torch.load(str(model_path), map_location=device, weights_only=False)
 
     base_env = create_env(config)
     # Observation from env is (H, W, C); policy expects (C, H, W)

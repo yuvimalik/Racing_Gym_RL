@@ -13,15 +13,16 @@ environment:
 
 # PPO hyperparameters
 ppo:
-  learning_rate: 2.5e-4
-  n_steps: 1024
-  batch_size: 256
-  n_epochs: 4
+  learning_rate: 1.0e-4   # reduced from 2.5e-4 — was causing exploding gradients (norm ~61k)
+  n_steps: 512            # halved from 1024 — shorter rollouts reduce stale-data KL blowup
+  batch_size: 128         # scaled with n_steps (keep ~4 minibatches per rollout)
+  n_epochs: 2             # reduced from 4 — fewer passes per rollout reduces off-policy divergence
   gamma: 0.99
   gae_lambda: 0.95
-  clip_range: 0.2
-  ent_coef: 0.05       # Fresh start — needs exploration
-  vf_coef: 0.25
+  clip_range: 0.1         # tightened further — clip fraction was still 60-86%
+  ent_coef: 0.05          # Fresh start — needs exploration
+  vf_coef: 0.25           # reduced from 0.5 — value loss can be huge (MSE vs large returns); lower coef protects policy gradients
+  vf_clip_range: 10.0     # new: clips V update per step — prevents value MSE explosion when returns scale up
   max_grad_norm: 0.5
   min_log_std: -1.0
   max_log_std: 0.5
@@ -40,15 +41,15 @@ training:
   n_eval_episodes: 5
   save_freq: 25000
   log_interval: 5
-  num_envs: 8
+  num_envs: 1  # macOS: SubprocVecEnv forks cannot access OpenGL — DummyVecEnv (num_envs=1) runs in main process
   fail_fast:
     enabled: true
-    min_timesteps_before_check: 50000
+    min_timesteps_before_check: 150000   # increased — give policy more time to break out of brake local minimum
     min_mean_progress: 0.05
     min_mean_speed: 1.0
-    patience_evals: 5
+    patience_evals: 3                    # terminate faster once confirmed idle (but check later)
   visual_eval:
-    enabled: true
+    enabled: false  # disabled: macOS headless training; AppKit crashes on non-main-thread window rendering
     freq: 50000
     n_episodes: 1
   success_gate:
@@ -65,27 +66,77 @@ paths:
   results_dir: ./results/v2_progress
 
 # Device
-device: cuda
+device: mps  # Apple Silicon (M-series) GPU; use 'cuda' on NVIDIA, 'auto' to detect
 
-# Reward shaping — MINIMAL: progress + time pressure + anti-donut only
+# Reward shaping — LOCAL GEOMETRY reward (new primary signal)
 #
-# Philosophy: the env returns tile_visited_count (road only). With only a time
-# penalty and the progress signal, off-track driving is self-penalising:
-#   on-track:  +progress_reward - 0.1/step → net positive
-#   off-track: +0               - 0.1/step → net negative
-# No explicit off-track penalty, alignment reward, or corner engineering needed.
+# New philosophy: reward is based on local road geometry extracted from the
+# current ego-centred observation crop.  The car is rewarded for:
+#   1. Moving forward along the LOCAL road direction (v_parallel term)
+#   2. Keeping controlled speed while aligned and centred (speed_bonus term)
+#   3. Staying reasonably near the local road centre (soft centre penalty)
+# Off-track is now a fatal crash (immediate termination + large penalty).
+#
+# The legacy tile-progress reward path is fully preserved and can be restored
+# by setting use_local_geometry_reward: false and forward_progress_scale: 600.0
 reward_shaping:
   enabled: true
   use_custom_reward: true
 
-  # Core signal — now correctly computed from tile_visited_count (Bug 7 fix)
-  forward_progress_scale: 600.0
+  # ── Local-geometry reward switch ──────────────────────────────────────────
+  # Master switch. true = new local-geometry path. false = legacy tile-progress.
+  use_local_geometry_reward: true
 
-  # Disabled — was needed only when progress was always 0
+  # ── Local-geometry reward parameters ─────────────────────────────────────
+  # Forward-motion term: forward_local_scale * max(0, v_parallel)
+  # v_parallel = car velocity projected onto the locally estimated road tangent.
+  # Typical range: 0.0 (stopped) to ~30 (top speed) — scale accordingly.
+  forward_local_scale: 2.0  # restored to 2.0 — 4.0 caused 3000+ episode rewards, blowing up value function MSE
+
+  # Controlled-speed bonus: speed_scale * max(0, v_parallel) * center_gate * alignment_gate
+  # Rewards speed only when the car is aligned with the road AND within the centre corridor.
+  controlled_speed_scale: 1.0
+
+  # Soft lateral-deviation penalty base scale.
+  # Penalty = effective_scale * normalised_excess^2 (zero inside free corridor).
+  # effective_scale = center_penalty_scale / (1 + curvature_relief_scale * |curvature|)
+  center_penalty_scale: 0.5
+
+  # Fraction of road half-width inside which there is zero centre penalty.
+  # 0.15 = first 15% of half-width is a free zone (roughly ±1–2 m real world).
+  center_free_corridor: 0.15
+
+  # Fraction of road half-width at which center_gate (for speed bonus) reaches 0.
+  # Must be > center_free_corridor.  0.4 = 40% of road half-width tolerance.
+  center_distance_tolerance: 0.4
+
+  # Reduces centre penalty in curves: effective_scale = base / (1 + scale * |curvature|)
+  # Higher = more freedom to take a racing line through turns.
+  curvature_relief_scale: 5.0
+
+  # Number of image rows ahead of the car to sample for the local centreline fit.
+  local_lookahead_rows: 30
+
+  # Vertical position of the car in the image (fraction of H, 0=top, 1=bottom).
+  # 0.65 ≈ row 62 in a 96-row image with h_ratio=0.25.  Tune if car appears elsewhere.
+  local_car_row_frac: 0.65
+
+  # Minimum road pixels required in a row to include it in the centreline fit.
+  local_min_road_px: 5
+
+  # When true, logs all local-geometry intermediate values to the info dict each step.
+  # Useful for debugging but slow — keep false during training.
+  local_geometry_debug: false
+
+  # ── Legacy tile-progress reward (DISABLED — kept for backward compatibility) ──
+  # Set use_local_geometry_reward: false and restore this to 600.0 to revert.
+  forward_progress_scale: 0.0   # disabled — local-geometry reward is the primary signal
+
+  # Disabled legacy components (zero weight, code preserved)
   track_alignment_scale: 0.0
   straight_speed_scale: 0.0
 
-  # Corner logic — disabled, let car discover braking naturally
+  # Corner logic — disabled (not used in local-geometry path)
   sharp_turn_threshold: 0.35
   sharp_turn_lookahead: 6
   corner_target_speed: 8.0
@@ -93,43 +144,47 @@ reward_shaping:
   apex_decel_reward_scale: 0.0
   apex_decel_reward_cap: 1.0
 
-  # Steering — no constraints during fresh exploration
+  # Steering — disabled
   steer_smoothness_penalty: 0.0
   steer_delta_cap: 0.5
   steer_magnitude_penalty: 0.0
 
-  # Anti-slide — disabled (no speed exploit with correct progress reward)
+  # Anti-slide — disabled
   lateral_velocity_penalty: 0.0
 
-  # Time pressure — makes every step cost something; off-track is net-negative
+  # ── Shared penalty terms (active in both paths) ───────────────────────────
+  # Time pressure — every step costs; ensures the car does not idle.
   time_penalty: -0.1
 
-  # Idle — extra push for truly stationary car
-  idle_speed_threshold: 1.0
-  idle_penalty: -0.3
+  # Idle — extra penalty when nearly stopped (speed < threshold).
+  idle_speed_threshold: 2.0   # broadened from 1.0 — wider "idle" zone catches slow creep
+  idle_penalty: -1.5          # increased from -0.3 — 5× more expensive to sit still
 
-  # Disabled
-  throttle_bonus_scale: 0.0
-  brake_penalty_scale: 0.0
+  # Yaw-rate penalty — penalises spinning/donuts; active in both reward paths.
+  yaw_rate_penalty: 0.05
+
+  # Direct throttle/brake incentives — applied in local-geometry path (bug fix enabled these)
+  throttle_bonus_scale: 0.5   # direct reward for applying throttle — breaks brake-exploitation
+  brake_penalty_scale: 0.5    # direct cost for braking — makes idling expensive
   launch_boost_steps: 0
   launch_speed_target: 5.0
   launch_bonus_scale: 0.0
 
-  # Termination
+  # ── Termination guards (active in both paths) ─────────────────────────────
   stuck_speed_threshold: 0.8
   stuck_progress_epsilon: 0.001
-  stuck_max_steps: 200
-  stuck_terminal_penalty: -20.0
-  no_progress_max_steps: 500     # catch genuine donuts/stalls
+  stuck_max_steps: 40             # reduced from 200 — terminate stuck episodes in 40 steps, not 200
+  stuck_terminal_penalty: -10.0  # reduced from -20 (episode is shorter; absolute value matters less)
+  no_progress_max_steps: 150     # reduced from 500 — catch donuts/stalls faster
   no_progress_terminal_penalty: -10.0
 
-  # Anti-donut — time_penalty alone may not deter high-speed spinning
-  yaw_rate_penalty: 0.05
-
-  # Off-track — penalty mode so car can recover from corner clips
-  off_track_mode: penalty
-  off_track_terminal_penalty: -50.0   # unused in penalty mode
-  off_track_step_penalty: 0.0         # time_penalty is sufficient deterrent
+  # ── Off-track handling ────────────────────────────────────────────────────
+  # terminate: off-track = crash → immediate done + terminal penalty (recommended)
+  # penalty:   off-track = per-step additive penalty; episode continues
+  off_track_mode: penalty              # non-fatal — car can recover; but penalty must exceed forward reward
+  off_track_terminal_penalty: -50.0   # kept for reference (not used in penalty mode)
+  off_track_step_penalty: -20.0       # must exceed forward_local_scale × typical_speed to deter grass driving
+                                      # forward reward ≈ 2.0 × 14 = 28/step → -20 makes on-track strictly better
 
   curriculum:
     enabled: false

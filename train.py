@@ -242,7 +242,9 @@ class TorchPPOTrainer:
         self.world_size = int(world_size)
         self.rank = local_rank  # within-node rank; for multi-node use dist.get_rank()
         self.distributed = world_size > 1
-        self.device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
+        # Use the device resolved by get_device(); fall back to CPU only if nothing was provided.
+        # (The old hardcoded CUDA check here was ignoring the 'device' argument entirely.)
+        self.device = torch.device(device if device else ("cuda" if torch.cuda.is_available() else "cpu"))
         self.model_dir = Path(model_dir)
         self.log_dir = Path(log_dir)
 
@@ -267,6 +269,10 @@ class TorchPPOTrainer:
         self.ent_coef = float(ppo_cfg["ent_coef"])
         self.vf_coef = float(ppo_cfg["vf_coef"])
         self.max_grad_norm = float(ppo_cfg["max_grad_norm"])
+        # Value function clip range: limits how far V can move from V_old per update.
+        # Prevents the huge value-loss MSE (proportional to return scale) from
+        # dominating gradients and blowing up Adam's moment estimates early in training.
+        self.vf_clip_range = float(ppo_cfg.get("vf_clip_range", 10.0))
         min_log_std = float(ppo_cfg.get("min_log_std", -1.5))
         max_log_std = float(ppo_cfg.get("max_log_std", 1.0))
         steer_min_log_std = ppo_cfg.get("steer_min_log_std", None)
@@ -308,6 +314,14 @@ class TorchPPOTrainer:
 
             raw_action_np = raw_action.cpu().numpy()
             env_actions = self._raw_to_env_action_np(raw_action_np)
+
+            # Guard against NaN/Inf from an exploded policy — Box2D crashes on non-finite actions
+            if not np.isfinite(env_actions).all():
+                print("[WARN] NaN/Inf in actions (policy may have diverged). Substituting safe no-op action.", flush=True)
+                safe = np.array([[0.0, 0.3, 0.0]], dtype=np.float32)  # steer=0, gentle throttle, no brake
+                env_actions = np.where(np.isfinite(env_actions), env_actions, np.broadcast_to(safe, env_actions.shape))
+                env_actions = np.clip(env_actions, self.env_action_low, self.env_action_high)
+
             next_obs, rewards, dones, infos = self.env.step(env_actions)
 
             buffer.add(
@@ -365,14 +379,32 @@ class TorchPPOTrainer:
                 )
                 policy_loss = -torch.min(policy_loss_1, policy_loss_2).mean()
 
-                value_loss = F.mse_loss(values, batch["returns"])
+                # Value function loss with clipping (standard PPO-clip for value function).
+                # Limits how far V can move from V_old each update, preventing the value
+                # MSE from exploding when returns are large (e.g. 3000+) early in training.
+                value_loss_unclipped = F.mse_loss(values, batch["returns"])
+                if self.vf_clip_range > 0:
+                    values_clipped = batch["old_values"] + torch.clamp(
+                        values - batch["old_values"], -self.vf_clip_range, self.vf_clip_range
+                    )
+                    value_loss_clipped = F.mse_loss(values_clipped, batch["returns"])
+                    value_loss = torch.max(value_loss_unclipped, value_loss_clipped)
+                else:
+                    value_loss = value_loss_unclipped
                 entropy_loss = -entropy.mean()
                 loss = policy_loss + self.vf_coef * value_loss + self.ent_coef * entropy_loss
 
                 self.optimizer.zero_grad()
                 loss.backward()
                 grad_norm = torch.nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
-                self.optimizer.step()
+
+                # Skip update if gradients contain NaN/Inf — applying them would corrupt weights
+                if not torch.isfinite(grad_norm):
+                    print("[WARN] Non-finite gradient norm — skipping optimizer step to protect weights.", flush=True)
+                    self.optimizer.zero_grad()
+                    grad_norm = torch.tensor(0.0)
+                else:
+                    self.optimizer.step()
 
                 with torch.no_grad():
                     log_ratio = new_log_probs - batch["old_log_probs"]
@@ -629,38 +661,20 @@ class TorchPPOTrainer:
         visual_episodes = int(visual_cfg.get("n_episodes", 1))
         last_visual_eval_step = self.num_timesteps
 
-        # Async double-buffer: collect next rollout on CPU while GPU updates current
-        buffers = [None, None]
-        buf_idx = 0
-        # Seed the first buffer synchronously before the loop
-        obs, buffers[0] = self._collect_rollout(obs)
+        # Sequential collect → update (macOS requires all pyglet/env ops on the main thread;
+        # the async double-buffer pattern crashes with NSInternalInconsistencyException on Apple Silicon).
+        current_buffer = None
+        obs, current_buffer = self._collect_rollout(obs)
 
         while self.num_timesteps < total_timesteps:
             lr_now = self._set_learning_rate(total_timesteps)
 
-            # Start collecting NEXT rollout in a background thread
-            next_obs_holder = [obs]
-            collect_exc_holder = [None]
+            # Update policy on the current rollout buffer
+            train_metrics = self._update(current_buffer)
 
-            def _collect_next(holder=next_obs_holder, exc_holder=collect_exc_holder, idx=1 - buf_idx):
-                try:
-                    holder[0], buffers[idx] = self._collect_rollout(holder[0])
-                except Exception as e:
-                    exc_holder[0] = e
+            # Collect the next rollout on the main thread
+            obs, current_buffer = self._collect_rollout(obs)
 
-            collect_thread = threading.Thread(target=_collect_next, daemon=True)
-            collect_thread.start()
-
-            # GPU update on the current buffer while CPUs collect the next one
-            train_metrics = self._update(buffers[buf_idx])
-
-            collect_thread.join()
-            if collect_exc_holder[0] is not None:
-                raise collect_exc_holder[0]
-            obs = next_obs_holder[0]
-
-            # Swap buffers
-            buf_idx = 1 - buf_idx
             update_idx += 1
 
             # Log progress every update (steps, iters/s, GPU) so progress is always visible
@@ -685,6 +699,11 @@ class TorchPPOTrainer:
             gpu_mb = ""
             if self.device.type == "cuda":
                 gpu_mb = f" | {torch.cuda.memory_allocated(self.device) / 1024**2:.0f} MB alloc"
+            elif self.device.type == "mps":
+                try:
+                    gpu_mb = f" | {torch.mps.current_allocated_memory() / 1024**2:.0f} MB alloc"
+                except Exception:
+                    pass
             print(
                 f"[TorchPPO] {pct:.1f}% | {self.num_timesteps:,}/{total_timesteps:,} | "
                 f"{steps_per_sec:.0f} steps/s | {iters_per_sec:.2f} iters/s | ETA {eta_str} | "
@@ -906,6 +925,31 @@ class RewardShapingWrapper(gym.Wrapper):
         # Yaw-rate penalty: directly taxes spinning/donuts by penalising angular velocity.
         self.yaw_rate_penalty = float(reward_config.get('yaw_rate_penalty', 0.0))
 
+        # ── Local-geometry reward (new primary signal) ────────────────────────
+        # Master switch. When True the local-geometry path is used and tile-progress
+        # becomes purely auxiliary (set forward_progress_scale: 0.0 to disable it).
+        self.use_local_geometry_reward = bool(reward_config.get('use_local_geometry_reward', False))
+        # Scale for the forward-motion term: forward_local_scale * max(0, v_parallel)
+        self.forward_local_scale = float(reward_config.get('forward_local_scale', 2.0))
+        # Scale for the controlled-speed bonus (gated by center and alignment)
+        self.controlled_speed_scale = float(reward_config.get('controlled_speed_scale', 1.0))
+        # Base scale for lateral-deviation penalty (softened in curves by curvature_relief_scale)
+        self.center_penalty_scale = float(reward_config.get('center_penalty_scale', 0.5))
+        # Normalised lateral offset (fraction of road half-width) inside which no penalty applies
+        self.center_free_corridor = float(reward_config.get('center_free_corridor', 0.15))
+        # Normalised offset at which center_gate reaches 0 (for speed-bonus gating)
+        self.center_distance_tolerance = float(reward_config.get('center_distance_tolerance', 0.4))
+        # Divides center_penalty_scale in curves: effective_scale = base / (1 + scale * |curvature|)
+        self.curvature_relief_scale = float(reward_config.get('curvature_relief_scale', 5.0))
+        # Number of image rows ahead of the car to sample for the local centerline
+        self.local_lookahead_rows = int(reward_config.get('local_lookahead_rows', 30))
+        # Vertical position of the car in the image as a fraction of H (0=top, 1=bottom)
+        self.local_car_row_frac = float(reward_config.get('local_car_row_frac', 0.65))
+        # Minimum road pixels in a row for it to be included in the centerline fit
+        self.local_min_road_px = int(reward_config.get('local_min_road_px', 5))
+        # When True, logs all local-geometry fields into info dict each step (slow — debug only)
+        self.local_geometry_debug = bool(reward_config.get('local_geometry_debug', False))
+
         self.off_track_mode = str(reward_config.get('off_track_mode', 'terminate')).strip().lower()
         self.off_track_terminal_penalty = float(
             reward_config.get('off_track_terminal_penalty', -100.0)
@@ -1027,6 +1071,267 @@ class RewardShapingWrapper(gym.Wrapper):
             self._lap_completion_latched = False
         self._prev_progress = progress
 
+    # ── Local road-geometry helpers ───────────────────────────────────────────
+
+    @staticmethod
+    def _extract_road_mask(obs: np.ndarray) -> np.ndarray:
+        """Return a boolean mask (H, W) of pixels that look like drivable road.
+
+        Road is grayish (R≈G≈B, mid-range intensity).
+        Grass is green (G >> R, G >> B).
+        Curbs alternate red/white — excluded by the grayness test.
+
+        Uses simple RGB thresholds with no HSV conversion.
+        Threshold values may need tuning if the renderer or track skin changes.
+        """
+        obs_i = np.asarray(obs, dtype=np.int32)   # signed ints so diffs cannot wrap
+        R, G, B = obs_i[:, :, 0], obs_i[:, :, 1], obs_i[:, :, 2]
+        is_gray = (np.abs(R - G) < 25) & (np.abs(R - B) < 25) & (np.abs(G - B) < 25)
+        intensity = R + G + B
+        # Exclude very dark pixels (road markings, car shadow) and very bright (white curb stripe)
+        in_range = (intensity > 150) & (intensity < 480)
+        # Explicitly exclude clearly green pixels (grass) regardless of grayness
+        is_green = (G - R > 20) & (G - B > 20)
+        road_mask = is_gray & in_range & (~is_green)
+        return road_mask.astype(bool)
+
+    def _estimate_local_centerline(self, road_mask: np.ndarray) -> list:
+        """Sample local road-centre points from the visible crop.
+
+        Returns a list of (row, col) tuples where col is the horizontal centroid
+        of road pixels at that image row.  Rows are sampled from just ahead of the
+        car up to local_lookahead_rows further ahead (lower row index = further ahead
+        because row 0 is at the top of the ego-centred image).
+        """
+        H, W = road_mask.shape
+        car_row = int(H * self.local_car_row_frac)
+        # Leave a 5-row buffer below car_row so the car body does not bias the centroid.
+        start_row = max(car_row - 5, 0)
+        end_row = max(car_row - 5 - self.local_lookahead_rows, 0)
+        pts = []
+        for r in range(start_row, end_row - 1, -1):
+            road_cols = np.where(road_mask[r])[0]
+            if len(road_cols) < self.local_min_road_px:
+                continue
+            col_center = float(np.mean(road_cols))
+            pts.append((float(r), col_center))
+        return pts
+
+    def _estimate_local_tangent_curvature(self, centerline_pts: list) -> tuple:
+        """Fit local road tangent slope and curvature from sampled centreline points.
+
+        Linear fit:    col = a*row + b          → tangent slope a = d(col)/d(row)
+        Quadratic fit: col = a*row² + b*row + c → curvature ≈ 2*a (2nd derivative)
+
+        Returns (tangent_slope, curvature_scalar).
+        Falls back to (0.0, 0.0) — i.e. straight-ahead — if too few points.
+        """
+        if len(centerline_pts) < 2:
+            return 0.0, 0.0
+        rows = np.array([p[0] for p in centerline_pts], dtype=np.float64)
+        cols = np.array([p[1] for p in centerline_pts], dtype=np.float64)
+        try:
+            linear_coeffs = np.polyfit(rows, cols, 1)
+            tangent_slope = float(linear_coeffs[0])
+        except (np.linalg.LinAlgError, ValueError):
+            tangent_slope = 0.0
+        curvature = 0.0
+        if len(centerline_pts) >= 3:
+            try:
+                quad_coeffs = np.polyfit(rows, cols, 2)
+                curvature = float(2.0 * quad_coeffs[0])   # 2nd derivative
+            except (np.linalg.LinAlgError, ValueError):
+                curvature = 0.0
+        return tangent_slope, curvature
+
+    def _compute_lateral_offset(self, road_mask: np.ndarray) -> tuple:
+        """Compute the car's lateral offset from the local road centre.
+
+        Returns (normalised_offset, road_half_width_px) where
+            normalised_offset = (road_centre_col - car_col) / road_half_width.
+        Positive = road centre is to the right of the car (car is left of centre).
+        Negative = road centre is to the left of the car (car is right of centre).
+        Returns (0.0, 1.0) when road is not visible near the car's row.
+        """
+        H, W = road_mask.shape
+        car_row = int(H * self.local_car_row_frac)
+        car_col = W // 2   # car is horizontally centred in the ego-view
+        window = 4
+        r0 = max(car_row - window, 0)
+        r1 = min(car_row + window, H - 1)
+        road_cols = np.where(road_mask[r0:r1 + 1].any(axis=0))[0]
+        if len(road_cols) < self.local_min_road_px:
+            return 0.0, 1.0
+        road_centre = float(np.mean(road_cols))
+        road_half_width = max(float(np.max(road_cols) - np.min(road_cols)) / 2.0, 1.0)
+        normalised_offset = (road_centre - car_col) / road_half_width
+        return float(normalised_offset), road_half_width
+
+    def _compute_local_geometry(self, obs: np.ndarray) -> dict:
+        """Orchestrate local road geometry extraction from the current obs crop.
+
+        Returns a dict with keys:
+            road_mask       — (H, W) bool array
+            centerline_pts  — list of (row, col) tuples from lookahead scan
+            tangent_slope   — d(col)/d(row) of fitted local centreline
+            curvature       — 2nd derivative of fitted centreline (approx)
+            lateral_offset  — normalised lateral displacement of car from road centre
+            road_half_width — road half-width in pixels at the car's row
+        """
+        road_mask = self._extract_road_mask(obs)
+        centerline_pts = self._estimate_local_centerline(road_mask)
+        tangent_slope, curvature = self._estimate_local_tangent_curvature(centerline_pts)
+        lateral_offset, road_half_width = self._compute_lateral_offset(road_mask)
+        return {
+            "road_mask": road_mask,
+            "centerline_pts": centerline_pts,
+            "tangent_slope": tangent_slope,
+            "curvature": curvature,
+            "lateral_offset": lateral_offset,
+            "road_half_width": road_half_width,
+        }
+
+    @staticmethod
+    def _tangent_slope_to_world_vec(tangent_slope: float, car_angle: float) -> np.ndarray:
+        """Convert pixel-space tangent slope to a normalised world-space direction vector.
+
+        Image convention (ego-centred, camera rotates with car):
+          - row 0 is at the top (far ahead), row H-1 at the bottom (behind the car)
+          - col increases to the right
+          - "forward in image" = decreasing row = car-local forward direction
+          - "right in image"   = increasing col = car-local right direction
+
+        Given slope a = d(col)/d(row), the road tangent in image space points toward
+        lower row numbers (forward), so the image-space direction is (col=a, row=-1).
+        Mapping to car-local frame (x=right, y=forward):
+            car_local_x = a   (col → right)
+            car_local_y = 1   (−row → forward)
+
+        Box2D world convention: x=right, y=up; car.hull.angle = rotation from +x axis.
+        ASSUMPTION: angle=0 means the car points in the +y (world-up) direction, which
+        is standard for CarRacing-style Box2D environments.  If angle=0 actually points
+        along +x, swap sin and cos in the rotation below.
+
+        Car-local → world rotation:
+            car forward (local y) in world = (−sin(angle), cos(angle))
+            car right   (local x) in world = ( cos(angle), sin(angle))
+
+        Returns normalised (wx, wy) float32 array.
+        """
+        local_x = float(tangent_slope)
+        local_y = 1.0
+        norm = np.sqrt(local_x ** 2 + local_y ** 2)
+        if norm < 1e-8:
+            norm = 1.0
+        local_x /= norm
+        local_y /= norm
+        ca, sa = np.cos(car_angle), np.sin(car_angle)
+        wx = local_x * ca + local_y * (-sa)
+        wy = local_x * sa + local_y * ca
+        result = np.array([wx, wy], dtype=np.float32)
+        n = float(np.linalg.norm(result))
+        if n > 1e-8:
+            result /= n
+        return result
+
+    def _compute_local_forward_term(self, v_parallel: float) -> float:
+        """Reward forward motion along the locally estimated road direction.
+
+        Only positive v_parallel is rewarded — backward motion clips to 0.
+        The time_penalty and idle_penalty already discourage standing still.
+        """
+        return self.forward_local_scale * max(0.0, v_parallel)
+
+    def _compute_center_penalty(self, lateral_offset: float, curvature: float) -> float:
+        """Soft quadratic penalty for lateral deviation from the local road centre.
+
+        A free corridor [0, center_free_corridor] has zero penalty.
+        Beyond the corridor the penalty grows quadratically.
+        In sharp curves the penalty is reduced via curvature_relief_scale so the car
+        can take a faster racing line without being forced to hug the exact centre.
+        """
+        effective_scale = self.center_penalty_scale / (
+            1.0 + self.curvature_relief_scale * abs(curvature)
+        )
+        excess = max(0.0, abs(lateral_offset) - self.center_free_corridor)
+        denom = max(1.0 - self.center_free_corridor, 1e-6)
+        normalised_excess = excess / denom
+        return effective_scale * (normalised_excess ** 2)
+
+    def _compute_controlled_speed_bonus(
+        self, v_parallel: float, lateral_offset: float, alignment: float
+    ) -> float:
+        """Reward speed only when it is aligned with the road and within the drivable corridor.
+
+        center_gate    → 0 when lateral offset exceeds center_distance_tolerance
+        alignment_gate → 0 when velocity direction is not aligned with road tangent
+        Both gates multiply the speed bonus so all three conditions must hold.
+        This lets the car carry speed through a curve that deviates slightly from centre,
+        but prevents rewarding fast driving that is not actually along the road.
+        """
+        center_gate = max(
+            0.0, 1.0 - abs(lateral_offset) / max(self.center_distance_tolerance, 1e-6)
+        )
+        alignment_gate = max(0.0, alignment)
+        return self.controlled_speed_scale * max(0.0, v_parallel) * center_gate * alignment_gate
+
+    def _check_off_track_terminal(self, is_offtrack: bool) -> tuple:
+        """Handle off-track detection according to off_track_mode config.
+
+        Returns (is_terminal: bool, reward_adjustment: float).
+        terminate mode: episode ends immediately with a large negative reward.
+        penalty mode:   a per-step additive penalty; episode continues.
+        """
+        if not is_offtrack:
+            return False, 0.0
+        if self.off_track_mode == "terminate":
+            return True, float(self.off_track_terminal_penalty)
+        return False, float(self.off_track_step_penalty)
+
+    def _build_reward_debug_info(
+        self,
+        geo: dict,
+        tangent_world: np.ndarray,
+        v_parallel: float,
+        alignment: float,
+        center_gate: float,
+        alignment_gate: float,
+        comp_forward_local: float,
+        comp_center_penalty: float,
+        comp_speed_bonus: float,
+        comp_time: float,
+        comp_idle: float,
+        comp_yaw: float,
+    ) -> dict:
+        """Build a structured debug dict for local-geometry reward fields.
+
+        Only called when local_geometry_debug=True.  Adds lg/ prefixed fields to
+        info so they can be inspected in logs or tensorboard without changing any
+        normal monitoring code that reads the standard reward keys.
+        """
+        return {
+            "lg/tangent_slope": float(geo["tangent_slope"]),
+            "lg/curvature": float(geo["curvature"]),
+            "lg/lateral_offset": float(geo["lateral_offset"]),
+            "lg/road_half_width_px": float(geo["road_half_width"]),
+            "lg/centerline_n_pts": int(len(geo["centerline_pts"])),
+            "lg/tangent_world_x": float(tangent_world[0]),
+            "lg/tangent_world_y": float(tangent_world[1]),
+            "lg/v_parallel": float(v_parallel),
+            "lg/alignment": float(alignment),
+            "lg/center_gate": float(center_gate),
+            "lg/alignment_gate": float(alignment_gate),
+            "lg/comp_forward_local": float(comp_forward_local),
+            "lg/comp_center_penalty": float(comp_center_penalty),
+            "lg/comp_speed_bonus": float(comp_speed_bonus),
+            "lg/comp_time": float(comp_time),
+            "lg/comp_idle": float(comp_idle),
+            "lg/comp_yaw": float(comp_yaw),
+            "lg/road_mask_sum": int(geo["road_mask"].sum()),
+        }
+
+    # ─────────────────────────────────────────────────────────────────────────
+
     def step(self, action):
         obs, reward, done, info = self.env.step(action)
         if not isinstance(info, dict):
@@ -1047,11 +1352,15 @@ class RewardShapingWrapper(gym.Wrapper):
         is_sharp_turn = False
         corner_angle = 0.0
         velocity_vec = np.zeros(2, dtype=np.float32)
+        # car_angle: Box2D hull angle in radians; 0.0 = safe default when car unavailable.
+        # Used by _tangent_slope_to_world_vec to convert pixel-space road tangent to world space.
+        car_angle = 0.0
         if hasattr(base_env, "cars") and base_env.cars:
             car = base_env.cars[0]
             vel = car.hull.linearVelocity
             velocity_vec = np.array([vel[0], vel[1]], dtype=np.float32)
             speed = float(np.linalg.norm(velocity_vec))
+            car_angle = float(car.hull.angle)
             track_dir, is_sharp_turn, corner_angle = self._get_track_context(base_env, car)
 
         # Angular velocity (yaw rate) — high when doing donuts.
@@ -1083,130 +1392,325 @@ class RewardShapingWrapper(gym.Wrapper):
             and bool(driving_on_grass[0])
         )
 
-        # Primary reward: actual tile progress (0→1 per lap). Scaled up so one full
-        # lap ≈ forward_progress_scale total reward.
-        comp_forward = self.forward_progress_scale * progress_delta
+        # ── Reward computation ────────────────────────────────────────────────
+        # Two paths: local-geometry-based (new) or tile-progress-based (legacy).
+        # Switch via use_local_geometry_reward in config. Old code is fully preserved.
+        already_terminated = False
 
-        # Dense directional guidance: velocity · track_dir. Tells the policy which way
-        # to steer every step — without this, progress_delta=0 for "wrong direction"
-        # AND "not moving", so the policy gets no steering correction signal.
-        # Safe because off_track_mode=terminate prevents off-track exploitation.
-        comp_alignment = self.track_alignment_scale * float(np.dot(velocity_vec, track_dir))
+        if self.use_local_geometry_reward and self.use_custom_reward:
+            # ── NEW PATH: local-geometry-based reward ─────────────────────────
+            # Off-track is checked first. In 'terminate' mode it ends the episode
+            # immediately with a crash penalty; in 'penalty' mode a per-step
+            # adjustment is returned and the episode continues.
+            is_terminal_offtrack, offtrack_adj = self._check_off_track_terminal(is_offtrack)
 
-        # Speed bonus only while ON track — prevents gaming it by driving on grass.
-        comp_straight_speed = self.straight_speed_scale * speed * (0.0 if is_offtrack else 1.0) if not is_sharp_turn else 0.0
-
-        # Lateral velocity penalty: penalises sliding perpendicular to the track.
-        # When car goes fast and oversteers (speed=29), it slides sideways — this directly
-        # penalises the loss-of-control physics that causes tailspins and off-track.
-        lateral_dir = np.array([-track_dir[1], track_dir[0]], dtype=np.float32)
-        lateral_speed = float(np.dot(velocity_vec, lateral_dir))
-        comp_lateral = -self.lateral_velocity_penalty * abs(lateral_speed)
-        corner_overspeed = max(0.0, speed - self.corner_target_speed) if is_sharp_turn else 0.0
-        comp_corner_overspeed = -self.corner_overspeed_penalty_scale * corner_overspeed
-
-        speed_delta = 0.0
-        if self._prev_speed is not None:
-            speed_delta = self._prev_speed - speed
-        comp_apex_decel = 0.0
-        if is_sharp_turn and speed_delta > 0.0:
-            comp_apex_decel = min(self.apex_decel_reward_scale * speed_delta, self.apex_decel_reward_cap)
-
-        comp_steer_smooth = 0.0
-        if self._prev_steer is not None:
-            steer_delta = abs(steer_value - self._prev_steer)
-            if self.steer_delta_cap > 0.0:
-                steer_delta = min(steer_delta, self.steer_delta_cap)
-            comp_steer_smooth = -self.steer_smoothness_penalty * steer_delta
-        # Magnitude penalty: |steer|² — makes extreme lock expensive, gentle curves cheap.
-        comp_steer_mag = -self.steer_magnitude_penalty * (steer_value ** 2)
-        self._prev_steer = steer_value
-        self._prev_speed = speed
-
-        comp_time = float(self.time_penalty)
-        comp_idle = float(self.idle_penalty) if speed < self.idle_speed_threshold else 0.0
-        comp_throttle = float(self.throttle_bonus_scale * throttle_value)
-        comp_brake = 0.0
-        if not is_sharp_turn:
-            comp_brake = -float(self.brake_penalty_scale * brake_value)
-        comp_launch = 0.0
-        if self._episode_steps <= self.launch_boost_steps and speed < self.launch_speed_target:
-            comp_launch = float(self.launch_bonus_scale * throttle_value)
-        # Yaw-rate penalty: penalise spinning/donuts directly via angular velocity.
-        comp_yaw = -self.yaw_rate_penalty * yaw_rate
-        shaped_reward = (
-            comp_forward
-            + comp_alignment
-            + comp_straight_speed
-            + comp_lateral
-            + comp_corner_overspeed
-            + comp_apex_decel
-            + comp_steer_smooth
-            + comp_steer_mag
-            + comp_time
-            + comp_idle
-            + comp_throttle
-            + comp_brake
-            + comp_launch
-            + comp_yaw
-        )
-
-        total_reward = shaped_reward if self.use_custom_reward else float(reward)
-        if is_offtrack:
-            if self.off_track_mode == "terminate":
-                total_reward = float(self.off_track_terminal_penalty)
+            if is_terminal_offtrack:
+                # Fatal crash: skip all reward shaping, set done and terminate.
+                total_reward = offtrack_adj
                 done = True
+                already_terminated = True
+                # Zero-fill local-geometry fields so info logging is consistent.
+                geo = {
+                    "tangent_slope": 0.0, "curvature": 0.0,
+                    "lateral_offset": 0.0, "road_half_width": 1.0,
+                    "centerline_pts": [],
+                    "road_mask": np.zeros((1, 1), dtype=bool),
+                }
+                tangent_world = np.array([0.0, 1.0], dtype=np.float32)
+                v_parallel = 0.0
+                alignment = 0.0
+                center_gate = 0.0
+                alignment_gate = 0.0
+                comp_forward_local = 0.0
+                comp_center_penalty = 0.0
+                comp_speed_bonus = 0.0
+                comp_time_lg = 0.0
+                comp_idle_lg = 0.0
+                comp_yaw_lg = 0.0
             else:
-                total_reward += float(self.off_track_step_penalty)
+                # Extract local road geometry from the current ego-centred observation.
+                geo = self._compute_local_geometry(obs)
+                tangent_world = self._tangent_slope_to_world_vec(
+                    geo["tangent_slope"], car_angle
+                )
+                # Project world velocity onto the locally estimated road tangent.
+                v_parallel = float(np.dot(velocity_vec, tangent_world))
+                vel_len = float(np.linalg.norm(velocity_vec))
+                vel_norm = (
+                    velocity_vec / vel_len if vel_len > 1e-6
+                    else np.zeros(2, dtype=np.float32)
+                )
+                # alignment ∈ [-1, 1]: 1 = perfectly aligned with road, -1 = going backward
+                alignment = float(np.dot(vel_norm, tangent_world))
 
-        # Stuck detection: speed-based (slow AND no progress).
-        if speed < self.stuck_speed_threshold and progress_delta < self.stuck_progress_epsilon:
-            self._stuck_steps += 1
+                # Gates (also stored for debug logging).
+                center_gate = max(
+                    0.0,
+                    1.0 - abs(geo["lateral_offset"]) / max(self.center_distance_tolerance, 1e-6),
+                )
+                alignment_gate = max(0.0, alignment)
+
+                # ── Individual reward components ──────────────────────────────
+                # 1. Forward-motion term: reward movement along local road direction.
+                comp_forward_local = self._compute_local_forward_term(v_parallel)
+
+                # 2. Soft centre-deviation penalty (weakened in curves).
+                comp_center_penalty = self._compute_center_penalty(
+                    geo["lateral_offset"], geo["curvature"]
+                )
+
+                # 3. Controlled-speed bonus: speed rewarded only when aligned and centred.
+                comp_speed_bonus = (
+                    self.controlled_speed_scale
+                    * max(0.0, v_parallel)
+                    * center_gate
+                    * alignment_gate
+                )
+
+                comp_time_lg = float(self.time_penalty)
+                comp_idle_lg = float(self.idle_penalty) if speed < self.idle_speed_threshold else 0.0
+                comp_yaw_lg = -self.yaw_rate_penalty * yaw_rate
+
+                # 4. Throttle bonus / brake penalty: directly incentivise forward action.
+                # These were stored in self but never applied in this path (bug fix).
+                comp_throttle_lg = self.throttle_bonus_scale * throttle_value
+                comp_brake_pen_lg = -self.brake_penalty_scale * brake_value
+
+                # ── Assemble total reward ─────────────────────────────────────
+                # reward = forward_term + speed_bonus - center_penalty
+                #        + time_penalty + idle_penalty + yaw_penalty
+                #        + throttle_bonus + brake_penalty
+                #        + offtrack_adj  (0 in terminate mode; step penalty in penalty mode)
+                total_reward = (
+                    comp_forward_local
+                    + comp_speed_bonus
+                    - comp_center_penalty
+                    + comp_time_lg
+                    + comp_idle_lg
+                    + comp_yaw_lg
+                    + comp_throttle_lg
+                    + comp_brake_pen_lg
+                    + offtrack_adj
+                )
+
+            # Stuck and no-progress detectors remain active in the new path.
+            # They use tile-count progress_delta as a termination guard (not a reward
+            # signal), so they still work even without the tile-progress reward.
+            if not already_terminated:
+                if speed < self.stuck_speed_threshold and progress_delta < self.stuck_progress_epsilon:
+                    self._stuck_steps += 1
+                else:
+                    self._stuck_steps = 0
+                is_stuck = self._stuck_steps >= self.stuck_max_steps
+                if is_stuck:
+                    total_reward = float(self.stuck_terminal_penalty)
+                    done = True
+                    already_terminated = True
+            else:
+                self._stuck_steps = 0
+                is_stuck = False
+
+            if not already_terminated:
+                if progress_delta < self.stuck_progress_epsilon:
+                    self._no_progress_steps += 1
+                else:
+                    self._no_progress_steps = 0
+                is_no_progress = (
+                    (not is_stuck)
+                    and self._no_progress_steps >= self.no_progress_max_steps
+                )
+                if is_no_progress:
+                    total_reward = float(self.no_progress_terminal_penalty)
+                    done = True
+            else:
+                is_no_progress = False
+
+            self._prev_steer = steer_value
+            self._prev_speed = speed
+
+            # ── Info: telemetry and reward decomposition ──────────────────────
+            info["events/offtrack"] = int(is_offtrack)
+            info["events/stuck"] = int(is_stuck)
+            info["events/no_progress"] = int(is_no_progress)
+            info["telemetry/yaw_rate"] = float(yaw_rate)
+            info["telemetry/curriculum_stage"] = int(self.curriculum_stage)
+            info["telemetry/speed"] = float(speed)
+            info["telemetry/is_corner"] = 0        # not computed in local-geometry path
+            info["telemetry/corner_angle"] = 0.0   # not computed in local-geometry path
+            info["telemetry/steer"] = float(steer_value)
+            info["telemetry/throttle"] = float(throttle_value)
+            info["telemetry/brake"] = float(brake_value)
+            # Legacy reward keys zeroed so downstream monitors do not crash.
+            info["rewards/forward_progress"] = 0.0
+            info["rewards/alignment"] = 0.0
+            info["rewards/straight_speed"] = 0.0
+            info["rewards/corner_overspeed"] = 0.0
+            info["rewards/apex_decel"] = 0.0
+            info["rewards/steer_smoothness"] = 0.0
+            info["rewards/steer_magnitude"] = 0.0
+            info["rewards/lateral"] = 0.0
+            info["rewards/time"] = float(comp_time_lg)
+            info["rewards/idle"] = float(comp_idle_lg)
+            info["rewards/throttle"] = float(comp_throttle_lg) if not already_terminated else 0.0
+            info["rewards/brake"] = float(comp_brake_pen_lg) if not already_terminated else 0.0
+            info["rewards/launch"] = 0.0
+            info["rewards/yaw"] = float(comp_yaw_lg)
+            info["rewards/total"] = float(total_reward)
+            # New local-geometry reward keys.
+            info["rewards/lg_forward"] = float(comp_forward_local)
+            info["rewards/lg_speed_bonus"] = float(comp_speed_bonus)
+            info["rewards/lg_center_penalty"] = float(comp_center_penalty)
+            info["lap_count"] = int(self._lap_count)
+
+            if self.local_geometry_debug:
+                debug_dict = self._build_reward_debug_info(
+                    geo, tangent_world, v_parallel, alignment,
+                    center_gate, alignment_gate,
+                    comp_forward_local, comp_center_penalty, comp_speed_bonus,
+                    comp_time_lg, comp_idle_lg, comp_yaw_lg,
+                )
+                info.update(debug_dict)
+
         else:
-            self._stuck_steps = 0
-        is_stuck = self._stuck_steps >= self.stuck_max_steps
-        if is_stuck:
-            total_reward = float(self.stuck_terminal_penalty)
-            done = True
+            # ── LEGACY PATH: tile-progress-based reward (fully preserved) ─────
+            # Primary reward: actual tile progress (0→1 per lap). Scaled up so one full
+            # lap ≈ forward_progress_scale total reward.
+            comp_forward = self.forward_progress_scale * progress_delta
 
-        # No-progress detection: catches donuts — fast but zero tile advancement.
-        # Separate from speed-stuck so spinning at high speed still terminates.
-        if progress_delta < self.stuck_progress_epsilon:
-            self._no_progress_steps += 1
-        else:
-            self._no_progress_steps = 0
-        is_no_progress = (not is_stuck) and self._no_progress_steps >= self.no_progress_max_steps
-        if is_no_progress:
-            total_reward = float(self.no_progress_terminal_penalty)
-            done = True
+            # Dense directional guidance: velocity · track_dir. Tells the policy which way
+            # to steer every step — without this, progress_delta=0 for "wrong direction"
+            # AND "not moving", so the policy gets no steering correction signal.
+            # Safe because off_track_mode=terminate prevents off-track exploitation.
+            comp_alignment = self.track_alignment_scale * float(np.dot(velocity_vec, track_dir))
 
-        info["events/offtrack"] = int(is_offtrack)
-        info["events/stuck"] = int(is_stuck)
-        info["events/no_progress"] = int(is_no_progress)
-        info["telemetry/yaw_rate"] = float(yaw_rate)
-        info["telemetry/curriculum_stage"] = int(self.curriculum_stage)
-        info["telemetry/speed"] = float(speed)
-        info["telemetry/is_corner"] = int(is_sharp_turn)
-        info["telemetry/corner_angle"] = float(corner_angle)
-        info["telemetry/steer"] = float(steer_value)
-        info["telemetry/throttle"] = float(throttle_value)
-        info["telemetry/brake"] = float(brake_value)
-        info["rewards/forward_progress"] = float(comp_forward)
-        info["rewards/alignment"] = float(comp_alignment)
-        info["rewards/straight_speed"] = float(comp_straight_speed)
-        info["rewards/corner_overspeed"] = float(comp_corner_overspeed)
-        info["rewards/apex_decel"] = float(comp_apex_decel)
-        info["rewards/steer_smoothness"] = float(comp_steer_smooth)
-        info["rewards/steer_magnitude"] = float(comp_steer_mag)
-        info["rewards/lateral"] = float(comp_lateral)
-        info["rewards/time"] = float(comp_time)
-        info["rewards/idle"] = float(comp_idle)
-        info["rewards/throttle"] = float(comp_throttle)
-        info["rewards/brake"] = float(comp_brake)
-        info["rewards/launch"] = float(comp_launch)
-        info["rewards/yaw"] = float(comp_yaw)
-        info["rewards/total"] = float(total_reward)
-        info["lap_count"] = int(self._lap_count)
+            # Speed bonus only while ON track — prevents gaming it by driving on grass.
+            comp_straight_speed = self.straight_speed_scale * speed * (0.0 if is_offtrack else 1.0) if not is_sharp_turn else 0.0
+
+            # Lateral velocity penalty: penalises sliding perpendicular to the track.
+            # When car goes fast and oversteers (speed=29), it slides sideways — this directly
+            # penalises the loss-of-control physics that causes tailspins and off-track.
+            lateral_dir = np.array([-track_dir[1], track_dir[0]], dtype=np.float32)
+            lateral_speed = float(np.dot(velocity_vec, lateral_dir))
+            comp_lateral = -self.lateral_velocity_penalty * abs(lateral_speed)
+            corner_overspeed = max(0.0, speed - self.corner_target_speed) if is_sharp_turn else 0.0
+            comp_corner_overspeed = -self.corner_overspeed_penalty_scale * corner_overspeed
+
+            speed_delta = 0.0
+            if self._prev_speed is not None:
+                speed_delta = self._prev_speed - speed
+            comp_apex_decel = 0.0
+            if is_sharp_turn and speed_delta > 0.0:
+                comp_apex_decel = min(self.apex_decel_reward_scale * speed_delta, self.apex_decel_reward_cap)
+
+            comp_steer_smooth = 0.0
+            if self._prev_steer is not None:
+                steer_delta = abs(steer_value - self._prev_steer)
+                if self.steer_delta_cap > 0.0:
+                    steer_delta = min(steer_delta, self.steer_delta_cap)
+                comp_steer_smooth = -self.steer_smoothness_penalty * steer_delta
+            # Magnitude penalty: |steer|² — makes extreme lock expensive, gentle curves cheap.
+            comp_steer_mag = -self.steer_magnitude_penalty * (steer_value ** 2)
+            self._prev_steer = steer_value
+            self._prev_speed = speed
+
+            comp_time = float(self.time_penalty)
+            comp_idle = float(self.idle_penalty) if speed < self.idle_speed_threshold else 0.0
+            comp_throttle = float(self.throttle_bonus_scale * throttle_value)
+            comp_brake = 0.0
+            if not is_sharp_turn:
+                comp_brake = -float(self.brake_penalty_scale * brake_value)
+            comp_launch = 0.0
+            if self._episode_steps <= self.launch_boost_steps and speed < self.launch_speed_target:
+                comp_launch = float(self.launch_bonus_scale * throttle_value)
+            # Yaw-rate penalty: penalise spinning/donuts directly via angular velocity.
+            comp_yaw = -self.yaw_rate_penalty * yaw_rate
+            shaped_reward = (
+                comp_forward
+                + comp_alignment
+                + comp_straight_speed
+                + comp_lateral
+                + comp_corner_overspeed
+                + comp_apex_decel
+                + comp_steer_smooth
+                + comp_steer_mag
+                + comp_time
+                + comp_idle
+                + comp_throttle
+                + comp_brake
+                + comp_launch
+                + comp_yaw
+            )
+
+            total_reward = shaped_reward if self.use_custom_reward else float(reward)
+            if is_offtrack:
+                if self.off_track_mode == "terminate":
+                    total_reward = float(self.off_track_terminal_penalty)
+                    done = True
+                    already_terminated = True
+                else:
+                    total_reward += float(self.off_track_step_penalty)
+
+            # Stuck detection: speed-based (slow AND no progress).
+            if not already_terminated:
+                if speed < self.stuck_speed_threshold and progress_delta < self.stuck_progress_epsilon:
+                    self._stuck_steps += 1
+                else:
+                    self._stuck_steps = 0
+                is_stuck = self._stuck_steps >= self.stuck_max_steps
+                if is_stuck:
+                    total_reward = float(self.stuck_terminal_penalty)
+                    done = True
+                    already_terminated = True
+            else:
+                self._stuck_steps = 0
+                is_stuck = False
+
+            # No-progress detection: catches donuts — fast but zero tile advancement.
+            # Separate from speed-stuck so spinning at high speed still terminates.
+            if not already_terminated:
+                if progress_delta < self.stuck_progress_epsilon:
+                    self._no_progress_steps += 1
+                else:
+                    self._no_progress_steps = 0
+                is_no_progress = (not is_stuck) and self._no_progress_steps >= self.no_progress_max_steps
+                if is_no_progress:
+                    total_reward = float(self.no_progress_terminal_penalty)
+                    done = True
+            else:
+                is_no_progress = False
+
+            info["events/offtrack"] = int(is_offtrack)
+            info["events/stuck"] = int(is_stuck)
+            info["events/no_progress"] = int(is_no_progress)
+            info["telemetry/yaw_rate"] = float(yaw_rate)
+            info["telemetry/curriculum_stage"] = int(self.curriculum_stage)
+            info["telemetry/speed"] = float(speed)
+            info["telemetry/is_corner"] = int(is_sharp_turn)
+            info["telemetry/corner_angle"] = float(corner_angle)
+            info["telemetry/steer"] = float(steer_value)
+            info["telemetry/throttle"] = float(throttle_value)
+            info["telemetry/brake"] = float(brake_value)
+            info["rewards/forward_progress"] = float(comp_forward)
+            info["rewards/alignment"] = float(comp_alignment)
+            info["rewards/straight_speed"] = float(comp_straight_speed)
+            info["rewards/corner_overspeed"] = float(comp_corner_overspeed)
+            info["rewards/apex_decel"] = float(comp_apex_decel)
+            info["rewards/steer_smoothness"] = float(comp_steer_smooth)
+            info["rewards/steer_magnitude"] = float(comp_steer_mag)
+            info["rewards/lateral"] = float(comp_lateral)
+            info["rewards/time"] = float(comp_time)
+            info["rewards/idle"] = float(comp_idle)
+            info["rewards/throttle"] = float(comp_throttle)
+            info["rewards/brake"] = float(comp_brake)
+            info["rewards/launch"] = float(comp_launch)
+            info["rewards/yaw"] = float(comp_yaw)
+            info["rewards/total"] = float(total_reward)
+            # New local-geometry keys zeroed so downstream monitors never KeyError.
+            info["rewards/lg_forward"] = 0.0
+            info["rewards/lg_speed_bonus"] = 0.0
+            info["rewards/lg_center_penalty"] = 0.0
+            info["lap_count"] = int(self._lap_count)
+
         return obs, float(total_reward), done, info
 
 
@@ -1355,14 +1859,22 @@ def create_env(config, rank=0, seed=0):
     os.makedirs(log_dir, exist_ok=True)
     env = Monitor(env, filename=os.path.join(log_dir, f'monitor_{rank}'))
     
-    # Set seed
+    # Set seed — gym 0.17.3 does not accept seed= kwarg in reset(); use env.seed() instead.
     try:
         env.reset(seed=seed)
     except TypeError:
         if hasattr(env, "seed"):
             env.seed(seed)
         env.reset()
-    
+
+    # #region agent log — create_env success (debug session 31f00d)
+    import time as _t; import os as _o
+    _o.makedirs("/Users/epablo/Documents/STAT4830/Mar20_Work/Racing_Gym_RL/.cursor", exist_ok=True)
+    open("/Users/epablo/Documents/STAT4830/Mar20_Work/Racing_Gym_RL/.cursor/debug-31f00d.log", "a").write(
+        '{"sessionId":"31f00d","runId":"run7","hypothesisId":"cocoa_main_thread","location":"train.py:create_env","message":"env_reset_ok","data":{"rank":%d},"timestamp":%d}\n' % (rank, int(_t.time()*1000))
+    )
+    # #endregion agent log
+
     return env
 
 
@@ -1374,30 +1886,47 @@ def make_env(config, rank, seed):
 
 
 def get_device(config):
-    """Determine the device to use for training."""
+    """Determine the device to use for training.
+
+    Priority order for 'auto': CUDA > MPS (Apple Silicon) > CPU.
+    Requesting 'cuda' on an M-series Mac gracefully falls back to MPS.
+    """
     device_config = config.get('device', 'auto')
-    
+
     if device_config == 'auto':
         if torch.cuda.is_available():
             device = 'cuda'
+        elif torch.backends.mps.is_available():
+            device = 'mps'
         else:
             device = 'cpu'
-    elif device_config == 'cuda':
+    elif device_config in ('cuda', 'gpu'):
         if torch.cuda.is_available():
             device = 'cuda'
+        elif torch.backends.mps.is_available():
+            print("WARNING: CUDA requested but not available. Falling back to MPS (Apple Silicon GPU).")
+            device = 'mps'
         else:
-            print("WARNING: CUDA requested but not available. Falling back to CPU.")
+            print("WARNING: No GPU available. Falling back to CPU.")
+            device = 'cpu'
+    elif device_config == 'mps':
+        if torch.backends.mps.is_available():
+            device = 'mps'
+        else:
+            print("WARNING: MPS requested but not available. Falling back to CPU.")
             device = 'cpu'
     else:
         device = device_config
-    
+
     # Print device info
     if device == 'cuda':
-        print(f"GPU detected: {torch.cuda.get_device_name(0)}")
+        print(f"Using CUDA GPU: {torch.cuda.get_device_name(0)}")
         print(f"CUDA version: {torch.version.cuda}")
+    elif device == 'mps':
+        print("Using Apple Silicon GPU (MPS) for training")
     else:
         print("Using CPU for training")
-    
+
     return device
 
 

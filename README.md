@@ -45,17 +45,31 @@ python -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 ```
 
-3. Install dependencies:
+3. Install the `swig` system tool (required to compile `box2d-py` from source on macOS arm64 — no pre-built wheel available):
 ```bash
-pip install -r requirements.txt
+brew install swig
 ```
 
-4. Install `multi_car_racing` (no-deps to avoid shapely/box2d build issues):
+4. Install all Python dependencies using the provided script:
 ```bash
-pip install git+https://github.com/igilitschenski/multi_car_racing.git --no-deps
+chmod +x setup_local.sh && ./setup_local.sh
 ```
 
-Note: `multi_car_racing` is installed from GitHub and registers the environment during import.
+This script installs packages in the correct order, bypassing pip's strict version
+resolver for the `gym==0.17.3` / `stable-baselines3` conflict (they declare
+incompatible gym versions in their metadata but work fine together at runtime).
+It also auto-installs `swig` via Homebrew if it is missing.
+
+> **Why not `pip install -r requirements.txt`?**
+> `stable-baselines3` declares `gym>=0.21` in its PyPI metadata while
+> `multi_car_racing` requires `gym==0.17.3`. Modern pip (≥ 20.3) refuses to
+> install both simultaneously. `setup_local.sh` uses `--no-deps` for the
+> conflicting packages to bypass the resolver.
+
+4. Verify the install:
+```bash
+python3 -c "import train; print('OK')"
+```
 
 ### Google Colab
 
