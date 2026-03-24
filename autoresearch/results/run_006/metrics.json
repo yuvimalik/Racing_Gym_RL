@@ -1,0 +1,13 @@
+{
+  "experiment_id": 6,
+  "timestamp": "2026-03-23T12:14:59.541112",
+  "was_best": false,
+  "promoted_to_best_artifacts": false,
+  "changes_description": "baseline (no changes)",
+  "loop_wall_clock_seconds": 2400.166084051132,
+  "run_dir": "C:\\Users\\yuv05\\OneDrive\\Documents\\GitHub\\Racing_Gym_RL\\autoresearch\\results\\run_006",
+  "candidate_code_path": "C:\\Users\\yuv05\\OneDrive\\Documents\\GitHub\\Racing_Gym_RL\\autoresearch\\results\\run_006\\candidate_train_ppo.py",
+  "mean_reward": -999.0,
+  "error": "Timeout after 2400s",
+  "return_code": 1
+}

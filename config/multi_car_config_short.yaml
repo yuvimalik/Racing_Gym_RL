@@ -1,0 +1,90 @@
+# Multi-Car Racing PPO Training Configuration
+
+# Environment settings
+environment:
+  env_id: MultiCarRacing-v0
+  num_agents: 1
+  direction: CCW
+  use_random_direction: true
+  backwards_flag: true
+  h_ratio: 0.25
+  use_ego_color: false
+  render_mode: null  # "human" or "rgb_array"
+
+# PPO hyperparameters (image-based)
+ppo:
+  learning_rate: 3.0e-4
+  n_steps: 1024  # Shorter per-env rollout to improve throughput with 8 envs
+  batch_size: 1024  # Larger batch size to increase GPU utilization
+  n_epochs: 10  # Standard epochs for full training
+  gamma: 0.999
+  gae_lambda: 0.95
+  clip_range: 0.2
+  ent_coef: 0.02
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+
+# Policy network architecture
+policy:
+  policy_type: CnnPolicy
+
+# Training settings
+training:
+  trainer_backend: sb3  # sb3 (stable-baselines3) or torch (local PyTorch PPO)
+  torch_policy_variant: autoresearch_run_008
+  total_timesteps: 50000  # Shorter training run to cover more of the circuit
+  eval_freq: 10000  # Evaluate roughly every 15% of training
+  n_eval_episodes: 2  # More episodes for reliable evaluation stats
+  save_freq: 25000  # Save checkpoints every 200k steps
+  log_interval: 10  # Standard logging frequency
+  num_envs: 1  # Parallel environments to boost throughput while keeping CPU usable
+
+# Paths
+paths:
+  model_dir: ./models
+  log_dir: ./logs
+  results_dir: ./results
+
+# Device
+device: cuda  # "auto", "cpu", or "cuda" - explicitly set to cuda to use GPU
+
+# Reward shaping (extra penalties)
+reward_shaping:
+  enabled: true
+  off_track_penalty: 1.0  # Additional penalty per step on grass
+  wrong_way_penalty: 2.0  # Additional penalty per step when driving backward
+  spinning_penalty: 0.5  # Additional penalty per step when spinning in place
+  spinning_speed_threshold: 1.0  # Below this speed, count as potential spinning
+  spinning_angular_velocity_threshold: 2.0  # Above this angular velocity, count as spinning
+  brake_on_sharp_turn_enabled: false
+  brake_reward_scale: 0.0  # Disabled: no explicit positive reward for brake action
+  sharp_turn_threshold: 0.35  # Radians; larger means only very sharp turns qualify
+  sharp_turn_lookahead: 6  # Track points ahead to measure curvature
+  brake_min_speed: 5.0  # Legacy (unused when brake reward is disabled)
+  brake_max_reward: 0.5  # Legacy (unused when brake reward is disabled)
+  steer_smoothness_penalty: 0.05  # Penalize large steering changes (reduces jitter)
+  steer_delta_cap: 0.5  # Cap delta per step so sharp corrections aren't over-penalized
+  use_custom_reward: true
+  time_penalty: -0.5  # Per-step urgency penalty
+  safe_speed_sharp_turn: 8.0  # Safe speed threshold in sharp turns
+  speed_to_curvature_penalty_scale: 0.5  # Penalty scale for overspeeding in sharp turns
+  cornering_lambda: 0.1
+  centerline_inner_ratio: 0.1
+  centerline_outer_ratio: 0.5
+  centerline_inner_bonus: 0.5
+  centerline_outer_bonus: 0.1
+  off_track_terminal_penalty: -100.0
+
+# Observation augmentation
+observation:
+  enabled: false
+
+# Safety governor
+safety_governor:
+  enabled: true
+  speed_cap_ratio: 0.5
+  speed_cap_top_speed: 30.0
+  speed_cap_brake: 0.2
+
+
+

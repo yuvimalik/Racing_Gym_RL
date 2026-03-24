@@ -424,6 +424,9 @@ def create_env(config: dict, rank: int = 0, seed: int = 0, training_mode: bool =
         h_ratio=env_config.get("h_ratio", 0.25),
         use_ego_color=env_config.get("use_ego_color", False),
     )
+    max_episode_steps = env_config.get("max_episode_steps", None)
+    if max_episode_steps is not None:
+        env = gym.wrappers.TimeLimit(env.unwrapped, max_episode_steps=int(max_episode_steps))
 
     if env_config.get("num_agents", 1) == 1:
         env = SingleAgentWrapper(env)

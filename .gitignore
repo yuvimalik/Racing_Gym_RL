@@ -41,12 +41,22 @@ videos/
 *.mp4
 *.avi
 
+# Autoresearch — track best results, code, and experiment log (NOT .pt checkpoints)
+!autoresearch/results/
+autoresearch/results/**/*.pt
+autoresearch/results/**/stderr.log
+autoresearch/results/**/stdout.log
+autoresearch/results/probe/
+
 # IDE
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
+
+# Secrets
+.env
 
 # OS
 .DS_Store

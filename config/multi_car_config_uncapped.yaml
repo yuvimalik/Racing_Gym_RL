@@ -1,4 +1,4 @@
-# Multi-Car Racing PPO Training Configuration — v2 (minimal reward, progress fix applied)
+# Multi-Car Racing PPO Training Configuration - v2 uncapped variant
 
 # Environment settings
 environment:
@@ -21,12 +21,12 @@ ppo:
   gamma: 0.99
   gae_lambda: 0.95
   clip_range: 0.2
-  ent_coef: 0.05       # Fresh start — needs exploration
+  ent_coef: 0.05
   vf_coef: 0.25
   max_grad_norm: 0.5
   min_log_std: -1.0
   max_log_std: 0.5
-  steer_min_log_std: -0.5   # exp(-0.5)=0.61 — enough freedom to explore cornering lines
+  steer_min_log_std: -0.5
   steer_max_log_std: 0.0
 
 # Policy network architecture
@@ -60,34 +60,25 @@ training:
     max_offtrack_rate: 0.10
     min_eval_episodes: 3
 
-# Paths — NEW directory so existing models/best_model_torch.pt is never overwritten
+# Paths - uncapped run gets its own output directories
 paths:
-  model_dir: ./models/v2_progress
-  log_dir: ./logs/v2_progress
-  results_dir: ./results/v2_progress
+  model_dir: ./models/v2_progress_uncapped
+  log_dir: ./logs/v2_progress_uncapped
+  results_dir: ./results/v2_progress_uncapped
 
 # Device
 device: cuda
 
-# Reward shaping — MINIMAL: progress + time pressure + anti-donut only
-#
-# Philosophy: the env returns tile_visited_count (road only). With only a time
-# penalty and the progress signal, off-track driving is self-penalising:
-#   on-track:  +progress_reward - 0.1/step → net positive
-#   off-track: +0               - 0.1/step → net negative
-# No explicit off-track penalty, alignment reward, or corner engineering needed.
+# Reward shaping
 reward_shaping:
   enabled: true
   use_custom_reward: true
 
-  # Core signal — now correctly computed from tile_visited_count (Bug 7 fix)
   forward_progress_scale: 600.0
 
-  # Disabled — was needed only when progress was always 0
   track_alignment_scale: 0.0
   straight_speed_scale: 0.0
 
-  # Corner logic — disabled, let car discover braking naturally
   sharp_turn_threshold: 0.35
   sharp_turn_lookahead: 6
   corner_target_speed: 8.0
@@ -95,43 +86,35 @@ reward_shaping:
   apex_decel_reward_scale: 0.0
   apex_decel_reward_cap: 1.0
 
-  # Steering — no constraints during fresh exploration
-  steer_smoothness_penalty: 0.03
+  steer_smoothness_penalty: 0.01
   steer_delta_cap: 0.5
-  steer_magnitude_penalty: 0.005
+  steer_magnitude_penalty: 0.0
 
-  # Anti-slide — disabled (no speed exploit with correct progress reward)
   lateral_velocity_penalty: 0.0
 
-  # Time pressure — makes every step cost something; off-track is net-negative
   time_penalty: -0.1
 
-  # Idle — extra push for truly stationary car
   idle_speed_threshold: 1.0
   idle_penalty: -0.3
 
-  # Disabled
   throttle_bonus_scale: 0.0
   brake_penalty_scale: 0.0
   launch_boost_steps: 0
   launch_speed_target: 5.0
   launch_bonus_scale: 0.0
 
-  # Termination
   stuck_speed_threshold: 0.8
   stuck_progress_epsilon: 0.001
   stuck_max_steps: 200
   stuck_terminal_penalty: -20.0
-  no_progress_max_steps: 900     # allow longer high-speed recoveries before terminating
+  no_progress_max_steps: 900
   no_progress_terminal_penalty: -10.0
 
-  # Anti-donut — time_penalty alone may not deter high-speed spinning
   yaw_rate_penalty: 0.05
 
-  # Off-track — penalty mode so car can recover from corner clips
   off_track_mode: penalty
-  off_track_terminal_penalty: -50.0   # unused in penalty mode
-  off_track_step_penalty: 0.0         # time_penalty is sufficient deterrent
+  off_track_terminal_penalty: -50.0
+  off_track_step_penalty: 0.0
 
   curriculum:
     enabled: false
@@ -140,9 +123,9 @@ reward_shaping:
 observation:
   enabled: false
 
-# Safety governor — moderate starting cap, raise once car is stable
+# Safety governor disabled for uncapped run
 safety_governor:
-  enabled: true
+  enabled: false
   speed_cap_ratio: 0.5
-  speed_cap_top_speed: 60.0   # Cap = 30 units/s
+  speed_cap_top_speed: 60.0
   speed_cap_brake: 0.4
