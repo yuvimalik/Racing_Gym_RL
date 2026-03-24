@@ -153,6 +153,125 @@ class CnnActorCritic(nn.Module):
         return self.evaluate_actions(obs, actions)
 
 
+class AutoresearchRun008CnnActorCritic(nn.Module):
+    """Policy variant promoted from autoresearch run 008.
+
+    Key difference vs legacy:
+    - samples a Normal in unconstrained space
+    - applies tanh squashing to all dimensions
+    - uses tanh log-prob correction in PPO updates
+    - maps throttle/brake from (-1, 1) to (0, 1) after squashing
+    """
+
+    def __init__(self, obs_shape, action_dim: int, min_log_std: float = -1.5, max_log_std: float = 1.0,
+                 steer_min_log_std: float = None, steer_max_log_std: float = None):
+        super().__init__()
+        c, h, w = obs_shape
+        self.features = nn.Sequential(
+            nn.Conv2d(c, 32, kernel_size=8, stride=4),
+            nn.ReLU(),
+            nn.Conv2d(32, 64, kernel_size=4, stride=2),
+            nn.ReLU(),
+            nn.Conv2d(64, 64, kernel_size=3, stride=1),
+            nn.ReLU(),
+            nn.Flatten(),
+        )
+
+        with torch.no_grad():
+            n_flatten = self.features(torch.zeros(1, c, h, w)).shape[1]
+
+        self.policy_mlp = nn.Sequential(
+            nn.Linear(n_flatten, 256),
+            nn.ReLU(),
+            nn.Linear(256, 128),
+            nn.ReLU(),
+        )
+        self.policy_mean = nn.Linear(128, action_dim)
+
+        self.value_mlp = nn.Sequential(
+            nn.Linear(n_flatten, 256),
+            nn.ReLU(),
+            nn.Linear(256, 128),
+            nn.ReLU(),
+        )
+        self.value_head = nn.Linear(128, 1)
+
+        log_std_init = torch.full((action_dim,), -0.5)
+        if action_dim >= 1:
+            log_std_init[0] = 0.0
+        if action_dim >= 3:
+            log_std_init[1] = -0.5
+            log_std_init[2] = -1.0
+        self.log_std = nn.Parameter(log_std_init)
+        self.min_log_std = float(min_log_std)
+        self.max_log_std = float(max_log_std)
+        self.steer_min_log_std = float(steer_min_log_std) if steer_min_log_std is not None else self.min_log_std
+        self.steer_max_log_std = float(steer_max_log_std) if steer_max_log_std is not None else self.max_log_std
+
+        if action_dim >= 3:
+            nn.init.constant_(self.policy_mean.bias[1], 2.0)
+            nn.init.constant_(self.policy_mean.bias[2], -3.0)
+
+    def _features(self, obs: torch.Tensor) -> torch.Tensor:
+        return self.features(obs)
+
+    def get_raw_dist_and_value(self, obs: torch.Tensor):
+        shared = self._features(obs)
+        policy_latent = self.policy_mlp(shared)
+        mean = self.policy_mean(policy_latent)
+        steer_ls = torch.clamp(self.log_std[0:1], self.steer_min_log_std, self.steer_max_log_std)
+        if self.log_std.shape[0] > 1:
+            other_ls = torch.clamp(self.log_std[1:], self.min_log_std, self.max_log_std)
+            log_std = torch.cat([steer_ls, other_ls])
+        else:
+            log_std = steer_ls
+        std = log_std.exp()
+        dist = Normal(mean, std)
+        value_latent = self.value_mlp(shared)
+        value = self.value_head(value_latent).squeeze(-1)
+        return dist, value
+
+    @staticmethod
+    def raw_to_env_action(raw_action: torch.Tensor) -> torch.Tensor:
+        out = raw_action.clone()
+        if out.shape[-1] >= 2:
+            out[..., 1] = (out[..., 1] + 1.0) / 2.0
+        if out.shape[-1] >= 3:
+            out[..., 2] = (out[..., 2] + 1.0) / 2.0
+        return out
+
+    def act(self, obs: torch.Tensor, deterministic: bool = False):
+        raw_dist, value = self.get_raw_dist_and_value(obs)
+        if deterministic:
+            action_raw = raw_dist.mean
+        else:
+            action_raw = raw_dist.rsample()
+
+        action_squashed = torch.tanh(action_raw)
+        log_prob_raw = raw_dist.log_prob(action_raw).sum(dim=-1)
+        log_prob_correction = torch.sum(torch.log(1 - action_squashed.pow(2) + 1e-6), dim=-1)
+        log_prob = log_prob_raw - log_prob_correction
+        return action_squashed, log_prob, value
+
+    def evaluate_actions(self, obs: torch.Tensor, actions_squashed: torch.Tensor):
+        raw_dist, value = self.get_raw_dist_and_value(obs)
+        actions_raw = torch.atanh(actions_squashed.clamp(-0.999999, 0.999999))
+        log_prob_raw = raw_dist.log_prob(actions_raw).sum(dim=-1)
+        log_prob_correction = torch.sum(torch.log(1 - actions_squashed.pow(2) + 1e-6), dim=-1)
+        log_prob = log_prob_raw - log_prob_correction
+        entropy = raw_dist.entropy().sum(dim=-1)
+        return value, log_prob, entropy
+
+    def forward(self, obs: torch.Tensor, actions: torch.Tensor):
+        return self.evaluate_actions(obs, actions)
+
+
+TORCH_POLICY_VARIANTS = {
+    "legacy": CnnActorCritic,
+    "autoresearch_run_008": AutoresearchRun008CnnActorCritic,
+}
+
+
 class RolloutBuffer:
     """Rollout storage for PPO."""
 
@@ -257,6 +376,13 @@ class TorchPPOTrainer:
         self.env_action_high = np.asarray(env.action_space.high, dtype=np.float32)
 
         ppo_cfg = config["ppo"]
+        training_cfg = config.get("training", {}) or {}
+        self.policy_variant = str(training_cfg.get("torch_policy_variant", "legacy")).strip().lower()
+        if self.policy_variant not in TORCH_POLICY_VARIANTS:
+            raise ValueError(
+                f"Unknown torch policy variant: {self.policy_variant}. "
+                f"Expected one of: {sorted(TORCH_POLICY_VARIANTS)}"
+            )
         self.learning_rate = float(ppo_cfg["learning_rate"])
         self.n_steps = int(ppo_cfg["n_steps"])
         self.batch_size = int(ppo_cfg["batch_size"])
@@ -274,7 +400,8 @@ class TorchPPOTrainer:
         steer_min_log_std = float(steer_min_log_std) if steer_min_log_std is not None else None
         steer_max_log_std = float(steer_max_log_std) if steer_max_log_std is not None else None
 
-        self.policy = CnnActorCritic(
+        policy_cls = TORCH_POLICY_VARIANTS[self.policy_variant]
+        self.policy = policy_cls(
             self.obs_shape, self.action_dim,
             min_log_std=min_log_std, max_log_std=max_log_std,
             steer_min_log_std=steer_min_log_std, steer_max_log_std=steer_max_log_std,
@@ -285,14 +412,19 @@ class TorchPPOTrainer:
         self.num_timesteps = 0
         self.eval_history_path = self.log_dir / "torch_eval_history.jsonl"
 
+        # Phase 4A: AMP (mixed precision)
+        self.use_amp = self.device.type == "cuda"
+        self.amp_dtype = torch.bfloat16 if (self.use_amp and torch.cuda.is_bf16_supported()) else torch.float16
+        self.grad_scaler = torch.amp.GradScaler("cuda", enabled=(self.use_amp and self.amp_dtype == torch.float16))
+
     @property
-    def _policy(self) -> CnnActorCritic:
-        """Return the underlying CnnActorCritic, unwrapping DDP if present."""
+    def _policy(self) -> nn.Module:
+        """Return the underlying policy module, unwrapping DDP if present."""
         return self.policy.module if isinstance(self.policy, DDP) else self.policy
 
     def _raw_to_env_action_np(self, raw_action_np: np.ndarray) -> np.ndarray:
         raw_t = torch.as_tensor(raw_action_np, dtype=torch.float32)
-        env_t = CnnActorCritic.raw_to_env_action(raw_t)
+        env_t = self._policy.raw_to_env_action(raw_t)
         env_np = env_t.numpy()
         return np.clip(env_np, self.env_action_low, self.env_action_high)
 
@@ -303,7 +435,7 @@ class TorchPPOTrainer:
 
         for _ in range(self.n_steps):
             obs_tensor = torch.as_tensor(obs, dtype=torch.float32, device=self.device) / 255.0
-            with torch.no_grad():
+            with torch.inference_mode():
                 raw_action, log_prob, value = self._policy.act(obs_tensor, deterministic=False)
 
             raw_action_np = raw_action.cpu().numpy()
@@ -331,9 +463,9 @@ class TorchPPOTrainer:
                         print(f"Episode reward: {ep['r']:.2f} | length: {ep.get('l', -1)}", flush=True)
                     self._episode_print_count = getattr(self, "_episode_print_count", 0) + 1
 
-        with torch.no_grad():
+        with torch.inference_mode():
             last_obs_tensor = torch.as_tensor(obs, dtype=torch.float32, device=self.device) / 255.0
-            _, last_values = self._policy.get_dist_and_value(last_obs_tensor)
+            _, _, last_values = self._policy.act(last_obs_tensor, deterministic=True)
         buffer.compute_returns_advantages(
             last_values=last_values.cpu().numpy().astype(np.float32),
             last_dones=last_dones,
@@ -352,27 +484,30 @@ class TorchPPOTrainer:
         for _ in range(self.n_epochs):
             for batch in buffer.batches(self.batch_size, self.device, normalize_advantage=True,
                                         distributed=self.distributed):
-                if self.distributed:
-                    # Call through DDP so it intercepts forward and syncs gradients via AllReduce
-                    values, new_log_probs, entropy = self.policy(batch["obs"], batch["actions"])
-                else:
-                    values, new_log_probs, entropy = self._policy.evaluate_actions(batch["obs"], batch["actions"])
-                ratio = torch.exp(new_log_probs - batch["old_log_probs"])
+                # Phase 4A: AMP autocast for forward + loss
+                with torch.amp.autocast("cuda", dtype=self.amp_dtype, enabled=self.use_amp):
+                    if self.distributed:
+                        values, new_log_probs, entropy = self.policy(batch["obs"], batch["actions"])
+                    else:
+                        values, new_log_probs, entropy = self._policy.evaluate_actions(batch["obs"], batch["actions"])
+                    ratio = torch.exp(new_log_probs - batch["old_log_probs"])
 
-                policy_loss_1 = batch["advantages"] * ratio
-                policy_loss_2 = batch["advantages"] * torch.clamp(
-                    ratio, 1.0 - self.clip_range, 1.0 + self.clip_range
-                )
-                policy_loss = -torch.min(policy_loss_1, policy_loss_2).mean()
+                    policy_loss_1 = batch["advantages"] * ratio
+                    policy_loss_2 = batch["advantages"] * torch.clamp(
+                        ratio, 1.0 - self.clip_range, 1.0 + self.clip_range
+                    )
+                    policy_loss = -torch.min(policy_loss_1, policy_loss_2).mean()
 
-                value_loss = F.mse_loss(values, batch["returns"])
-                entropy_loss = -entropy.mean()
-                loss = policy_loss + self.vf_coef * value_loss + self.ent_coef * entropy_loss
+                    value_loss = F.mse_loss(values, batch["returns"])
+                    entropy_loss = -entropy.mean()
+                    loss = policy_loss + self.vf_coef * value_loss + self.ent_coef * entropy_loss
 
                 self.optimizer.zero_grad()
-                loss.backward()
+                self.grad_scaler.scale(loss).backward()
+                self.grad_scaler.unscale_(self.optimizer)
                 grad_norm = torch.nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
-                self.optimizer.step()
+                self.grad_scaler.step(self.optimizer)
+                self.grad_scaler.update()
 
                 with torch.no_grad():
                     log_ratio = new_log_probs - batch["old_log_probs"]
@@ -547,7 +682,17 @@ class TorchPPOTrainer:
         payload = torch.load(str(path), map_location=self.device)
         raw_policy = self.policy.module if isinstance(self.policy, DDP) else self.policy
         raw_policy.load_state_dict(payload["policy_state_dict"])
-        self.optimizer.load_state_dict(payload["optimizer_state_dict"])
+
+        optimizer_restored = False
+        optimizer_error = None
+        optimizer_state = payload.get("optimizer_state_dict")
+        if optimizer_state is not None:
+            try:
+                self.optimizer.load_state_dict(optimizer_state)
+                optimizer_restored = True
+            except Exception as exc:
+                optimizer_error = str(exc)
+
         self.num_timesteps = int(payload.get("num_timesteps", 0))
         rng_state = payload.get("rng_state")
         if isinstance(rng_state, dict):
@@ -568,6 +713,14 @@ class TorchPPOTrainer:
                     # Older checkpoints or device-count mismatch: continue without hard failure.
                     pass
 
+        return {
+            "policy_restored": True,
+            "optimizer_restored": optimizer_restored,
+            "optimizer_error": optimizer_error,
+            "num_timesteps": self.num_timesteps,
+            "checkpoint_format_version": payload.get("checkpoint_format_version"),
+        }
+
     def learn(
         self,
         total_timesteps: int,
@@ -587,6 +740,7 @@ class TorchPPOTrainer:
         last_log_time = start_time
         last_checkpoint_step = self.num_timesteps
         last_eval_step = self.num_timesteps
+        last_eval_wall_clock = 0.0
 
         # Progress summary (especially clear when resuming)
         remaining = max(0, total_timesteps - self.num_timesteps)
@@ -671,6 +825,7 @@ class TorchPPOTrainer:
             elapsed_since_last = now - last_log_time
             steps_per_sec = steps_since_last / elapsed_since_last if elapsed_since_last > 0 else 0.0
             iters_per_sec = updates_since_last / elapsed_since_last if elapsed_since_last > 0 else 0.0
+            avg_steps_per_sec = self.num_timesteps / max(now - start_time, 1e-6)
             remaining = max(0, total_timesteps - self.num_timesteps)
             eta_sec = remaining / steps_per_sec if steps_per_sec > 0 else 0.0
             if eta_sec >= 3600:
@@ -687,11 +842,12 @@ class TorchPPOTrainer:
                 gpu_mb = f" | {torch.cuda.memory_allocated(self.device) / 1024**2:.0f} MB alloc"
             print(
                 f"[TorchPPO] {pct:.1f}% | {self.num_timesteps:,}/{total_timesteps:,} | "
-                f"{steps_per_sec:.0f} steps/s | {iters_per_sec:.2f} iters/s | ETA {eta_str} | "
+                f"{steps_per_sec:.0f} steps/s | avg {avg_steps_per_sec:.0f} steps/s | "
+                f"{iters_per_sec:.2f} iters/s | ETA {eta_str} | "
                 f"pg={train_metrics['policy_loss']:.4f} | vf={train_metrics['value_loss']:.4f} | "
                 f"ent={train_metrics['entropy_loss']:.4f} | kl={train_metrics['approx_kl']:.6f} | "
                 f"clip={train_metrics['clip_fraction']:.3f} | grad={train_metrics['grad_norm']:.3f} | lr={lr_now:.6f}"
-                f"{gpu_mb}",
+                f"{gpu_mb} | last_eval={last_eval_wall_clock:.1f}s",
                 flush=True,
             )
 
@@ -708,10 +864,13 @@ class TorchPPOTrainer:
 
             # Eval every eval_freq steps (boundary-based so we never miss)
             if eval_freq > 0 and (self.num_timesteps - last_eval_step) >= eval_freq:
+                eval_started_at = time.time()
                 eval_stats = self.evaluate(n_episodes=n_eval_episodes)
+                last_eval_wall_clock = time.time() - eval_started_at
                 eval_record = {
                     "step": int(self.num_timesteps),
                     "timestamp": datetime.now().isoformat(timespec="seconds"),
+                    "eval_wall_clock_seconds": float(last_eval_wall_clock),
                     **{k: float(v) for k, v in eval_stats.items() if isinstance(v, (int, float, np.integer, np.floating))},
                 }
                 with open(self.eval_history_path, "a", encoding="utf-8") as f:
@@ -729,7 +888,8 @@ class TorchPPOTrainer:
                     f"mean_speed={eval_stats['mean_speed']:.2f} | "
                     f"throttle={eval_stats['mean_throttle']:.2f} | "
                     f"brake={eval_stats['mean_brake']:.2f} | "
-                    f"stage={curriculum_stage}"
+                    f"stage={curriculum_stage} | "
+                    f"eval_time={last_eval_wall_clock:.1f}s"
                     f"{' (first eval)' if is_first_eval else (' (new best!)' if is_new_best else '')}",
                     flush=True,
                 )
@@ -934,6 +1094,27 @@ class RewardShapingWrapper(gym.Wrapper):
         self._no_progress_steps = 0
         self._last_stuck_progress = None
         self._episode_steps = 0
+        self._training_mode = True  # Phase 1C: minimal info dict during training
+
+        # Phase 1A: cached track geometry (populated on reset)
+        self._track_xy = None       # (N, 2) float32
+        self._track_betas = None    # (N,) float32
+        self._track_dirs = None     # (N, 2) float32 — precomputed direction vectors
+        self._n_track = 0
+        self._last_track_index = 0
+
+        # Phase 1B: precompute whether we need track context at all
+        self._needs_track_context = (
+            self.track_alignment_scale != 0.0
+            or self.straight_speed_scale != 0.0
+            or self.corner_overspeed_penalty_scale != 0.0
+            or self.apex_decel_reward_scale != 0.0
+            or self.lateral_velocity_penalty != 0.0
+        )
+
+    def set_training_mode(self, mode: bool):
+        """Phase 1C: when True, info dict only has 4 training-critical keys."""
+        self._training_mode = bool(mode)
 
     def reset(self, **kwargs):
         self._prev_steer = None
@@ -945,7 +1126,29 @@ class RewardShapingWrapper(gym.Wrapper):
         self._no_progress_steps = 0
         self._last_stuck_progress = None
         self._episode_steps = 0
-        return self.env.reset(**kwargs)
+        self._last_track_index = 0
+        obs = self.env.reset(**kwargs)
+
+        # Phase 1A: cache track geometry once per episode
+        base_env = self.env.unwrapped
+        if hasattr(base_env, "track") and base_env.track and len(base_env.track) >= 2:
+            raw = base_env.track
+            self._n_track = len(raw)
+            self._track_xy = np.array([t[2:] for t in raw], dtype=np.float32)
+            self._track_betas = np.array([t[1] for t in raw], dtype=np.float32)
+            # Precompute direction vectors between consecutive tiles
+            next_xy = np.roll(self._track_xy, -1, axis=0)
+            diff = next_xy - self._track_xy
+            norms = np.linalg.norm(diff, axis=1, keepdims=True)
+            norms = np.maximum(norms, 1e-8)
+            self._track_dirs = (diff / norms).astype(np.float32)
+        else:
+            self._track_xy = None
+            self._track_betas = None
+            self._track_dirs = None
+            self._n_track = 0
+
+        return obs
 
     def _apply_curriculum_stage(self, stage: int):
         stage = int(stage)
@@ -985,23 +1188,33 @@ class RewardShapingWrapper(gym.Wrapper):
             return np.zeros_like(vec), 0.0
         return vec / norm, norm
 
-    def _get_track_context(self, base_env, car):
-        if not (hasattr(base_env, "track") and base_env.track):
+    def _get_track_context(self, car_pos):
+        """Return (track_dir, is_sharp_turn, corner_angle) using cached track data.
+
+        Uses local search around _last_track_index (±30 tiles) instead of
+        O(N) argmin over all ~800 tiles.  ~13x faster on the hot path.
+        """
+        if self._track_xy is None or self._n_track < 2:
             return np.zeros(2, dtype=np.float32), False, 0.0
 
-        track_xy = np.array(base_env.track)[:, 2:]
-        if len(track_xy) < 2:
-            return np.zeros(2, dtype=np.float32), False, 0.0
+        # Local search: car moves at most ~2 tiles/step at top speed
+        search_radius = 30
+        center = self._last_track_index
+        n = self._n_track
+        indices = np.arange(center - search_radius, center + search_radius + 1) % n
+        local_xy = self._track_xy[indices]
+        dists = (local_xy[:, 0] - car_pos[0]) ** 2 + (local_xy[:, 1] - car_pos[1]) ** 2
+        best_local = int(np.argmin(dists))
+        track_index = int(indices[best_local])
+        self._last_track_index = track_index
 
-        car_pos = np.array(car.hull.position).reshape((1, 2))
-        track_index = int(np.argmin(np.linalg.norm(car_pos - track_xy, ord=2, axis=1)))
-        next_index = (track_index + 1) % len(track_xy)
-        track_vec = track_xy[next_index] - track_xy[track_index]
-        track_dir, _ = self._normalize(track_vec.astype(np.float32))
+        # Direction from precomputed cache (no subtraction needed)
+        track_dir = self._track_dirs[track_index]
 
-        lookahead_index = (track_index + self.sharp_turn_lookahead) % len(base_env.track)
-        beta_now = float(base_env.track[track_index][1])
-        beta_next = float(base_env.track[lookahead_index][1])
+        # Sharp turn detection from cached betas
+        lookahead_index = (track_index + self.sharp_turn_lookahead) % n
+        beta_now = float(self._track_betas[track_index])
+        beta_next = float(self._track_betas[lookahead_index])
         angle_diff = abs(beta_next - beta_now)
         if angle_diff > np.pi:
             angle_diff = abs(angle_diff - 2 * np.pi)
@@ -1042,24 +1255,23 @@ class RewardShapingWrapper(gym.Wrapper):
 
         self._update_lap_count(info)
 
+        # Phase 1D: consolidated base_env access — read car state once
         speed = 0.0
         track_dir = np.zeros(2, dtype=np.float32)
         is_sharp_turn = False
         corner_angle = 0.0
         velocity_vec = np.zeros(2, dtype=np.float32)
+        yaw_rate = 0.0
         if hasattr(base_env, "cars") and base_env.cars:
             car = base_env.cars[0]
             vel = car.hull.linearVelocity
             velocity_vec = np.array([vel[0], vel[1]], dtype=np.float32)
             speed = float(np.linalg.norm(velocity_vec))
-            track_dir, is_sharp_turn, corner_angle = self._get_track_context(base_env, car)
-
-        # Angular velocity (yaw rate) — high when doing donuts.
-        yaw_rate = 0.0
-        if hasattr(base_env, "cars") and base_env.cars:
-            car = base_env.cars[0]
-            if hasattr(car, "hull"):
-                yaw_rate = abs(float(car.hull.angularVelocity))
+            yaw_rate = abs(float(car.hull.angularVelocity))
+            # Phase 1B: only compute track context if any dependent reward is active
+            if self._needs_track_context:
+                car_pos = np.array([car.hull.position[0], car.hull.position[1]], dtype=np.float32)
+                track_dir, is_sharp_turn, corner_angle = self._get_track_context(car_pos)
 
         action_arr = np.asarray(action).reshape(-1) if action is not None else np.zeros(3, dtype=np.float32)
         steer_value = float(np.clip(action_arr[0], -1.0, 1.0)) if action_arr.size >= 1 else 0.0
@@ -1087,50 +1299,53 @@ class RewardShapingWrapper(gym.Wrapper):
         # lap ≈ forward_progress_scale total reward.
         comp_forward = self.forward_progress_scale * progress_delta
 
-        # Dense directional guidance: velocity · track_dir. Tells the policy which way
-        # to steer every step — without this, progress_delta=0 for "wrong direction"
-        # AND "not moving", so the policy gets no steering correction signal.
-        # Safe because off_track_mode=terminate prevents off-track exploitation.
-        comp_alignment = self.track_alignment_scale * float(np.dot(velocity_vec, track_dir))
+        # Phase 1B: skip disabled reward computations
+        comp_alignment = 0.0
+        if self.track_alignment_scale != 0.0:
+            comp_alignment = self.track_alignment_scale * float(np.dot(velocity_vec, track_dir))
 
-        # Speed bonus only while ON track — prevents gaming it by driving on grass.
-        comp_straight_speed = self.straight_speed_scale * speed * (0.0 if is_offtrack else 1.0) if not is_sharp_turn else 0.0
+        comp_straight_speed = 0.0
+        if self.straight_speed_scale != 0.0 and not is_sharp_turn:
+            comp_straight_speed = self.straight_speed_scale * speed * (0.0 if is_offtrack else 1.0)
 
-        # Lateral velocity penalty: penalises sliding perpendicular to the track.
-        # When car goes fast and oversteers (speed=29), it slides sideways — this directly
-        # penalises the loss-of-control physics that causes tailspins and off-track.
-        lateral_dir = np.array([-track_dir[1], track_dir[0]], dtype=np.float32)
-        lateral_speed = float(np.dot(velocity_vec, lateral_dir))
-        comp_lateral = -self.lateral_velocity_penalty * abs(lateral_speed)
-        corner_overspeed = max(0.0, speed - self.corner_target_speed) if is_sharp_turn else 0.0
-        comp_corner_overspeed = -self.corner_overspeed_penalty_scale * corner_overspeed
+        comp_lateral = 0.0
+        if self.lateral_velocity_penalty != 0.0:
+            lateral_dir = np.array([-track_dir[1], track_dir[0]], dtype=np.float32)
+            lateral_speed = float(np.dot(velocity_vec, lateral_dir))
+            comp_lateral = -self.lateral_velocity_penalty * abs(lateral_speed)
 
-        speed_delta = 0.0
-        if self._prev_speed is not None:
-            speed_delta = self._prev_speed - speed
+        comp_corner_overspeed = 0.0
+        if self.corner_overspeed_penalty_scale != 0.0 and is_sharp_turn:
+            corner_overspeed = max(0.0, speed - self.corner_target_speed)
+            comp_corner_overspeed = -self.corner_overspeed_penalty_scale * corner_overspeed
+
         comp_apex_decel = 0.0
-        if is_sharp_turn and speed_delta > 0.0:
-            comp_apex_decel = min(self.apex_decel_reward_scale * speed_delta, self.apex_decel_reward_cap)
+        if self.apex_decel_reward_scale != 0.0 and is_sharp_turn:
+            speed_delta = (self._prev_speed - speed) if self._prev_speed is not None else 0.0
+            if speed_delta > 0.0:
+                comp_apex_decel = min(self.apex_decel_reward_scale * speed_delta, self.apex_decel_reward_cap)
 
         comp_steer_smooth = 0.0
-        if self._prev_steer is not None:
+        if self.steer_smoothness_penalty != 0.0 and self._prev_steer is not None:
             steer_delta = abs(steer_value - self._prev_steer)
             if self.steer_delta_cap > 0.0:
                 steer_delta = min(steer_delta, self.steer_delta_cap)
             comp_steer_smooth = -self.steer_smoothness_penalty * steer_delta
-        # Magnitude penalty: |steer|² — makes extreme lock expensive, gentle curves cheap.
-        comp_steer_mag = -self.steer_magnitude_penalty * (steer_value ** 2)
+
+        comp_steer_mag = 0.0
+        if self.steer_magnitude_penalty != 0.0:
+            comp_steer_mag = -self.steer_magnitude_penalty * (steer_value ** 2)
         self._prev_steer = steer_value
         self._prev_speed = speed
 
         comp_time = float(self.time_penalty)
         comp_idle = float(self.idle_penalty) if speed < self.idle_speed_threshold else 0.0
-        comp_throttle = float(self.throttle_bonus_scale * throttle_value)
+        comp_throttle = float(self.throttle_bonus_scale * throttle_value) if self.throttle_bonus_scale != 0.0 else 0.0
         comp_brake = 0.0
-        if not is_sharp_turn:
+        if self.brake_penalty_scale != 0.0 and not is_sharp_turn:
             comp_brake = -float(self.brake_penalty_scale * brake_value)
         comp_launch = 0.0
-        if self._episode_steps <= self.launch_boost_steps and speed < self.launch_speed_target:
+        if self.launch_bonus_scale != 0.0 and self._episode_steps <= self.launch_boost_steps and speed < self.launch_speed_target:
             comp_launch = float(self.launch_bonus_scale * throttle_value)
         # Yaw-rate penalty: penalise spinning/donuts directly via angular velocity.
         comp_yaw = -self.yaw_rate_penalty * yaw_rate
@@ -1180,33 +1395,38 @@ class RewardShapingWrapper(gym.Wrapper):
             total_reward = float(self.no_progress_terminal_penalty)
             done = True
 
+        # Phase 1A: pass cached track index for downstream wrappers (ObservationAugment)
+        info["_track_index"] = self._last_track_index
+
+        # Phase 1C: minimal info dict during training (4 keys vs 23)
         info["events/offtrack"] = int(is_offtrack)
         info["events/stuck"] = int(is_stuck)
-        info["events/no_progress"] = int(is_no_progress)
-        info["telemetry/yaw_rate"] = float(yaw_rate)
-        info["telemetry/curriculum_stage"] = int(self.curriculum_stage)
         info["telemetry/speed"] = float(speed)
-        info["telemetry/is_corner"] = int(is_sharp_turn)
-        info["telemetry/corner_angle"] = float(corner_angle)
-        info["telemetry/steer"] = float(steer_value)
-        info["telemetry/throttle"] = float(throttle_value)
-        info["telemetry/brake"] = float(brake_value)
-        info["rewards/forward_progress"] = float(comp_forward)
-        info["rewards/alignment"] = float(comp_alignment)
-        info["rewards/straight_speed"] = float(comp_straight_speed)
-        info["rewards/corner_overspeed"] = float(comp_corner_overspeed)
-        info["rewards/apex_decel"] = float(comp_apex_decel)
-        info["rewards/steer_smoothness"] = float(comp_steer_smooth)
-        info["rewards/steer_magnitude"] = float(comp_steer_mag)
-        info["rewards/lateral"] = float(comp_lateral)
-        info["rewards/time"] = float(comp_time)
-        info["rewards/idle"] = float(comp_idle)
-        info["rewards/throttle"] = float(comp_throttle)
-        info["rewards/brake"] = float(comp_brake)
-        info["rewards/launch"] = float(comp_launch)
-        info["rewards/yaw"] = float(comp_yaw)
-        info["rewards/total"] = float(total_reward)
-        info["lap_count"] = int(self._lap_count)
+        if not self._training_mode:
+            info["events/no_progress"] = int(is_no_progress)
+            info["telemetry/yaw_rate"] = float(yaw_rate)
+            info["telemetry/curriculum_stage"] = int(self.curriculum_stage)
+            info["telemetry/is_corner"] = int(is_sharp_turn)
+            info["telemetry/corner_angle"] = float(corner_angle)
+            info["telemetry/steer"] = float(steer_value)
+            info["telemetry/throttle"] = float(throttle_value)
+            info["telemetry/brake"] = float(brake_value)
+            info["rewards/forward_progress"] = float(comp_forward)
+            info["rewards/alignment"] = float(comp_alignment)
+            info["rewards/straight_speed"] = float(comp_straight_speed)
+            info["rewards/corner_overspeed"] = float(comp_corner_overspeed)
+            info["rewards/apex_decel"] = float(comp_apex_decel)
+            info["rewards/steer_smoothness"] = float(comp_steer_smooth)
+            info["rewards/steer_magnitude"] = float(comp_steer_mag)
+            info["rewards/lateral"] = float(comp_lateral)
+            info["rewards/time"] = float(comp_time)
+            info["rewards/idle"] = float(comp_idle)
+            info["rewards/throttle"] = float(comp_throttle)
+            info["rewards/brake"] = float(comp_brake)
+            info["rewards/launch"] = float(comp_launch)
+            info["rewards/yaw"] = float(comp_yaw)
+            info["rewards/total"] = float(total_reward)
+            info["lap_count"] = int(self._lap_count)
         return obs, float(total_reward), done, info
 
 
@@ -1602,12 +1822,22 @@ def main():
         default=None,
         help='Relative timesteps to add on top of the loaded checkpoint step (torch backend).'
     )
+    parser.add_argument(
+        '--torch_policy_variant',
+        type=str,
+        default=None,
+        choices=sorted(TORCH_POLICY_VARIANTS.keys()),
+        help='Torch policy variant override. Defaults to config.training.torch_policy_variant or legacy.'
+    )
     
     args = parser.parse_args()
     
     # Load configuration
     config = load_config(args.config)
     training_config = config.get('training', {})
+    if args.torch_policy_variant is not None:
+        training_config['torch_policy_variant'] = args.torch_policy_variant
+        config['training'] = training_config
     trainer_backend = (
         args.trainer_backend
         if args.trainer_backend is not None
@@ -1637,6 +1867,8 @@ def main():
     print(f"Device: {device}")
     print(f"Seed: {args.seed}")
     print(f"Trainer backend: {trainer_backend}")
+    if trainer_backend == 'torch':
+        print(f"Torch policy variant: {training_config.get('torch_policy_variant', 'legacy')}")
     if args.resume:
         print(f"Resuming from: {args.resume}")
     if args.timesteps_add is not None:
@@ -1741,7 +1973,14 @@ def main():
         )
         if args.resume:
             print(f"Loading torch checkpoint from {resume_path}")
-            trainer.load(resume_path)
+            restore_info = trainer.load(resume_path)
+            restore_mode = "policy + optimizer" if restore_info.get("optimizer_restored") else "policy only"
+            print(
+                f"Restore status: {restore_mode} | "
+                f"restored_step={int(restore_info.get('num_timesteps', 0)):,}"
+            )
+            if restore_info.get("optimizer_error"):
+                print(f"Optimizer state not restored: {restore_info['optimizer_error']}")
         if args.timesteps_add is not None and args.timesteps_add <= 0:
             raise ValueError("--timesteps_add must be a positive integer.")
 
@@ -1778,9 +2017,14 @@ def main():
         reward_cfg = config.get("reward_shaping", {}) or {}
         curr_cfg = reward_cfg.get("curriculum", {}) or {}
         print(
-            f"PPO-v2 action mapping: steer=tanh, throttle=sigmoid, brake=sigmoid | "
+            f"Torch policy variant: {trainer.policy_variant} | "
             f"log_std=[{ppo_config.get('min_log_std', -1.5)}, {ppo_config.get('max_log_std', 1.0)}]"
         )
+        if trainer.policy_variant == 'autoresearch_run_008':
+            print("Action mapping: tanh-squashed Gaussian PPO with tanh log-prob correction")
+            print("Env transform: steer=tanh output, throttle/brake mapped from (-1, 1) to (0, 1)")
+        else:
+            print("Action mapping: steer=tanh, throttle=sigmoid, brake=sigmoid")
         print(
             f"Curriculum: enabled={bool(curr_cfg.get('enabled', False))}, "
             f"stage1->2 gate: progress>={float(curr_cfg.get('promote_progress_threshold', 0.35)):.2f}, "

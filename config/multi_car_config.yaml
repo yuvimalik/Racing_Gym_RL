@@ -15,8 +15,8 @@ environment:
 ppo:
   learning_rate: 2.5e-4
   n_steps: 1024
-  batch_size: 256
-  n_epochs: 4
+  batch_size: 1536
+  n_epochs: 3
   gamma: 0.99
   gae_lambda: 0.95
   clip_range: 0.2
@@ -35,12 +35,13 @@ policy:
 # Training settings
 training:
   trainer_backend: torch
+  torch_policy_variant: autoresearch_run_008
   total_timesteps: 2000000
-  eval_freq: 5000
-  n_eval_episodes: 5
-  save_freq: 25000
+  eval_freq: 50000
+  n_eval_episodes: 3
+  save_freq: 100000
   log_interval: 5
-  num_envs: 8
+  num_envs: 16
   fail_fast:
     enabled: true
     min_timesteps_before_check: 50000
@@ -48,15 +49,15 @@ training:
     min_mean_speed: 1.0
     patience_evals: 5
   visual_eval:
-    enabled: true
-    freq: 50000
+    enabled: false
+    freq: 200000
     n_episodes: 1
   success_gate:
     enabled: true
     mean_reward_threshold: 150.0
     mean_progress_threshold: 0.95
     max_offtrack_rate: 0.10
-    min_eval_episodes: 5
+    min_eval_episodes: 3
 
 # Paths — NEW directory so existing models/best_model_torch.pt is never overwritten
 paths:
@@ -94,7 +95,7 @@ reward_shaping:
   apex_decel_reward_cap: 1.0
 
   # Steering — no constraints during fresh exploration
-  steer_smoothness_penalty: 0.0
+  steer_smoothness_penalty: 0.01
   steer_delta_cap: 0.5
   steer_magnitude_penalty: 0.0
 
@@ -120,7 +121,7 @@ reward_shaping:
   stuck_progress_epsilon: 0.001
   stuck_max_steps: 200
   stuck_terminal_penalty: -20.0
-  no_progress_max_steps: 500     # catch genuine donuts/stalls
+  no_progress_max_steps: 900     # allow longer high-speed recoveries before terminating
   no_progress_terminal_penalty: -10.0
 
   # Anti-donut — time_penalty alone may not deter high-speed spinning

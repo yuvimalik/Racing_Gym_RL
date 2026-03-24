@@ -12,6 +12,11 @@ This project implements a complete training pipeline for a single-agent car raci
 - **Observation Space**: 96x96 RGB image
 - **Action Space**: Continuous controls (steer, gas, brake)
 
+Current torch training ground truth:
+- **Autoresearch run 008** is the promoted torch policy variant for long training.
+- It uses a tanh-squashed Gaussian policy with tanh log-prob correction.
+- The legacy torch policy remains available for comparison and regression testing.
+
 ## Project Structure
 
 ```
@@ -98,6 +103,21 @@ Resume training from a checkpoint:
 python train.py --config config/multi_car_config.yaml --resume models/ppo_racecar_50000_steps.zip
 ```
 
+Train with the promoted autoresearch policy variant explicitly:
+```bash
+python train.py --config config/multi_car_config.yaml --trainer_backend torch --torch_policy_variant autoresearch_run_008 --seed 42
+```
+
+Resume a long torch run from the promoted autoresearch checkpoint:
+```bash
+python train.py --config config/multi_car_config.yaml --trainer_backend torch --torch_policy_variant autoresearch_run_008 --resume autoresearch/results/best/final.pt --timesteps_add 500000
+```
+
+Run the legacy torch policy for comparison:
+```bash
+python train.py --config config/multi_car_config.yaml --trainer_backend torch --torch_policy_variant legacy --seed 42
+```
+
 Training will:
 - Save checkpoints periodically (default: every 50,000 steps)
 - Save the best model based on evaluation performance
@@ -152,6 +172,16 @@ The agent controls the car via continuous actions:
 The PPO model uses:
 - **Policy**: CnnPolicy (for image observations)
 - **Device**: Automatically detects GPU/CPU availability
+
+### Torch Policy Variants
+
+`train.py` supports two local torch policy variants:
+- `autoresearch_run_008`: current ground-truth policy discovered by autoresearch; uses a tanh-squashed Gaussian with corrected PPO log-prob
+- `legacy`: previous torch policy using unconstrained Gaussian outputs with `tanh/sigmoid` environment mapping
+
+The main config `config/multi_car_config.yaml` now defaults to:
+- `training.trainer_backend: torch`
+- `training.torch_policy_variant: autoresearch_run_008`
 
 ## Training Details
 

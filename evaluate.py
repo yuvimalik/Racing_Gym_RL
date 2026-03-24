@@ -22,10 +22,11 @@ import torch
 
 # Import Torch policy and wrappers from training module for consistency
 try:
-    from train import CnnActorCritic, RewardShapingWrapper
+    from train import CnnActorCritic, RewardShapingWrapper, TORCH_POLICY_VARIANTS
 except ImportError:
     CnnActorCritic = None
     RewardShapingWrapper = None
+    TORCH_POLICY_VARIANTS = {}
 
 
 def load_config(config_path):
@@ -256,8 +257,27 @@ def evaluate_torch_model(model_path, config, n_episodes=10, record_video=True, s
     action_dim = int(np.prod(base_env.action_space.shape))
     action_low = np.array(base_env.action_space.low, dtype=np.float32)
     action_high = np.array(base_env.action_space.high, dtype=np.float32)
+    training_cfg = config.get("training", {}) or {}
+    policy_variant = str(training_cfg.get("torch_policy_variant", "legacy")).strip().lower()
+    policy_cls = TORCH_POLICY_VARIANTS.get(policy_variant, CnnActorCritic)
+    print(f"Using torch policy variant: {policy_variant}")
 
-    policy = CnnActorCritic(obs_shape, action_dim)
+    ppo_cfg = config.get("ppo", {}) or {}
+    min_log_std = float(ppo_cfg.get("min_log_std", -1.5))
+    max_log_std = float(ppo_cfg.get("max_log_std", 1.0))
+    steer_min_log_std = ppo_cfg.get("steer_min_log_std", None)
+    steer_max_log_std = ppo_cfg.get("steer_max_log_std", None)
+    steer_min_log_std = float(steer_min_log_std) if steer_min_log_std is not None else None
+    steer_max_log_std = float(steer_max_log_std) if steer_max_log_std is not None else None
+
+    policy = policy_cls(
+        obs_shape,
+        action_dim,
+        min_log_std=min_log_std,
+        max_log_std=max_log_std,
+        steer_min_log_std=steer_min_log_std,
+        steer_max_log_std=steer_max_log_std,
+    )
     policy.load_state_dict(payload["policy_state_dict"])
     policy.to(device)
     policy.eval()
@@ -289,7 +309,7 @@ def evaluate_torch_model(model_path, config, n_episodes=10, record_video=True, s
             obs_t = obs_t.permute(2, 0, 1).unsqueeze(0)  # HWC -> CHW, add batch
             with torch.no_grad():
                 raw_action, _, _ = policy.act(obs_t, deterministic=True)
-            env_action = CnnActorCritic.raw_to_env_action(raw_action).cpu().numpy().squeeze(0)
+            env_action = policy_cls.raw_to_env_action(raw_action).cpu().numpy().squeeze(0)
             env_action = np.clip(env_action, action_low, action_high)
             obs, reward, done, info = base_env.step(env_action)
             episode_reward += float(reward)
