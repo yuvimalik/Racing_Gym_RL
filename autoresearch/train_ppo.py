@@ -2,7 +2,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.distributions import Normal, Beta
+from torch.distributions import Normal
 from pathlib import Path
 
 # === TUNABLE: Hyperparameters ===
@@ -17,23 +17,17 @@ HYPERPARAMS = {
     "ent_coef": 0.05,
     "vf_coef": 0.25,
     "max_grad_norm": 0.5,
-    # steer_min_log_std and steer_max_log_std are for the Gaussian steer action.
-    # Throttle and Brake now use Beta distributions, which don't have log_std parameters.
-    "steer_min_log_std": -0.5, 
-    "steer_max_log_std": 0.0, 
+    "min_log_std": -1.0, # General min log_std for throttle/brake raw actions
+    "max_log_std": 0.5,  # General max log_std for throttle/brake raw actions
+    "steer_min_log_std": -0.5, # Specific min log_std for steer raw action
+    "steer_max_log_std": 0.0, # Specific max log_std for steer raw action
 }
 
 
 # === TUNABLE: Network Architecture ===
 
 class CnnActorCritic(nn.Module):
-    """
-    Actor-critic for image observations (N, C, H, W).
-    Uses a mixed action distribution:
-    - Steer (index 0): Gaussian with tanh squashing to (-1, 1).
-    - Throttle (index 1): Beta distribution for (0, 1).
-    - Brake (index 2): Beta distribution for (0, 1).
-    """
+    """Actor-critic for image observations (N, C, H, W)."""
 
     def __init__(self, obs_shape, action_dim: int, hp: dict = None):
         super().__init__()
@@ -56,17 +50,7 @@ class CnnActorCritic(nn.Module):
             nn.Linear(n_flatten, 256), nn.ReLU(),
             nn.Linear(256, 128), nn.ReLU(),
         )
-        
-        # Steer action (index 0) uses Gaussian distribution. Outputs mean.
-        self.policy_steer_mean = nn.Linear(128, 1)
-        self.log_std_steer = nn.Parameter(torch.full((1,), 0.0)) # Initial std for steer
-        self.steer_min_log_std = float(hp.get("steer_min_log_std", -0.5))
-        self.steer_max_log_std = float(hp.get("steer_max_log_std", 0.0))
-
-        # Throttle (index 1) and Brake (index 2) use Beta distribution.
-        # Each needs 2 parameters (alpha_logit, beta_logit).
-        self.policy_throttle_alpha_beta_logits = nn.Linear(128, 2)
-        self.policy_brake_alpha_beta_logits = nn.Linear(128, 2)
+        self.policy_mean = nn.Linear(128, action_dim)
 
         self.value_mlp = nn.Sequential(
             nn.Linear(n_flatten, 256), nn.ReLU(),
@@ -74,135 +58,112 @@ class CnnActorCritic(nn.Module):
         )
         self.value_head = nn.Linear(128, 1)
 
-        # Initial biases for Beta distributions to encourage plausible starting behavior
+        log_std_init = torch.full((action_dim,), -0.5)
+        if action_dim >= 1:
+            log_std_init[0] = 0.0 # Initial std for steer
         if action_dim >= 3:
-            # Throttle: high alpha_logit, medium beta_logit -> mean > 0.5 (e.g., alpha=3, beta=2 -> mean=0.6)
-            nn.init.constant_(self.policy_throttle_alpha_beta_logits.bias[0], 2.0) # alpha for throttle
-            nn.init.constant_(self.policy_throttle_alpha_beta_logits.bias[1], 0.0)  # beta for throttle
-            # Brake: low alpha_logit, high beta_logit -> mean < 0.5 (e.g., alpha=1, beta=3 -> mean=0.25)
-            nn.init.constant_(self.policy_brake_alpha_beta_logits.bias[0], 0.0)    # alpha for brake
-            nn.init.constant_(self.policy_brake_alpha_beta_logits.bias[1], 2.0)    # beta for brake
+            log_std_init[1] = -0.5 # Initial std for throttle
+            log_std_init[2] = -1.0 # Initial std for brake
+        self.log_std = nn.Parameter(log_std_init)
+
+        self.min_log_std = float(hp.get("min_log_std", -1.0))
+        self.max_log_std = float(hp.get("max_log_std", 0.5))
+        self.steer_min_log_std = float(hp.get("steer_min_log_std", self.min_log_std))
+        self.steer_max_log_std = float(hp.get("steer_max_log_std", self.max_log_std))
+
+        if action_dim >= 3:
+            # Initial biases for throttle (positive) and brake (negative) to encourage moving forward
+            nn.init.constant_(self.policy_mean.bias[1], 2.0)
+            nn.init.constant_(self.policy_mean.bias[2], -3.0)
 
     def _features(self, obs: torch.Tensor) -> torch.Tensor:
         return self.features(obs)
 
     def get_raw_dist_and_value(self, obs: torch.Tensor):
-        """Returns a list of distributions (Gaussian for steer, Beta for throttle/brake) and value."""
+        """Returns the untransformed (Normal) distribution and value."""
         shared = self._features(obs)
         policy_latent = self.policy_mlp(shared)
+        mean = self.policy_mean(policy_latent)
+
+        # Apply specific clamping for steer log_std if action_dim >= 1
+        steer_ls = torch.clamp(self.log_std[0:1], self.steer_min_log_std, self.steer_max_log_std)
         
-        # Steer distribution (Gaussian)
-        steer_mean = self.policy_steer_mean(policy_latent).squeeze(-1)
-        steer_log_std = torch.clamp(self.log_std_steer, self.steer_min_log_std, self.steer_max_log_std)
-        steer_dist = Normal(steer_mean, steer_log_std.exp())
-
-        # Throttle distribution (Beta)
-        throttle_alpha_beta_logits = self.policy_throttle_alpha_beta_logits(policy_latent)
-        # Add 1.0 to ensure alpha, beta > 1, preventing infinities in log_prob and ensuring well-defined mean.
-        throttle_alpha = F.softplus(throttle_alpha_beta_logits[:, 0]) + 1.0
-        throttle_beta = F.softplus(throttle_alpha_beta_logits[:, 1]) + 1.0
-        throttle_dist = Beta(throttle_alpha, throttle_beta)
-
-        # Brake distribution (Beta)
-        brake_alpha_beta_logits = self.policy_brake_alpha_beta_logits(policy_latent)
-        brake_alpha = F.softplus(brake_alpha_beta_logits[:, 0]) + 1.0
-        brake_beta = F.softplus(brake_alpha_beta_logits[:, 1]) + 1.0
-        brake_dist = Beta(brake_alpha, brake_beta)
+        # Apply general clamping for other log_std values
+        if self.log_std.shape[0] > 1:
+            other_ls = torch.clamp(self.log_std[1:], self.min_log_std, self.max_log_std)
+            log_std = torch.cat([steer_ls, other_ls])
+        else: # only steer action
+            log_std = steer_ls
+        
+        std = log_std.exp()
+        dist = Normal(mean, std)
         
         value_latent = self.value_mlp(shared)
         value = self.value_head(value_latent).squeeze(-1)
-        
-        return [steer_dist, throttle_dist, brake_dist], value
+        return dist, value
 
     @staticmethod
-    def raw_to_env_action(combined_action: torch.Tensor) -> torch.Tensor:
+    def raw_to_env_action(raw_action: torch.Tensor) -> torch.Tensor:
         """
-        combined_action is the tensor of actions where:
-        - Steer (index 0) is tanh-squashed and in (-1, 1).
-        - Throttle (index 1) is from Beta distribution and in (0, 1).
-        - Brake (index 2) is from Beta distribution and in (0, 1).
-        This method simply returns the action as is, as the distributions
-        naturally output values in the correct environment ranges.
+        raw_action is the squashed action (output of tanh), range (-1, 1).
+        Maps to environment actions: steer (-1, 1), throttle (0, 1), brake (0, 1).
         """
-        return combined_action
+        out = raw_action.clone()
+        # Steer is already in (-1, 1)
+        # Throttle (index 1) and Brake (index 2) need to be mapped from (-1, 1) to (0, 1)
+        if out.shape[-1] >= 2:
+            out[..., 1] = (out[..., 1] + 1.0) / 2.0  # Map (-1, 1) to (0, 1)
+        if out.shape[-1] >= 3:
+            out[..., 2] = (out[..., 2] + 1.0) / 2.0  # Map (-1, 1) to (0, 1)
+        return out
 
     def act(self, obs: torch.Tensor, deterministic: bool = False):
         """
-        Returns combined action (steer squashed, throttle/brake from Beta) and its log_prob.
+        Returns squashed action and its corrected log_prob.
         """
-        dist_list, value = self.get_raw_dist_and_value(obs)
-        steer_dist, throttle_dist, brake_dist = dist_list
+        raw_dist, value = self.get_raw_dist_and_value(obs)
         
         if deterministic:
-            steer_raw = steer_dist.mean
-            throttle_action = throttle_dist.mean
-            brake_action = brake_dist.mean
+            action_raw = raw_dist.mean
         else:
-            steer_raw = steer_dist.rsample() # Gaussian supports rsample
-            throttle_action = throttle_dist.sample() # Beta supports sample (not rsample for reparam trick)
-            brake_action = brake_dist.sample() # Beta supports sample (not rsample)
+            action_raw = raw_dist.rsample()
         
-        steer_squashed = torch.tanh(steer_raw)
+        action_squashed = torch.tanh(action_raw)
         
-        # Combine actions into a single tensor
-        action_combined = torch.cat([
-            steer_squashed.unsqueeze(-1),
-            throttle_action.unsqueeze(-1),
-            brake_action.unsqueeze(-1)
-        ], dim=-1)
+        # Compute log_prob with tanh correction
+        log_prob_raw = raw_dist.log_prob(action_raw).sum(dim=-1)
         
-        # Calculate log_prob for steer with tanh correction
-        log_prob_steer_raw = steer_dist.log_prob(steer_raw)
-        # Log_prob correction for tanh squashing (steer is a 1D action)
-        log_prob_correction_steer = torch.log(1 - steer_squashed.pow(2) + 1e-6)
-        log_prob_steer = log_prob_steer_raw - log_prob_correction_steer
+        # Correction for tanh squashing: log(1 - tanh(x)^2)
+        # Add epsilon for numerical stability
+        log_prob_correction = torch.sum(torch.log(1 - action_squashed.pow(2) + 1e-6), dim=-1)
         
-        # Log_prob for Beta distributions (no squashing correction needed)
-        # Clamp inputs for numerical stability as Beta is defined on (0, 1)
-        log_prob_throttle = throttle_dist.log_prob(throttle_action.clamp(1e-6, 1.0 - 1e-6))
-        log_prob_brake = brake_dist.log_prob(brake_action.clamp(1e-6, 1.0 - 1e-6))
+        log_prob = log_prob_raw - log_prob_correction
         
-        # Total log_prob is sum of individual log_probs
-        log_prob = log_prob_steer + log_prob_throttle + log_prob_brake
-        
-        return action_combined, log_prob, value
+        return action_squashed, log_prob, value
 
-    def evaluate_actions(self, obs: torch.Tensor, actions_combined: torch.Tensor):
+    def evaluate_actions(self, obs: torch.Tensor, actions_squashed: torch.Tensor):
         """
-        actions_combined are the actions sampled from the agent's combined distribution.
+        actions_squashed are the actions sampled from the squashed distribution (range -1 to 1).
         """
-        dist_list, value = self.get_raw_dist_and_value(obs)
-        steer_dist, throttle_dist, brake_dist = dist_list
+        raw_dist, value = self.get_raw_dist_and_value(obs)
         
-        # Extract individual actions from the combined tensor
-        steer_squashed_eval = actions_combined[..., 0]
-        throttle_action_eval = actions_combined[..., 1]
-        brake_action_eval = actions_combined[..., 2]
+        # To calculate log_prob of actions_squashed, we need to convert them back to raw actions
+        # Clamp to prevent NaNs in atanh for values very close to -1 or 1
+        actions_raw = torch.atanh(actions_squashed.clamp(-0.999999, 0.999999))
         
-        # Steer (Gaussian with tanh squashing)
-        # Convert squashed steer action back to raw steer action for log_prob
-        steer_raw_eval = torch.atanh(steer_squashed_eval.clamp(-0.999999, 0.999999))
-        log_prob_steer_raw = steer_dist.log_prob(steer_raw_eval)
-        # Log_prob correction for tanh squashing (steer is a 1D action)
-        log_prob_correction_steer = torch.log(1 - steer_squashed_eval.pow(2) + 1e-6)
-        log_prob_steer_squashed = log_prob_steer_raw - log_prob_correction_steer
-        entropy_steer = steer_dist.entropy()
+        log_prob_raw = raw_dist.log_prob(actions_raw).sum(dim=-1)
         
-        # Throttle (Beta) - no squashing correction needed
-        # Clamp inputs for numerical stability
-        log_prob_throttle = throttle_dist.log_prob(throttle_action_eval.clamp(1e-6, 1.0 - 1e-6))
-        entropy_throttle = throttle_dist.entropy()
-
-        # Brake (Beta) - no squashing correction needed
-        # Clamp inputs for numerical stability
-        log_prob_brake = brake_dist.log_prob(brake_action_eval.clamp(1e-6, 1.0 - 1e-6))
-        entropy_brake = brake_dist.entropy()
+        # The log_prob correction term uses the squashed actions
+        log_prob_correction = torch.sum(torch.log(1 - actions_squashed.pow(2) + 1e-6), dim=-1)
         
-        # Sum log_probs and entropies across all action components
-        log_prob_total = log_prob_steer_squashed + log_prob_throttle + log_prob_brake
-        entropy_total = entropy_steer + entropy_throttle + entropy_brake
+        log_prob_squashed = log_prob_raw - log_prob_correction
         
-        return value, log_prob_total, entropy_total
+        # For entropy, we typically use the entropy of the un-squashed Normal distribution
+        # as a proxy for exploration, or a more complex analytical form.
+        # Sticking to the un-squashed entropy for now as is common practice for simplicity.
+        entropy = raw_dist.entropy().sum(dim=-1)
+        
+        return value, log_prob_squashed, entropy
 
 
 # === TUNABLE: Training Logic ===
@@ -232,7 +193,7 @@ class PPOTrainer:
         """Collect n_steps of experience from the vectorized env."""
         n_envs = env.num_envs
         obs_buf = np.zeros((n_steps, n_envs, *self.obs_shape), dtype=np.uint8)
-        # act_buf stores the combined actions (steer squashed, throttle/brake from Beta)
+        # act_buf stores the SQUASHED actions, which are passed to evaluate_actions later
         act_buf = np.zeros((n_steps, n_envs, self.action_dim), dtype=np.float32) 
         rew_buf = np.zeros((n_steps, n_envs), dtype=np.float32)
         done_buf = np.zeros((n_steps, n_envs), dtype=np.float32)
@@ -242,17 +203,17 @@ class PPOTrainer:
         for step in range(n_steps):
             obs_t = torch.as_tensor(obs, dtype=torch.float32, device=self.device) / 255.0
             with torch.inference_mode():
-                # self.policy.act now returns combined action and its log_prob
-                action_combined, log_prob, value = self.policy.act(obs_t)
+                # self.policy.act now returns squashed action and corrected log_prob
+                action_squashed, log_prob, value = self.policy.act(obs_t)
             
-            # Store the combined actions for PPO update
-            act_np_combined = action_combined.cpu().numpy()
+            # Store the squashed actions for PPO update
+            act_np_squashed = action_squashed.cpu().numpy()
             
-            # Convert combined actions to env actions for stepping (currently identity function for these distributions)
-            env_np = self._raw_to_env_action_np(act_np_combined)
+            # Convert squashed actions to env actions for stepping
+            env_np = self._raw_to_env_action_np(act_np_squashed)
 
             obs_buf[step] = (obs * 255).astype(np.uint8) if obs.max() <= 1.0 else obs
-            act_buf[step] = act_np_combined # Store combined actions
+            act_buf[step] = act_np_squashed # Store squashed actions
             val_buf[step] = value.cpu().numpy()
             logp_buf[step] = log_prob.cpu().numpy()
 
@@ -263,8 +224,7 @@ class PPOTrainer:
         # Bootstrap last value
         with torch.inference_mode():
             obs_t = torch.as_tensor(obs, dtype=torch.float32, device=self.device) / 255.0
-            # Policy.act needs to be consistent, returns combined action, corrected log_prob
-            _, _, last_value = self.policy.act(obs_t) 
+            _, _, last_value = self.policy.act(obs_t) # Policy.act needs to be consistent, returns squashed action, corrected log_prob
         last_values = last_value.cpu().numpy()
 
         return obs, {
@@ -304,7 +264,7 @@ class PPOTrainer:
         batch_size = self.hp["batch_size"]
 
         obs_flat = buf["obs"].reshape(n_samples, *self.obs_shape)
-        # act_flat now contains combined actions
+        # act_flat now contains squashed actions
         act_flat = buf["actions"].reshape(n_samples, self.action_dim) 
         logp_flat = buf["log_probs"].reshape(n_samples)
         adv_flat = buf["advantages"].reshape(n_samples)
@@ -323,13 +283,13 @@ class PPOTrainer:
                 batch_idx = indices[start:start + batch_size]
 
                 obs_b = torch.as_tensor(obs_flat[batch_idx], dtype=torch.float32, device=self.device) / 255.0
-                # act_b now contains combined actions
+                # act_b now contains squashed actions
                 act_b = torch.as_tensor(act_flat[batch_idx], dtype=torch.float32, device=self.device) 
                 old_logp_b = torch.as_tensor(logp_flat[batch_idx], dtype=torch.float32, device=self.device)
                 adv_b = torch.as_tensor(adv_flat[batch_idx], dtype=torch.float32, device=self.device)
                 ret_b = torch.as_tensor(ret_flat[batch_idx], dtype=torch.float32, device=self.device)
 
-                # evaluate_actions now expects combined actions
+                # evaluate_actions now expects squashed actions
                 values, new_logp, entropy = self.policy.evaluate_actions(obs_b, act_b)
                 ratio = torch.exp(new_logp - old_logp_b)
 

@@ -13,6 +13,7 @@ Contract: policy must have .act(obs_tensor, deterministic=True) -> (action, _, _
 """
 
 import os
+import platform
 import time
 from pathlib import Path
 
@@ -473,11 +474,22 @@ def create_training_envs(config: dict, n_envs: int, seed: int = 42,
     """
     import sys as _sys
     env_fns = [_make_env(config, rank=i, seed=seed, training_mode=True) for i in range(n_envs)]
+    is_windows = platform.system().lower().startswith("win")
+    if use_subproc and is_windows:
+        print("[prepare] SubprocVecEnv requested on Windows; forcing DummyVecEnv for safety.", file=_sys.stderr, flush=True)
+        use_subproc = False
     if use_subproc and n_envs > 1:
         print(f"[prepare] Creating SubprocVecEnv with {n_envs} workers...", file=_sys.stderr, flush=True)
         env = SubprocVecEnv(env_fns)
     else:
-        print(f"[prepare] Creating DummyVecEnv with {n_envs} envs...", file=_sys.stderr, flush=True)
+        if n_envs > 1:
+            print(
+                f"[prepare] Creating DummyVecEnv with {n_envs} envs (serial stepping; Windows-safe but CPU-bound).",
+                file=_sys.stderr,
+                flush=True,
+            )
+        else:
+            print(f"[prepare] Creating DummyVecEnv with {n_envs} envs...", file=_sys.stderr, flush=True)
         env = DummyVecEnv(env_fns)
     return VecTransposeImage(env)
 

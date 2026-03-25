@@ -11,6 +11,7 @@ Usage:
 
 import argparse
 import json
+import platform
 import sys
 import time
 from pathlib import Path
@@ -80,6 +81,10 @@ def main():
                         help="Checkpoint restore behavior. policy_only skips optimizer state.")
     parser.add_argument("--experiment-id", type=str, default=None,
                         help="Optional experiment id for logging")
+    parser.add_argument("--use-subproc", action="store_true",
+                        help="Use SubprocVecEnv for training envs when supported.")
+    parser.add_argument("--progress-lines", type=int, default=20,
+                        help="Approximate number of progress log lines to emit during training.")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -92,12 +97,19 @@ def main():
     log("[experiment] Loading config...")
     config = load_config(args.config)
     effective_hp = merge_hyperparams(config)
+    is_windows = platform.system().lower().startswith("win")
+    use_subproc = bool(args.use_subproc and not is_windows and args.num_envs > 1)
+    env_mode = "SubprocVecEnv" if use_subproc else "DummyVecEnv"
+    if args.use_subproc and is_windows:
+        log("[experiment] use_subproc requested but disabled on Windows; using DummyVecEnv")
+    elif args.use_subproc and args.num_envs <= 1:
+        log("[experiment] use_subproc requested with num_envs<=1; using DummyVecEnv")
 
-    log(f"[experiment] Creating {args.num_envs} environments...")
+    log(f"[experiment] Creating {args.num_envs} environments with {env_mode}...")
     env_t0 = time.time()
-    env = create_training_envs(config, n_envs=args.num_envs, seed=args.seed, use_subproc=False)
+    env = create_training_envs(config, n_envs=args.num_envs, seed=args.seed, use_subproc=use_subproc)
     env_time = time.time() - env_t0
-    log(f"[experiment] Envs created in {env_time:.1f}s")
+    log(f"[experiment] Envs created in {env_time:.1f}s | env_mode={env_mode}")
 
     obs_shape = tuple(env.observation_space.shape)
     action_dim = int(np.prod(env.action_space.shape))
@@ -111,7 +123,7 @@ def main():
     log(
         "[experiment] Setup | "
         f"device={device} | obs_shape={obs_shape} | action_dim={action_dim} | "
-        f"timesteps={args.timesteps:,} | num_envs={args.num_envs} | seed={args.seed} | "
+        f"timesteps={args.timesteps:,} | num_envs={args.num_envs} | seed={args.seed} | env_mode={env_mode} | "
         f"params={param_count:,}"
     )
 
@@ -139,17 +151,29 @@ def main():
     t0 = time.time()
     train_time = 0.0
     num_timesteps = 0
+    rollout_seconds_total = 0.0
+    gae_seconds_total = 0.0
+    update_seconds_total = 0.0
 
     try:
         obs = env.reset()
-        log_every = max(1, n_iterations // 20)
+        log_every = max(1, n_iterations // max(1, args.progress_lines))
         interval_timesteps = 0
         interval_t0 = time.time()
 
         for iteration in range(1, n_iterations + 1):
+            rollout_t0 = time.perf_counter()
             obs, buf = trainer._collect_rollout(env, obs, n_steps)
+            rollout_seconds = time.perf_counter() - rollout_t0
+            rollout_seconds_total += rollout_seconds
+
+            gae_t0 = time.perf_counter()
             buf = trainer._compute_gae(buf)
+            gae_seconds = time.perf_counter() - gae_t0
+            gae_seconds_total += gae_seconds
+
             metrics = trainer._ppo_update(buf)
+            update_seconds_total += float(metrics.get("update_seconds", 0.0))
             num_timesteps += steps_per_rollout
             interval_timesteps += steps_per_rollout
 
@@ -170,6 +194,7 @@ def main():
                     f"steps={num_timesteps:,}/{args.timesteps:,} | "
                     f"sps={overall_sps:.1f} | recent_sps={recent_sps:.1f} | "
                     f"elapsed={format_duration(elapsed)} | eta={format_duration(eta_seconds)} | "
+                    f"rollout_s={rollout_seconds:.2f} | update_s={metrics.get('update_seconds', 0.0):.2f} | "
                     f"rollout_reward={rollout_reward:.2f} | "
                     f"pg={metrics['pg_loss']:.4f} vf={metrics['vf_loss']:.4f} ent={metrics['entropy']:.4f}"
                 )
@@ -211,8 +236,16 @@ def main():
         eval_metrics["eval_wall_clock_seconds"] = eval_seconds
         eval_metrics["total_timesteps"] = num_timesteps
         eval_metrics["steps_per_second"] = num_timesteps / max(train_time, 1e-6)
+        eval_metrics["effective_steps_per_second"] = num_timesteps / max(rollout_seconds_total + update_seconds_total + gae_seconds_total, 1e-6)
         eval_metrics["effective_hyperparams"] = effective_hp
         eval_metrics["checkpoint_path"] = str(ckpt_path)
+        eval_metrics["env_creation_seconds"] = env_time
+        eval_metrics["rollout_seconds"] = rollout_seconds_total
+        eval_metrics["gae_seconds"] = gae_seconds_total
+        eval_metrics["update_seconds"] = update_seconds_total
+        eval_metrics["env_mode"] = env_mode
+        eval_metrics["progress_lines"] = args.progress_lines
+        eval_metrics["use_subproc"] = use_subproc
         if args.experiment_id is not None:
             eval_metrics["experiment_id"] = args.experiment_id
 
@@ -223,7 +256,8 @@ def main():
             f"speed={eval_metrics.get('mean_speed', float('nan')):.2f} | "
             f"offtrack_rate={eval_metrics.get('offtrack_rate', float('nan')):.4f} | "
             f"train_s={train_time:.1f} | eval_s={eval_seconds:.1f} | "
-            f"mean_sps={eval_metrics['steps_per_second']:.1f}"
+            f"rollout_s={rollout_seconds_total:.1f} | gae_s={gae_seconds_total:.1f} | update_s={update_seconds_total:.1f} | "
+            f"mean_sps={eval_metrics['steps_per_second']:.1f} | effective_sps={eval_metrics['effective_steps_per_second']:.1f}"
         )
         print(json.dumps(eval_metrics))
 
@@ -231,9 +265,15 @@ def main():
         error_result = {
             "mean_reward": -999.0,
             "error": str(exc),
+            "env_creation_seconds": env_time,
             "train_wall_clock_seconds": time.time() - t0,
             "total_timesteps": num_timesteps,
+            "rollout_seconds": rollout_seconds_total,
+            "gae_seconds": gae_seconds_total,
+            "update_seconds": update_seconds_total,
             "effective_hyperparams": effective_hp,
+            "env_mode": env_mode,
+            "use_subproc": use_subproc,
         }
         if args.experiment_id is not None:
             error_result["experiment_id"] = args.experiment_id

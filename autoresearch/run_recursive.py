@@ -67,6 +67,100 @@ ALLOWLIST = {
     "safety_governor.speed_cap_brake": {"type": "float", "min": 0.0, "max": 1.0},
 }
 
+SEARCH_PROFILES = {
+    "default": {
+        "summary": "General recursive search across the allowlist.",
+        "preferred_keys": [],
+        "forbidden_keys": [],
+        "forbidden_prefixes": [],
+        "notes": [
+            "Prefer compact, incremental mutations.",
+            "Only propose code edits when config changes are insufficient.",
+        ],
+    },
+    "balanced_phase2": {
+        "summary": "Balanced follow-up search from the promoted cap100 parent, focused on brake discovery, smoother line choice, and sharper-turn apex handling.",
+        "preferred_keys": [
+            "ppo.min_log_std",
+            "ppo.ent_coef",
+            "reward_shaping.corner_target_speed",
+            "reward_shaping.corner_overspeed_penalty_scale",
+            "reward_shaping.apex_decel_reward_scale",
+            "reward_shaping.apex_decel_reward_cap",
+            "reward_shaping.sharp_turn_lookahead",
+            "reward_shaping.yaw_rate_penalty",
+            "reward_shaping.lateral_velocity_penalty",
+            "reward_shaping.brake_penalty_scale",
+        ],
+        "forbidden_keys": [
+            "reward_shaping.off_track_mode",
+            "reward_shaping.off_track_step_penalty",
+            "reward_shaping.off_track_terminal_penalty",
+            "reward_shaping.no_progress_terminal_penalty",
+        ],
+        "forbidden_prefixes": [
+            "safety_governor.",
+        ],
+        "notes": [
+            "What worked recently: lowering reward_shaping.corner_target_speed and making ppo.min_log_std less negative improved progress and speed.",
+            "What regressed recently: aggressive corner penalties, broad turning reward edits, uncapped speed reward branches, and strong off-track punishment as the main lever.",
+            "Current remaining pattern: throttle_saturation_no_brake.",
+            "If throttle_saturation_no_brake persists, bias toward brake discovery and earlier corner setup.",
+            "If off-track rises sharply, avoid stronger global penalties and prefer earlier corner-entry shaping.",
+            "If steer variance collapses, avoid reducing exploration further.",
+            "If progress improves but smoothness worsens, prefer mild line-stabilizing terms rather than hard caps.",
+            "Keep changes local; do not reopen broad PPO schedule changes unless tightly tied to exploration or recovery.",
+        ],
+    },
+    "hairpin_focus": {
+        "summary": "Hairpin-focused follow-up search from the promoted cap100 parent, focused narrowly on slightly earlier braking and better apex setup on the sharpest turns.",
+        "preferred_keys": [
+            "reward_shaping.corner_target_speed",
+            "reward_shaping.sharp_turn_lookahead",
+            "reward_shaping.apex_decel_reward_scale",
+            "reward_shaping.apex_decel_reward_cap",
+            "reward_shaping.corner_overspeed_penalty_scale",
+            "reward_shaping.brake_penalty_scale",
+            "ppo.min_log_std",
+            "ppo.ent_coef",
+        ],
+        "forbidden_keys": [
+            "reward_shaping.off_track_mode",
+            "reward_shaping.off_track_step_penalty",
+            "reward_shaping.off_track_terminal_penalty",
+            "reward_shaping.no_progress_max_steps",
+            "reward_shaping.no_progress_terminal_penalty",
+            "reward_shaping.steer_smoothness_penalty",
+            "reward_shaping.steer_magnitude_penalty",
+            "reward_shaping.lateral_velocity_penalty",
+            "reward_shaping.yaw_rate_penalty",
+            "ppo.learning_rate",
+            "ppo.n_steps",
+            "ppo.batch_size",
+            "ppo.n_epochs",
+            "ppo.gae_lambda",
+            "ppo.clip_range",
+            "ppo.max_log_std",
+            "ppo.steer_min_log_std",
+            "ppo.steer_max_log_std",
+        ],
+        "forbidden_prefixes": [
+            "safety_governor.",
+        ],
+        "notes": [
+            "Freeze the promoted parent as the control; this branch must be compared against it directly.",
+            "Optimize only for slightly earlier braking into sharp turns and better apex setup on hairpins.",
+            "Do not try to solve general smoothness, drift cleanup, or full tailspin recovery in this phase.",
+            "What worked recently: lowering reward_shaping.corner_target_speed and making ppo.min_log_std less negative improved progress and speed.",
+            "What regressed recently: aggressive corner penalties, broad turning reward edits, uncapped speed reward branches, and strong off-track punishment as the main lever.",
+            "Bias against full-throttle-into-hairpin behavior specifically, not global slowing.",
+            "Prefer local changes that move braking a little earlier rather than making the whole lap slower.",
+            "Reject candidates that preserve control only by collapsing mean speed or progress.",
+            "Only propose 1-2 local changes and avoid broad reward redesign.",
+        ],
+    },
+}
+
 
 def log(message: str) -> None:
     print(message, file=sys.stderr, flush=True)
@@ -127,6 +221,13 @@ def load_jsonl(path: Path, max_recent: int = 20) -> list[dict]:
             except json.JSONDecodeError:
                 continue
     return entries[-max_recent:]
+
+
+def tail_lines(path: Path, max_lines: int = 20) -> list[str]:
+    if not path.exists():
+        return []
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    return lines[-max_lines:]
 
 
 def set_nested(config: dict, dotted_key: str, value) -> None:
@@ -240,10 +341,85 @@ def flatten_allowlist() -> str:
     return "\n".join(lines)
 
 
-def validate_overrides(overrides: dict) -> tuple[bool, list[str], dict]:
+def resolve_search_profile(profile_name: str) -> dict:
+    profile = SEARCH_PROFILES.get(profile_name)
+    if profile is None:
+        raise ValueError(f"Unknown search profile: {profile_name}")
+    return profile
+
+
+def is_key_allowed_for_profile(key: str, profile: dict) -> bool:
+    if key in set(profile.get("forbidden_keys", [])):
+        return False
+    for prefix in profile.get("forbidden_prefixes", []):
+        if key.startswith(prefix):
+            return False
+    return True
+
+
+def flatten_profile_guidance(profile: dict) -> str:
+    preferred = profile.get("preferred_keys", [])
+    forbidden_keys = profile.get("forbidden_keys", [])
+    forbidden_prefixes = profile.get("forbidden_prefixes", [])
+    notes = profile.get("notes", [])
+    lines = [
+        f"Profile summary: {profile.get('summary', 'n/a')}",
+        f"Preferred keys: {preferred or 'none'}",
+        f"Forbidden keys: {forbidden_keys or 'none'}",
+        f"Forbidden prefixes: {forbidden_prefixes or 'none'}",
+        "Phase notes:",
+    ]
+    for note in notes:
+        lines.append(f"- {note}")
+    return "\n".join(lines)
+
+
+def summarize_recent_winners_and_failures(history: list[dict], max_promoted: int = 2, max_failed: int = 4) -> str:
+    if not history:
+        return "No prior recursive winners/failures recorded."
+
+    promoted = [item for item in history if item.get("promoted")]
+    failed = [item for item in history if not item.get("promoted")]
+    lines: list[str] = []
+
+    if promoted:
+        lines.append("Recent promoted candidates:")
+        for item in promoted[-max_promoted:]:
+            lines.append(
+                f"- {item.get('candidate_name')}: overrides={item.get('config_overrides', {})}, "
+                f"reward={safe_float(item.get('mean_reward'), -999.0):.2f}, "
+                f"progress={safe_float(item.get('mean_progress'), 0.0):.3f}, "
+                f"speed={safe_float(item.get('mean_speed'), 0.0):.2f}, "
+                f"patterns={item.get('patterns', [])}"
+            )
+
+    if failed:
+        lines.append("Recent failed candidates:")
+        severe_failed = sorted(
+            failed,
+            key=lambda item: (
+                len(item.get("gate_reasons", [])),
+                safe_float(item.get("offtrack_rate"), 0.0),
+                -safe_float(item.get("mean_progress"), 0.0),
+            ),
+            reverse=True,
+        )
+        for item in severe_failed[:max_failed]:
+            lines.append(
+                f"- {item.get('candidate_name')}: overrides={item.get('config_overrides', {})}, "
+                f"gate={item.get('gate_reasons', [])}, patterns={item.get('patterns', [])}"
+            )
+
+    return "\n".join(lines) if lines else "No prior recursive winners/failures recorded."
+
+
+def validate_overrides(overrides: dict, profile: dict | None = None) -> tuple[bool, list[str], dict]:
     errors: list[str] = []
     cleaned: dict = {}
     for key, value in (overrides or {}).items():
+        if profile is not None and not is_key_allowed_for_profile(key, profile):
+            errors.append(f"override not allowed by search profile: {key}")
+            continue
         spec = ALLOWLIST.get(key)
         if spec is None:
             errors.append(f"override not allowed: {key}")
@@ -313,10 +489,13 @@ def gate_candidate(metrics: dict, parent_metrics: dict | None) -> tuple[bool, li
         parent_reward = safe_float(parent_metrics.get("mean_reward"), min_reward)
         parent_progress = safe_float(parent_metrics.get("mean_progress"), min_progress)
         parent_speed = safe_float(parent_metrics.get("mean_speed"), min_speed)
+        parent_offtrack = safe_float(parent_metrics.get("offtrack_rate"), max_offtrack)
         min_reward = max(min_reward, parent_reward - 150.0)
         min_progress = max(min_progress, 0.80 * parent_progress)
         min_speed = max(min_speed, 0.80 * parent_speed)
-        max_offtrack = min(max_offtrack, safe_float(parent_metrics.get("offtrack_rate"), max_offtrack) + 0.15)
+        max_offtrack = min(max_offtrack, parent_offtrack + 0.15)
+        if offtrack > parent_offtrack + 0.05 and speed > parent_speed and progress < parent_progress - 0.03:
+            reasons.append("faster_but_less_robust_than_parent")
 
     if reward < min_reward:
         reasons.append(f"reward<{min_reward:.2f}")
@@ -330,6 +509,11 @@ def gate_candidate(metrics: dict, parent_metrics: dict | None) -> tuple[bool, li
         reasons.append("throttle_saturated_without_progress")
 
     score = reward + 250.0 * progress + 5.0 * speed - 200.0 * offtrack - 25.0 * max(0.0, throttle - 0.95)
+    if parent_metrics:
+        parent_offtrack = safe_float(parent_metrics.get("offtrack_rate"), offtrack)
+        parent_progress = safe_float(parent_metrics.get("mean_progress"), progress)
+        score += 120.0 * (parent_offtrack - offtrack)
+        score += 80.0 * (progress - parent_progress)
     return len(reasons) == 0, reasons, score
 
 
@@ -345,8 +529,13 @@ def summarize_history(history: list[dict], max_items: int = 8) -> str:
             f"speed={safe_float(item.get('mean_speed'), 0.0):.2f}, "
             f"offtrack={safe_float(item.get('offtrack_rate'), 1.0):.3f}, "
             f"patterns={item.get('patterns', [])}, "
+            f"gate={item.get('gate_reasons', [])}, "
             f"promoted={bool(item.get('promoted', False))}"
         )
+        log_excerpt = item.get("stderr_tail", [])
+        if log_excerpt:
+            excerpt = " | ".join(str(x) for x in log_excerpt[-4:])
+            lines.append(f"  stderr_tail: {excerpt}")
     return "\n".join(lines)
 
 
@@ -358,6 +547,7 @@ def call_llm_for_candidates(
     parent_code: str,
     candidates_to_generate: int,
     model: str,
+    search_profile: dict,
 ) -> tuple[list[dict], str]:
     try:
         from google import genai
@@ -367,13 +557,13 @@ def call_llm_for_candidates(
 
     client = genai.Client()
     parent_summary = json.dumps(parent_metrics or {}, indent=2)
-    tracked_keys = sorted(ALLOWLIST.keys())
+    tracked_keys = sorted(key for key in ALLOWLIST.keys() if is_key_allowed_for_profile(key, search_profile))
     parent_key_values = {key: get_nested(parent_config, key) for key in tracked_keys if get_nested(parent_config, key) is not None}
     system_prompt = """You are designing candidate PPO finetuning experiments for a racing agent.
 Return JSON only. No markdown.
 Each candidate must make 1-2 focused changes.
 Prefer config overrides over code changes unless a policy/PPO code edit is truly needed.
-Do not propose keys outside the allowlist.
+Do not propose keys outside the profile-filtered allowlist.
 Keep changes bounded and incremental.
 If code_change is "replace", provide the full replacement Python file contents for autoresearch/train_ppo.py.
 If code is unchanged, set code_change to "keep_parent" and omit train_ppo_code.
@@ -389,11 +579,17 @@ Current inferred patterns:
 Recent recursive history:
 {summarize_history(recent_history)}
 
+Recent promoted and failed experiments:
+{summarize_recent_winners_and_failures(recent_history)}
+
 Current allowlisted config values:
 {json.dumps(parent_key_values, indent=2)}
 
-Allowlisted fields and bounds:
-{flatten_allowlist()}
+Profile-filtered fields and bounds:
+{chr(10).join(f"- {key}: {ALLOWLIST[key]['type']} {('choices=' + str(ALLOWLIST[key]['choices'])) if ALLOWLIST[key]['type'] == 'enum' else 'in [' + str(ALLOWLIST[key]['min']) + ', ' + str(ALLOWLIST[key]['max']) + ']'}" for key in tracked_keys)}
+
+Search profile guidance:
+{flatten_profile_guidance(search_profile)}
 
 Current train_ppo.py:
 ```python
@@ -581,6 +777,8 @@ def build_branch_state(
     eval_episodes: int,
     generations: int,
     model: str,
+    search_profile: str,
+    throughput_mode: str,
 ) -> dict:
     return {
         "branch_dir": str(branch_dir),
@@ -592,6 +790,8 @@ def build_branch_state(
         "eval_episodes": eval_episodes,
         "max_generations": generations,
         "model": model,
+        "search_profile": search_profile,
+        "throughput_mode": throughput_mode,
         "current_generation": 0,
         "parent": {
             "checkpoint_path": str(base_checkpoint_path.resolve()),
@@ -614,16 +814,20 @@ def main() -> None:
     parser.add_argument("--generations", type=int, default=3)
     parser.add_argument("--timesteps", type=int, default=300_000)
     parser.add_argument("--eval-episodes", type=int, default=3)
-    parser.add_argument("--num-envs", type=int, default=2)
+    parser.add_argument("--num-envs", type=int, default=None)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--timeout", type=int, default=7200)
     parser.add_argument("--model", type=str, default="gemini-2.5-flash")
+    parser.add_argument("--search-profile", type=str, default="default", choices=sorted(SEARCH_PROFILES.keys()))
+    parser.add_argument("--throughput-mode", type=str, default="experiments_per_day")
     args = parser.parse_args()
 
     branch_dir = RESULTS_ROOT / args.results_subdir
     branch_dir.mkdir(parents=True, exist_ok=True)
     generations_log = branch_dir / "generations.jsonl"
     branch_state_path = branch_dir / "branch_state.json"
+
+    search_profile = resolve_search_profile(args.search_profile)
 
     base_config_path = Path(args.base_config).resolve()
     base_checkpoint_path = Path(args.base_checkpoint).resolve()
@@ -634,6 +838,11 @@ def main() -> None:
         raise FileNotFoundError(f"Base checkpoint not found: {base_checkpoint_path}")
     if not base_code_path.is_file():
         raise FileNotFoundError(f"Base code not found: {base_code_path}")
+
+    base_config = load_yaml(base_config_path)
+    resolved_num_envs = int(args.num_envs) if args.num_envs is not None else int(
+        ((base_config.get("training", {}) or {}).get("num_envs", 2))
+    )
 
     if branch_state_path.exists():
         branch_state = json.loads(branch_state_path.read_text(encoding="utf-8"))
@@ -650,8 +859,15 @@ def main() -> None:
             eval_episodes=args.eval_episodes,
             generations=args.generations,
             model=args.model,
+            search_profile=args.search_profile,
+            throughput_mode=args.throughput_mode,
         )
         branch_state_path.write_text(json.dumps(branch_state, indent=2), encoding="utf-8")
+
+    branch_state["num_envs"] = resolved_num_envs
+    branch_state["search_profile"] = args.search_profile
+    branch_state["throughput_mode"] = args.throughput_mode
+    branch_state_path.write_text(json.dumps(branch_state, indent=2), encoding="utf-8")
 
     recent_entries = load_jsonl(generations_log, max_recent=30)
     recent_history: list[dict] = []
@@ -677,6 +893,9 @@ def main() -> None:
         log("=" * 72)
         log(f"[run_recursive] Generation {generation_index}/{args.generations}")
         log(f"[run_recursive] Parent checkpoint: {parent_checkpoint_path}")
+        log(f"[run_recursive] Num envs: {resolved_num_envs}")
+        log(f"[run_recursive] Search profile: {args.search_profile}")
+        log(f"[run_recursive] Throughput mode: {args.throughput_mode}")
 
         candidates: list[dict] = [make_baseline_candidate(parent_code)]
         llm_needed = max(0, args.candidates_per_batch - 1)
@@ -690,6 +909,7 @@ def main() -> None:
                     parent_code=parent_code,
                     candidates_to_generate=llm_needed,
                     model=args.model,
+                    search_profile=search_profile,
                 )
                 (gen_dir / "llm_candidates_raw.json").write_text(llm_raw_text + "\n", encoding="utf-8")
                 candidates.extend(llm_candidates[:llm_needed])
@@ -702,7 +922,7 @@ def main() -> None:
             candidate_dir = gen_dir / f"{idx:02d}_{candidate_name}"
             candidate_dir.mkdir(parents=True, exist_ok=True)
             overrides = candidate.get("config_overrides", {}) or {}
-            ok, errors, cleaned_overrides = validate_overrides(overrides)
+            ok, errors, cleaned_overrides = validate_overrides(overrides, profile=search_profile)
             if not ok:
                 record = {
                     "generation": generation_index,
@@ -784,7 +1004,7 @@ def main() -> None:
             metrics = run_candidate_experiment(
                 config_path=candidate_config_path,
                 timesteps=args.timesteps,
-                num_envs=args.num_envs,
+                num_envs=resolved_num_envs,
                 eval_episodes=args.eval_episodes,
                 seed=args.seed + generation_index * 100 + idx,
                 candidate_id=f"g{generation_index:03d}_c{idx:02d}",
@@ -794,6 +1014,8 @@ def main() -> None:
                 resume_mode="policy_only",
             )
             patterns = infer_patterns(metrics)
+            stderr_tail = tail_lines(candidate_dir / "stderr.log", max_lines=20)
+            stdout_tail = tail_lines(candidate_dir / "stdout.log", max_lines=10)
             passed_gate, gate_reasons, score = gate_candidate(metrics, parent_metrics)
             record = {
                 "generation": generation_index,
@@ -812,6 +1034,9 @@ def main() -> None:
                 "patterns": patterns,
                 "score": score,
                 "resume_mode": "policy_only",
+                "num_envs": resolved_num_envs,
+                "stderr_tail": stderr_tail,
+                "stdout_tail": stdout_tail,
                 "promoted": False,
                 **metrics,
             }
@@ -877,6 +1102,8 @@ def main() -> None:
             "timestamp": datetime.now().isoformat(),
             "generation": generation_index,
             "mode": args.mode,
+            "search_profile": args.search_profile,
+            "throughput_mode": args.throughput_mode,
             "parent_checkpoint_before": str(parent_checkpoint_path),
             "promoted_candidate": promoted_record.get("candidate_name") if promoted_record else None,
             "records": generation_records,
@@ -886,6 +1113,8 @@ def main() -> None:
         summary_lines = [
             f"Generation {generation_index}",
             f"Mode: {args.mode}",
+            f"Search profile: {args.search_profile}",
+            f"Throughput mode: {args.throughput_mode}",
             f"Parent checkpoint: {parent_checkpoint_path}",
             f"Promoted candidate: {promoted_record.get('candidate_name') if promoted_record else 'none'}",
             "",
