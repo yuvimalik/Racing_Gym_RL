@@ -5,6 +5,7 @@ Recursive autoresearch loop with config + code mutations and multi-metric promot
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 import queue
 import shutil
@@ -154,6 +155,81 @@ def apply_overrides(base_config: dict, overrides: dict) -> dict:
     return cfg
 
 
+def render_override_summary(parent_config: dict, overrides: dict) -> str:
+    if not overrides:
+        return "No config overrides."
+    lines = []
+    for key in sorted(overrides):
+        old_value = get_nested(parent_config, key)
+        lines.append(f"- {key}: {old_value!r} -> {overrides[key]!r}")
+    return "\n".join(lines)
+
+
+def render_code_diff(parent_code: str, candidate_code: str, max_lines: int = 160) -> str:
+    if parent_code == candidate_code:
+        return "No code changes."
+    diff_lines = list(
+        difflib.unified_diff(
+            parent_code.splitlines(),
+            candidate_code.splitlines(),
+            fromfile="parent_train_ppo.py",
+            tofile="candidate_train_ppo.py",
+            lineterm="",
+        )
+    )
+    if len(diff_lines) > max_lines:
+        omitted = len(diff_lines) - max_lines
+        diff_lines = diff_lines[:max_lines] + [f"... ({omitted} more diff lines omitted)"]
+    return "\n".join(diff_lines)
+
+
+def write_human_review(
+    review_path: Path,
+    *,
+    title: str,
+    rationale: str,
+    parent_patterns: list[str],
+    override_summary: str,
+    code_diff_text: str,
+    metrics: dict | None = None,
+    patterns: list[str] | None = None,
+    gate_reasons: list[str] | None = None,
+    promoted: bool | None = None,
+) -> None:
+    lines = [
+        title,
+        "=" * len(title),
+        "",
+        f"Rationale: {rationale or 'n/a'}",
+        f"Parent patterns: {parent_patterns or []}",
+        "",
+        "Config changes:",
+        override_summary,
+        "",
+        "Code changes:",
+        code_diff_text,
+    ]
+    if metrics is not None:
+        lines.extend([
+            "",
+            "Metrics:",
+            f"- mean_reward: {safe_float(metrics.get('mean_reward'), -999.0):.2f}",
+            f"- mean_progress: {safe_float(metrics.get('mean_progress'), 0.0):.4f}",
+            f"- offtrack_rate: {safe_float(metrics.get('offtrack_rate'), 1.0):.4f}",
+            f"- mean_speed: {safe_float(metrics.get('mean_speed'), 0.0):.2f}",
+            f"- mean_throttle: {safe_float(metrics.get('mean_throttle'), 0.0):.2f}",
+            f"- mean_brake: {safe_float(metrics.get('mean_brake'), 0.0):.2f}",
+            f"- mean_steer_variance: {safe_float(metrics.get('mean_steer_variance'), 0.0):.5f}",
+            f"- mean_episode_length: {safe_float(metrics.get('mean_episode_length'), 0.0):.1f}",
+            f"- steps_per_second: {safe_float(metrics.get('steps_per_second'), 0.0):.1f}",
+            "",
+            f"Inferred patterns: {patterns or []}",
+            f"Gate reasons: {gate_reasons or []}",
+            f"Promoted: {promoted}",
+        ])
+    review_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def flatten_allowlist() -> str:
     lines = []
     for key, spec in ALLOWLIST.items():
@@ -282,7 +358,7 @@ def call_llm_for_candidates(
     parent_code: str,
     candidates_to_generate: int,
     model: str,
-) -> list[dict]:
+) -> tuple[list[dict], str]:
     try:
         from google import genai
     except ImportError:
@@ -348,7 +424,7 @@ Output JSON with this shape:
     candidates = payload.get("candidates")
     if not isinstance(candidates, list):
         raise ValueError("Gemini output missing candidates list")
-    return candidates
+    return candidates, raw_text
 
 
 def _stream_reader(stream, stream_name: str, output_queue: queue.Queue, sink) -> None:
@@ -606,7 +682,7 @@ def main() -> None:
         llm_needed = max(0, args.candidates_per_batch - 1)
         if llm_needed > 0:
             try:
-                llm_candidates = call_llm_for_candidates(
+                llm_candidates, llm_raw_text = call_llm_for_candidates(
                     parent_metrics=parent_metrics,
                     parent_patterns=parent_patterns,
                     recent_history=recent_history,
@@ -615,6 +691,7 @@ def main() -> None:
                     candidates_to_generate=llm_needed,
                     model=args.model,
                 )
+                (gen_dir / "llm_candidates_raw.json").write_text(llm_raw_text + "\n", encoding="utf-8")
                 candidates.extend(llm_candidates[:llm_needed])
             except Exception as exc:
                 log(f"[run_recursive] Candidate generation failed: {exc}")
@@ -674,6 +751,8 @@ def main() -> None:
             candidate_config = apply_overrides(parent_config, cleaned_overrides)
             candidate_config_path = candidate_dir / "candidate_config.yaml"
             candidate_code_path = candidate_dir / "candidate_train_ppo.py"
+            override_summary = render_override_summary(parent_config, cleaned_overrides)
+            code_diff_text = render_code_diff(parent_code, candidate_code)
             write_yaml(candidate_config_path, candidate_config)
             candidate_code_path.write_text(candidate_code, encoding="utf-8")
             with open(candidate_dir / "candidate_spec.json", "w", encoding="utf-8") as handle:
@@ -691,6 +770,14 @@ def main() -> None:
                     handle,
                     indent=2,
                 )
+            write_human_review(
+                candidate_dir / "human_review_pre_run.txt",
+                title=f"Candidate {candidate_name} (pre-run)",
+                rationale=str(candidate.get("rationale", "")),
+                parent_patterns=parent_patterns,
+                override_summary=override_summary,
+                code_diff_text=code_diff_text,
+            )
 
             TRAIN_PPO_PATH.write_text(candidate_code, encoding="utf-8")
             log(f"[run_recursive] Running {candidate_name} | overrides={cleaned_overrides}")
@@ -730,6 +817,18 @@ def main() -> None:
             }
             with open(candidate_dir / "metrics.json", "w", encoding="utf-8") as handle:
                 json.dump(record, handle, indent=2)
+            write_human_review(
+                candidate_dir / "human_review_post_run.txt",
+                title=f"Candidate {candidate_name} (post-run)",
+                rationale=str(candidate.get("rationale", "")),
+                parent_patterns=parent_patterns,
+                override_summary=override_summary,
+                code_diff_text=code_diff_text,
+                metrics=record,
+                patterns=patterns,
+                gate_reasons=gate_reasons,
+                promoted=False,
+            )
             generation_records.append(record)
 
         TRAIN_PPO_PATH.write_text(parent_code, encoding="utf-8")
@@ -750,6 +849,21 @@ def main() -> None:
                 }
             )
             ensure_current_artifacts(branch_dir, promoted_checkpoint, promoted_code_path, promoted_config_path, promoted_record)
+            promoted_dir = gen_dir / f"{int(promoted_record['candidate_index']):02d}_{promoted_record['candidate_name']}"
+            promoted_review = promoted_dir / "human_review_post_run.txt"
+            if promoted_review.exists():
+                write_human_review(
+                    promoted_review,
+                    title=f"Candidate {promoted_record['candidate_name']} (post-run)",
+                    rationale=str(promoted_record.get("rationale", "")),
+                    parent_patterns=parent_patterns,
+                    override_summary=render_override_summary(parent_config, promoted_record.get("config_overrides", {})),
+                    code_diff_text=render_code_diff(parent_code, read_text(Path(promoted_record["candidate_code_path"]))),
+                    metrics=promoted_record,
+                    patterns=promoted_record.get("patterns", []),
+                    gate_reasons=promoted_record.get("gate_reasons", []),
+                    promoted=True,
+                )
             log(
                 f"[run_recursive] PROMOTED {promoted_record['candidate_name']} | "
                 f"reward={safe_float(promoted_record.get('mean_reward'), -999.0):.2f} | "
@@ -769,6 +883,27 @@ def main() -> None:
         }
         with open(generations_log, "a", encoding="utf-8") as handle:
             handle.write(json.dumps(generation_summary) + "\n")
+        summary_lines = [
+            f"Generation {generation_index}",
+            f"Mode: {args.mode}",
+            f"Parent checkpoint: {parent_checkpoint_path}",
+            f"Promoted candidate: {promoted_record.get('candidate_name') if promoted_record else 'none'}",
+            "",
+        ]
+        for record in generation_records:
+            summary_lines.extend(
+                [
+                    f"- {record.get('candidate_name')}: "
+                    f"reward={safe_float(record.get('mean_reward'), -999.0):.2f}, "
+                    f"progress={safe_float(record.get('mean_progress'), 0.0):.3f}, "
+                    f"speed={safe_float(record.get('mean_speed'), 0.0):.2f}, "
+                    f"offtrack={safe_float(record.get('offtrack_rate'), 1.0):.3f}, "
+                    f"patterns={record.get('patterns', [])}, "
+                    f"gate={record.get('gate_reasons', [])}, "
+                    f"promoted={bool(record.get('promoted', False))}"
+                ]
+            )
+        (gen_dir / "generation_review.txt").write_text("\n".join(summary_lines) + "\n", encoding="utf-8")
 
         branch_state["current_generation"] = generation_index
         branch_state["updated_at"] = datetime.now().isoformat()
