@@ -220,3 +220,35 @@ steer_var=0.10761, episode_length=53–314 steps
 - `no_progress_max_steps=400` — adjust if car terminates too early on slow corners
 - Speed cap at 25 units/s — raise further if car proves stable at that speed
 - Visual eval (50k interval) shows raw behaviour — key signal is `progress > 0` in early evals
+
+---
+
+## Most Recent Top 3 Models
+
+### 1. Recursive promoted control — `recursive_cap100 / g003_c03`
+- **Artifact**: `autoresearch/results/recursive_cap100/generation_003/03_explore_brake_and_lower_corner_speed/final.pt`
+- **Metrics**: reward `232.58`, progress `0.7376`, speed `44.52`, offtrack `0.2678`
+- **Why it matters**: This is the strongest recent autoresearch result and the best current control baseline for follow-up work.
+- **What changed**:
+  - `ppo.min_log_std: -1.0 -> -0.75`
+  - `reward_shaping.corner_target_speed: 8.0 -> 7.0`
+- **Interpretation**: Less-constrained brake exploration plus slightly earlier corner setup produced the clearest jump in useful pace without a full collapse.
+
+### 2. Stable whole-track constrained run — `v2_progress`
+- **Artifact**: `models/v2_progress/best_model_torch.pt`
+- **Eval**: `results/v2_progress/evaluation_stats_20260324_083439.json`
+- **Metrics**: reward `382.86`, progress `0.9993`, offtrack `0.6`
+- **Why it matters**: This remains the best recent “gets around the whole track” reference, even if it is slower and more conservative than the cap100-style branches.
+- **Interpretation**: Best full-lap stability reference. Useful as the safety/control anchor when faster branches overfit into bad corner entry.
+
+### 3. Long off-track-penalty continuation — `v2_recursive_cap100_long_offtrack`
+- **Artifact**: `models/v2_recursive_cap100_long_offtrack/best_model_torch.pt`
+- **Eval**: `results/v2_recursive_cap100_long_offtrack/evaluation_stats_20260325_192844.json`
+- **Metrics**: reward `-26.02`, progress `0.7685`, offtrack `0.8`
+- **Why it matters**: This is the latest long-run continuation from the promoted recursive control with only a small off-track step penalty.
+- **Interpretation**: The minor off-track penalty did not create a breakthrough, but it preserved a fair amount of progress and is informative as a “small reward change, long run” reference point.
+
+### Current practical ranking
+1. `recursive_cap100 / g003_c03` — best current control baseline for targeted follow-up
+2. `v2_progress` — best whole-track completion reference
+3. `v2_recursive_cap100_long_offtrack` — latest long continuation, useful as a comparison but not yet a new ground truth
