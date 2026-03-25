@@ -75,7 +75,10 @@ def main():
     parser.add_argument("--num-envs", type=int, default=8)
     parser.add_argument("--resume", type=str, default=None,
                         help="Path to checkpoint to resume from (loads policy weights)")
-    parser.add_argument("--experiment-id", type=int, default=None,
+    parser.add_argument("--resume-mode", type=str, default="full",
+                        choices=["full", "policy_only"],
+                        help="Checkpoint restore behavior. policy_only skips optimizer state.")
+    parser.add_argument("--experiment-id", type=str, default=None,
                         help="Optional experiment id for logging")
     args = parser.parse_args()
 
@@ -126,12 +129,12 @@ def main():
     if args.resume and Path(args.resume).is_file():
         ckpt = torch.load(args.resume, map_location=device, weights_only=False)
         trainer.policy.load_state_dict(ckpt["policy_state_dict"])
-        if "optimizer_state_dict" in ckpt:
+        if args.resume_mode == "full" and "optimizer_state_dict" in ckpt:
             try:
                 trainer.optimizer.load_state_dict(ckpt["optimizer_state_dict"])
             except Exception as exc:
                 log(f"[experiment] Resume optimizer state skipped: {exc}")
-        log(f"[experiment] Resumed from {args.resume}")
+        log(f"[experiment] Resumed from {args.resume} | mode={args.resume_mode}")
 
     t0 = time.time()
     train_time = 0.0

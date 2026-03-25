@@ -518,6 +518,9 @@ def evaluate(policy, device, config: dict, n_episodes: int = 20, seed: int = 42)
     episode_progresses = []
     offtrack_counts = []
     speed_sums = []
+    steer_variances = []
+    throttle_means = []
+    brake_means = []
 
     t0 = time.time()
 
@@ -527,6 +530,9 @@ def evaluate(policy, device, config: dict, n_episodes: int = 20, seed: int = 42)
         ep_len = 0
         ep_offtrack = 0
         ep_speed_sum = 0.0
+        steer_values = []
+        throttle_values = []
+        brake_values = []
         done = False
 
         while not done:
@@ -536,6 +542,12 @@ def evaluate(policy, device, config: dict, n_episodes: int = 20, seed: int = 42)
                                               deterministic=True)
             env_action = policy.raw_to_env_action(raw_action)
             action_np = env_action.cpu().numpy().reshape(-1)
+            if action_np.size >= 1:
+                steer_values.append(float(action_np[0]))
+            if action_np.size >= 2:
+                throttle_values.append(float(action_np[1]))
+            if action_np.size >= 3:
+                brake_values.append(float(action_np[2]))
 
             obs, reward, done_arr, infos = eval_env.step(np.array([action_np]))
             done = bool(done_arr[0])
@@ -552,6 +564,9 @@ def evaluate(policy, device, config: dict, n_episodes: int = 20, seed: int = 42)
         episode_progresses.append(float(progress) if progress is not None else 0.0)
         offtrack_counts.append(ep_offtrack)
         speed_sums.append(ep_speed_sum / max(ep_len, 1))
+        steer_variances.append(float(np.var(steer_values)) if len(steer_values) > 1 else 0.0)
+        throttle_means.append(float(np.mean(throttle_values)) if throttle_values else 0.0)
+        brake_means.append(float(np.mean(brake_values)) if brake_values else 0.0)
 
         print(f"[eval] Episode {ep+1}/{n_episodes}: reward={ep_reward:.1f} len={ep_len} "
               f"progress={episode_progresses[-1]:.3f}",
@@ -569,5 +584,9 @@ def evaluate(policy, device, config: dict, n_episodes: int = 20, seed: int = 42)
         "offtrack_rate": float(np.mean([c / max(l, 1) for c, l in zip(offtrack_counts, episode_lengths)])),
         "mean_speed": float(np.mean(speed_sums)),
         "mean_episode_length": float(np.mean(episode_lengths)),
+        "mean_steer_variance": float(np.mean(steer_variances)),
+        "mean_throttle": float(np.mean(throttle_means)),
+        "mean_brake": float(np.mean(brake_means)),
+        "std_episode_length": float(np.std(episode_lengths)),
         "wall_clock_seconds": wall_clock,
     }

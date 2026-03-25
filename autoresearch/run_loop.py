@@ -36,10 +36,6 @@ AUTORESEARCH_DIR = Path(__file__).resolve().parent
 TRAIN_PPO_PATH = AUTORESEARCH_DIR / "train_ppo.py"
 PROGRAM_PATH = AUTORESEARCH_DIR / "program.md"
 RESULTS_DIR = AUTORESEARCH_DIR / "results"
-EXPERIMENTS_LOG = RESULTS_DIR / "experiments.jsonl"
-BEST_DIR = RESULTS_DIR / "best"
-BEST_CODE_PATH = RESULTS_DIR / "best_train_ppo.py"
-BEST_METRICS_PATH = RESULTS_DIR / "best_metrics.json"
 
 
 def log(message: str) -> None:
@@ -62,11 +58,11 @@ def safe_float(value, default: float = 0.0) -> float:
         return float(default)
 
 
-def load_experiment_history(max_recent: int = 10) -> list:
-    if not EXPERIMENTS_LOG.exists():
+def load_experiment_history(experiments_log: Path, max_recent: int = 10) -> list:
+    if not experiments_log.exists():
         return []
     history = []
-    with open(EXPERIMENTS_LOG, "r", encoding="utf-8") as handle:
+    with open(experiments_log, "r", encoding="utf-8") as handle:
         for line in handle:
             line = line.strip()
             if not line:
@@ -339,18 +335,24 @@ def run_experiment(
     return metrics
 
 
-def promote_best(run_dir: Path, log_entry: dict) -> None:
-    BEST_DIR.mkdir(parents=True, exist_ok=True)
+def promote_best(
+    run_dir: Path,
+    log_entry: dict,
+    best_dir: Path,
+    best_code_path: Path,
+    best_metrics_path: Path,
+) -> None:
+    best_dir.mkdir(parents=True, exist_ok=True)
 
     checkpoint_path = run_dir / "final.pt"
     if checkpoint_path.exists():
-        shutil.copy2(checkpoint_path, BEST_DIR / "final.pt")
+        shutil.copy2(checkpoint_path, best_dir / "final.pt")
 
     candidate_code_path = run_dir / "candidate_train_ppo.py"
     if candidate_code_path.exists():
-        shutil.copy2(candidate_code_path, BEST_CODE_PATH)
+        shutil.copy2(candidate_code_path, best_code_path)
 
-    with open(BEST_METRICS_PATH, "w", encoding="utf-8") as handle:
+    with open(best_metrics_path, "w", encoding="utf-8") as handle:
         json.dump(log_entry, handle, indent=2)
 
 
@@ -368,21 +370,38 @@ def main():
                         help="Run first experiment with current train_ppo.py (baseline)")
     parser.add_argument("--resume", type=str, default=None,
                         help="Path to checkpoint to warm-start all experiments from")
+    parser.add_argument("--results-subdir", type=str, default=None,
+                        help="Optional subdirectory under autoresearch/results for an isolated branch")
+    parser.add_argument("--program", type=str, default=None,
+                        help="Optional research program markdown path")
+    parser.add_argument("--bootstrap-code", type=str, default=None,
+                        help="Optional starting train_ppo.py snapshot for a fresh branch")
     args = parser.parse_args()
 
-    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    BEST_DIR.mkdir(parents=True, exist_ok=True)
+    branch_results_dir = RESULTS_DIR / args.results_subdir if args.results_subdir else RESULTS_DIR
+    experiments_log = branch_results_dir / "experiments.jsonl"
+    best_dir = branch_results_dir / "best"
+    best_code_path = branch_results_dir / "best_train_ppo.py"
+    best_metrics_path = branch_results_dir / "best_metrics.json"
 
-    if PROGRAM_PATH.exists():
-        program = PROGRAM_PATH.read_text(encoding="utf-8")
+    branch_results_dir.mkdir(parents=True, exist_ok=True)
+    best_dir.mkdir(parents=True, exist_ok=True)
+
+    program_path = Path(args.program) if args.program else PROGRAM_PATH
+    if program_path.exists():
+        program = program_path.read_text(encoding="utf-8")
     else:
         program = "Maximize mean_reward. Try one focused change per experiment."
-        log("[run_loop] WARNING: No program.md found. Using default.")
+        log(f"[run_loop] WARNING: No program file found at {program_path}. Using default.")
 
-    history = load_experiment_history()
+    history = load_experiment_history(experiments_log)
     best_code = TRAIN_PPO_PATH.read_text(encoding="utf-8")
-    if BEST_CODE_PATH.exists():
-        best_code = BEST_CODE_PATH.read_text(encoding="utf-8")
+    if best_code_path.exists():
+        best_code = best_code_path.read_text(encoding="utf-8")
+        TRAIN_PPO_PATH.write_text(best_code, encoding="utf-8")
+    elif args.bootstrap_code:
+        bootstrap_code_path = Path(args.bootstrap_code)
+        best_code = bootstrap_code_path.read_text(encoding="utf-8")
         TRAIN_PPO_PATH.write_text(best_code, encoding="utf-8")
     best_entry = get_best_entry(history)
     best_reward = safe_float(best_entry["mean_reward"], default=-float("inf")) if best_entry else -float("inf")
@@ -393,13 +412,15 @@ def main():
     log(f"[run_loop] max_experiments={args.max_experiments}")
     log(f"[run_loop] timesteps_per_experiment={args.timesteps:,}")
     log(f"[run_loop] num_envs={args.num_envs} | eval_episodes={args.eval_episodes}")
+    log(f"[run_loop] results_dir={branch_results_dir}")
+    log(f"[run_loop] program={program_path}")
     log(f"[run_loop] starting_best_reward={best_reward:.2f}")
-    log(f"[run_loop] best_checkpoint={(BEST_DIR / 'final.pt') if (BEST_DIR / 'final.pt').exists() else 'none'}")
+    log(f"[run_loop] best_checkpoint={(best_dir / 'final.pt') if (best_dir / 'final.pt').exists() else 'none'}")
     log("#" * 72)
 
     for loop_index in range(args.max_experiments):
         experiment_id += 1
-        run_dir = RESULTS_DIR / f"run_{experiment_id:03d}"
+        run_dir = branch_results_dir / f"run_{experiment_id:03d}"
         run_dir.mkdir(parents=True, exist_ok=True)
         t0 = time.time()
 
@@ -448,7 +469,7 @@ def main():
         )
 
         mean_reward = safe_float(metrics.get("mean_reward"), default=-999.0)
-        has_best_artifacts = (BEST_DIR / "final.pt").exists() and BEST_CODE_PATH.exists()
+        has_best_artifacts = (best_dir / "final.pt").exists() and best_code_path.exists()
         checkpoint_exists = (run_dir / "final.pt").exists()
         bootstrap_best = (not has_best_artifacts) and checkpoint_exists and ("error" not in metrics)
         actual_best = mean_reward > best_reward
@@ -470,7 +491,7 @@ def main():
         with open(run_dir / "metrics.json", "w", encoding="utf-8") as handle:
             json.dump(log_entry, handle, indent=2)
 
-        with open(EXPERIMENTS_LOG, "a", encoding="utf-8") as handle:
+        with open(experiments_log, "a", encoding="utf-8") as handle:
             handle.write(json.dumps(log_entry) + "\n")
 
         if promoted:
@@ -478,7 +499,7 @@ def main():
                 best_reward = mean_reward
                 best_entry = log_entry
             best_code = current_code
-            promote_best(run_dir, log_entry)
+            promote_best(run_dir, log_entry, best_dir, best_code_path, best_metrics_path)
             TRAIN_PPO_PATH.write_text(best_code, encoding="utf-8")
             if actual_best:
                 log(f"[run_loop] NEW BEST | reward={mean_reward:.2f} | progress={safe_float(metrics.get('mean_progress'), default=0.0):.4f}")
@@ -506,13 +527,13 @@ def main():
             f"was_best={actual_best} | promoted={promoted}"
         )
 
-    best_checkpoint = BEST_DIR / "final.pt"
+    best_checkpoint = best_dir / "final.pt"
     log("#" * 72)
     log("[run_loop] AUTORESEARCH COMPLETE")
     log(f"[run_loop] best_experiment_id={best_entry.get('experiment_id') if best_entry else 'none'}")
     log(f"[run_loop] best_reward={best_reward:.2f}")
     log(f"[run_loop] best_checkpoint={best_checkpoint if best_checkpoint.exists() else 'none'}")
-    log(f"[run_loop] best_code_snapshot={BEST_CODE_PATH if BEST_CODE_PATH.exists() else 'none'}")
+    log(f"[run_loop] best_code_snapshot={best_code_path if best_code_path.exists() else 'none'}")
     log("#" * 72)
 
 

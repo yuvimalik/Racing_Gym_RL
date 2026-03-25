@@ -678,46 +678,59 @@ class TorchPPOTrainer:
         }
         torch.save(payload, str(path))
 
-    def load(self, path: Path):
+    def load(self, path: Path, resume_mode: str = "full"):
+        resume_mode = str(resume_mode).strip().lower()
+        if resume_mode not in {"full", "policy_only"}:
+            raise ValueError(f"Unknown resume mode: {resume_mode}")
         payload = torch.load(str(path), map_location=self.device)
         raw_policy = self.policy.module if isinstance(self.policy, DDP) else self.policy
         raw_policy.load_state_dict(payload["policy_state_dict"])
 
         optimizer_restored = False
         optimizer_error = None
-        optimizer_state = payload.get("optimizer_state_dict")
-        if optimizer_state is not None:
-            try:
-                self.optimizer.load_state_dict(optimizer_state)
-                optimizer_restored = True
-            except Exception as exc:
-                optimizer_error = str(exc)
+        step_restored = False
+        rng_restored = False
+        if resume_mode == "full":
+            optimizer_state = payload.get("optimizer_state_dict")
+            if optimizer_state is not None:
+                try:
+                    self.optimizer.load_state_dict(optimizer_state)
+                    optimizer_restored = True
+                except Exception as exc:
+                    optimizer_error = str(exc)
 
-        self.num_timesteps = int(payload.get("num_timesteps", 0))
-        rng_state = payload.get("rng_state")
-        if isinstance(rng_state, dict):
-            np_state = rng_state.get("numpy")
-            if np_state is not None:
-                np.random.set_state(np_state)
-            torch_cpu_state = rng_state.get("torch_cpu")
-            if torch_cpu_state is not None:
-                try:
-                    torch.set_rng_state(torch_cpu_state)
-                except (TypeError, RuntimeError):
-                    pass  # RNG state format mismatch (e.g. saved on different device); non-fatal
-            torch_cuda_all = rng_state.get("torch_cuda_all")
-            if torch_cuda_all is not None and torch.cuda.is_available():
-                try:
-                    torch.cuda.set_rng_state_all(torch_cuda_all)
-                except Exception:
-                    # Older checkpoints or device-count mismatch: continue without hard failure.
-                    pass
+            self.num_timesteps = int(payload.get("num_timesteps", 0))
+            step_restored = True
+            rng_state = payload.get("rng_state")
+            if isinstance(rng_state, dict):
+                np_state = rng_state.get("numpy")
+                if np_state is not None:
+                    np.random.set_state(np_state)
+                torch_cpu_state = rng_state.get("torch_cpu")
+                if torch_cpu_state is not None:
+                    try:
+                        torch.set_rng_state(torch_cpu_state)
+                    except (TypeError, RuntimeError):
+                        pass  # RNG state format mismatch (e.g. saved on different device); non-fatal
+                torch_cuda_all = rng_state.get("torch_cuda_all")
+                if torch_cuda_all is not None and torch.cuda.is_available():
+                    try:
+                        torch.cuda.set_rng_state_all(torch_cuda_all)
+                    except Exception:
+                        # Older checkpoints or device-count mismatch: continue without hard failure.
+                        pass
+                rng_restored = True
+        else:
+            self.num_timesteps = 0
 
         return {
             "policy_restored": True,
             "optimizer_restored": optimizer_restored,
             "optimizer_error": optimizer_error,
             "num_timesteps": self.num_timesteps,
+            "step_restored": step_restored,
+            "rng_restored": rng_restored,
+            "resume_mode": resume_mode,
             "checkpoint_format_version": payload.get("checkpoint_format_version"),
         }
 
@@ -1832,6 +1845,13 @@ def main():
         choices=sorted(TORCH_POLICY_VARIANTS.keys()),
         help='Torch policy variant override. Defaults to config.training.torch_policy_variant or legacy.'
     )
+    parser.add_argument(
+        '--resume_mode',
+        type=str,
+        default='full',
+        choices=['full', 'policy_only'],
+        help='Torch resume behavior: full restores optimizer/steps/RNG, policy_only restores weights only.'
+    )
     
     args = parser.parse_args()
     
@@ -1874,6 +1894,8 @@ def main():
         print(f"Torch policy variant: {training_config.get('torch_policy_variant', 'legacy')}")
     if args.resume:
         print(f"Resuming from: {args.resume}")
+        if trainer_backend == 'torch':
+            print(f"Resume mode: {args.resume_mode}")
     if args.timesteps_add is not None:
         print(f"Timesteps add mode: +{args.timesteps_add:,}")
     print("="*70 + "\n")
@@ -1976,11 +1998,15 @@ def main():
         )
         if args.resume:
             print(f"Loading torch checkpoint from {resume_path}")
-            restore_info = trainer.load(resume_path)
+            restore_info = trainer.load(resume_path, resume_mode=args.resume_mode)
             restore_mode = "policy + optimizer" if restore_info.get("optimizer_restored") else "policy only"
             print(
-                f"Restore status: {restore_mode} | "
-                f"restored_step={int(restore_info.get('num_timesteps', 0)):,}"
+                f"Restore status: mode={restore_info.get('resume_mode')} | "
+                f"weights=restored | optimizer={'restored' if restore_info.get('optimizer_restored') else 'fresh'} | "
+                f"steps={'restored' if restore_info.get('step_restored') else 'reset'} "
+                f"({int(restore_info.get('num_timesteps', 0)):,}) | "
+                f"rng={'restored' if restore_info.get('rng_restored') else 'skipped'} | "
+                f"summary={restore_mode}"
             )
             if restore_info.get("optimizer_error"):
                 print(f"Optimizer state not restored: {restore_info['optimizer_error']}")
