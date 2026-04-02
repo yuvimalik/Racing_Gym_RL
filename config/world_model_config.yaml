@@ -1,0 +1,39 @@
+base_config_path: config/multi_car_config.yaml
+
+paths:
+  replay_dir: ./results/world_model/replay
+  artifacts_dir: ./results/world_model/artifacts
+  checkpoints_dir: ./models/world_model
+
+collector:
+  checkpoint_path: ./models/final_model_torch.pt
+  target_train_frames: 10000
+  target_val_frames: 2000
+  seed: 42
+  noise:
+    steer_std: 0.60
+    throttle_std: 0.35
+    brake_std: 0.15
+
+autoencoder:
+  batch_size: 16
+  epochs: 1000
+  learning_rate: 0.001
+
+rssm:
+  action_dim: 3
+  hidden_dim: 512
+  stochastic_dim: 32
+  embedding_dim: 512
+  min_std: 0.1
+  max_std: 2.0
+
+offline_training:
+  sequence_length: 50
+  batch_size: 8
+  learning_rate: 0.0003
+  free_nats: 1.0
+  kl_scale: 1.0
+  reward_scale: 1.0
+  hallucination_context: 50
+  hallucination_horizon: 50
