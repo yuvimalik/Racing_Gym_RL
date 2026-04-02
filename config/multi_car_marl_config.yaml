@@ -1,0 +1,138 @@
+# Multi-car reward shaping template focused on collisions, ranking, and overtakes.
+#
+# This config targets the redesigned local torch MARL stack.
+# It assumes shared-policy IPPO with one shared actor-critic controlling all cars.
+
+environment:
+  env_id: MultiCarRacing-v0
+  max_episode_steps: 2000
+  num_agents: 4
+  direction: CCW
+  use_random_direction: false
+  backwards_flag: true
+  h_ratio: 0.25
+  use_ego_color: false
+  render_mode: null
+
+ppo:
+  learning_rate: 2.5e-4
+  n_steps: 1024
+  batch_size: 1536
+  n_epochs: 3
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_range: 0.2
+  ent_coef: 0.05
+  vf_coef: 0.25
+  max_grad_norm: 0.5
+  min_log_std: -1.0
+  max_log_std: 0.5
+  steer_min_log_std: -0.5
+  steer_max_log_std: 0.0
+
+policy:
+  policy_type: CnnPolicy
+
+training:
+  trainer_backend: torch
+  marl_paradigm: shared_policy_ippo
+  torch_policy_variant: autoresearch_run_008
+  total_timesteps: 2000000
+  eval_freq: 50000
+  n_eval_episodes: 3
+  save_freq: 100000
+  log_interval: 5
+  num_envs: 1
+  fail_fast:
+    enabled: true
+    min_timesteps_before_check: 50000
+    min_mean_progress: 0.05
+    min_mean_speed: 1.0
+    patience_evals: 5
+  visual_eval:
+    enabled: false
+    freq: 200000
+    n_episodes: 1
+  success_gate:
+    enabled: false
+
+paths:
+  model_dir: ./models/v2_marl_reward
+  log_dir: ./logs/v2_marl_reward
+  results_dir: ./results/v2_marl_reward
+
+device: cuda
+
+reward_shaping:
+  enabled: true
+  use_custom_reward: true
+
+  # Keep real track progress as the backbone signal.
+  forward_progress_scale: 450.0
+  track_alignment_scale: 0.0
+  straight_speed_scale: 0.0
+
+  # Preserve lightweight single-car stabilizers.
+  sharp_turn_threshold: 0.35
+  sharp_turn_lookahead: 6
+  corner_target_speed: 8.0
+  corner_overspeed_penalty_scale: 0.0
+  apex_decel_reward_scale: 0.0
+  apex_decel_reward_cap: 1.0
+  steer_smoothness_penalty: 0.02
+  steer_delta_cap: 0.5
+  steer_magnitude_penalty: 0.003
+  lateral_velocity_penalty: 0.0
+  time_penalty: -0.1
+  idle_speed_threshold: 1.0
+  idle_penalty: -0.2
+  throttle_bonus_scale: 0.0
+  brake_penalty_scale: 0.0
+  launch_boost_steps: 0
+  launch_speed_target: 5.0
+  launch_bonus_scale: 0.0
+  stuck_speed_threshold: 0.8
+  stuck_progress_epsilon: 0.001
+  stuck_max_steps: 200
+  stuck_terminal_penalty: -20.0
+  no_progress_max_steps: 900
+  no_progress_terminal_penalty: -10.0
+  yaw_rate_penalty: 0.03
+  off_track_mode: penalty
+  off_track_terminal_penalty: -50.0
+  off_track_step_penalty: -5.0
+
+  multi_agent:
+    enabled: true
+
+    # Competitive shaping.
+    rank_reward_scale: 1.5
+    relative_velocity_scale: 0.15
+    relative_velocity_cap: 6.0
+    nearest_opponent_max_distance: 12.0
+    overtake_bonus: 4.0
+    overtake_margin: 0.002
+
+    # Tiered proxy collision penalties based on relative impact speed.
+    collision_distance_threshold: 3.5
+    collision_overlap_distance: 2.2
+    collision_min_closing_speed: 0.75
+    collision_low_speed_threshold: 1.5
+    collision_medium_speed_threshold: 4.0
+    collision_high_speed_threshold: 7.0
+    collision_low_penalty: -1.5
+    collision_medium_penalty: -5.0
+    collision_high_penalty: -12.0
+    shared_collision_penalty: -0.25
+
+  curriculum:
+    enabled: false
+
+observation:
+  enabled: false
+
+safety_governor:
+  enabled: false
+  speed_cap_ratio: 0.5
+  speed_cap_top_speed: 60.0
+  speed_cap_brake: 0.4

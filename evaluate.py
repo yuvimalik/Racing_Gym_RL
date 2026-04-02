@@ -36,6 +36,78 @@ def load_config(config_path):
     return config
 
 
+def reward_to_scalar(reward):
+    """Collapse scalar or per-agent reward arrays into one comparable metric."""
+    reward_arr = np.asarray(reward, dtype=np.float32)
+    if reward_arr.ndim == 0:
+        return float(reward_arr)
+    return float(np.mean(reward_arr))
+
+
+def done_to_bool(done):
+    done_arr = np.asarray(done)
+    if done_arr.ndim == 0:
+        return bool(done_arr)
+    return bool(done_arr.reshape(-1).any())
+
+
+def first_agent_info(info):
+    if isinstance(info, dict):
+        return info
+    if isinstance(info, (list, tuple)) and len(info) > 0:
+        first = info[0]
+        if isinstance(first, dict):
+            return first
+    return {}
+
+
+def infer_image_space_layout(space_shape):
+    shape = tuple(space_shape)
+    if len(shape) == 3:
+        if shape[-1] in (1, 3, 4):
+            h, w, c = shape
+            return 1, (c, h, w), "hwc"
+        c, h, w = shape
+        return 1, (c, h, w), "chw"
+    if len(shape) == 4 and shape[-1] in (1, 3, 4):
+        n_agents, h, w, c = shape
+        return int(n_agents), (c, h, w), "agent_hwc"
+    if len(shape) == 4:
+        n_agents, c, h, w = shape
+        return int(n_agents), (c, h, w), "agent_chw"
+    raise ValueError(f"Unsupported observation space shape: {shape}")
+
+
+def obs_to_policy_batch(obs, obs_layout):
+    obs_arr = np.asarray(obs, dtype=np.float32)
+    if obs_layout == "chw":
+        if obs_arr.ndim == 3:
+            return obs_arr[None, ...]
+        return obs_arr.reshape(-1, *obs_arr.shape[-3:])
+    if obs_layout == "hwc":
+        if obs_arr.ndim == 3:
+            obs_arr = obs_arr[None, ...]
+        obs_arr = obs_arr.reshape(-1, *obs_arr.shape[-3:])
+        return np.transpose(obs_arr, (0, 3, 1, 2))
+    if obs_layout == "agent_hwc":
+        if obs_arr.ndim == 4:
+            obs_arr = obs_arr[None, ...]
+        obs_arr = obs_arr.reshape(-1, *obs_arr.shape[-3:])
+        return np.transpose(obs_arr, (0, 3, 1, 2))
+    if obs_layout == "agent_chw":
+        if obs_arr.ndim == 4:
+            obs_arr = obs_arr[None, ...]
+        return obs_arr.reshape(-1, *obs_arr.shape[-3:])
+    raise ValueError(f"Unknown observation layout: {obs_layout}")
+
+
+def action_batch_to_env(action_batch, n_envs, n_agents):
+    action_batch = np.asarray(action_batch, dtype=np.float64)
+    if n_agents <= 1:
+        return action_batch.reshape(n_envs, -1)
+    return action_batch.reshape(n_envs, n_agents, -1)
+
+
 class SingleAgentWrapper(gym.Wrapper):
     """Wrap MultiCarRacing to expose a single-agent view."""
 
@@ -79,7 +151,9 @@ class SingleAgentWrapper(gym.Wrapper):
 
     def step(self, action):
         if hasattr(self.env.action_space, "shape") and len(self.env.action_space.shape) == 2:
-            action = action.reshape(1, -1)
+            action = np.asarray(action, dtype=np.float64).reshape(1, -1)
+        elif action is not None:
+            action = np.asarray(action, dtype=np.float64)
         obs, reward, done, info = self.env.step(action)
         # Extract single agent observation if multi-agent format (num_agents, H, W, C)
         if hasattr(obs, "shape") and len(obs.shape) == 4 and obs.shape[0] == 1:
@@ -112,18 +186,22 @@ class SafetyGovernorWrapper(gym.Wrapper):
         if self.enabled and action is not None:
             base_env = self.env.unwrapped
             if hasattr(base_env, "cars") and base_env.cars:
-                car = base_env.cars[0]
-                vel = car.hull.linearVelocity
-                speed = float(np.linalg.norm([vel[0], vel[1]]))
                 speed_cap = self.speed_cap_ratio * self.speed_cap_top_speed
-                if speed_cap > 0.0 and speed > speed_cap:
-                    action_arr = np.asarray(action).copy()
+                if speed_cap > 0.0:
+                    action_arr = np.asarray(action, dtype=np.float64).copy()
                     orig_shape = action_arr.shape
-                    action_arr = action_arr.reshape(-1)
-                    if action_arr.size >= 3:
-                        action_arr[1] = 0.0
-                        action_arr[2] = max(float(action_arr[2]), self.speed_cap_brake)
-                    action = action_arr.reshape(orig_shape)
+                    if action_arr.ndim == 1:
+                        action_matrix = action_arr.reshape(1, -1)
+                    else:
+                        action_matrix = action_arr.reshape(action_arr.shape[0], -1)
+                    for idx, car in enumerate(base_env.cars[:action_matrix.shape[0]]):
+                        vel = car.hull.linearVelocity
+                        speed = float(np.linalg.norm([vel[0], vel[1]]))
+                        if speed <= speed_cap or action_matrix.shape[1] < 3:
+                            continue
+                        action_matrix[idx, 1] = 0.0
+                        action_matrix[idx, 2] = max(float(action_matrix[idx, 2]), self.speed_cap_brake)
+                    action = action_matrix.reshape(orig_shape)
         return self.env.step(action)
 
 
@@ -254,10 +332,9 @@ def evaluate_torch_model(model_path, config, n_episodes=10, record_video=True, s
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     base_env = create_env(config)
-    # Observation from env is (H, W, C); policy expects (C, H, W)
-    raw_shape = base_env.observation_space.shape
-    obs_shape = (raw_shape[2], raw_shape[0], raw_shape[1])  # (C, H, W)
-    action_dim = int(np.prod(base_env.action_space.shape))
+    num_agents, obs_shape, obs_layout = infer_image_space_layout(base_env.observation_space.shape)
+    action_shape = tuple(base_env.action_space.shape)
+    action_dim = int(action_shape[-1] if len(action_shape) >= 2 else action_shape[0])
     action_low = np.array(base_env.action_space.low, dtype=np.float32)
     action_high = np.array(base_env.action_space.high, dtype=np.float32)
     training_cfg = config.get("training", {}) or {}
@@ -291,6 +368,8 @@ def evaluate_torch_model(model_path, config, n_episodes=10, record_video=True, s
     episode_times = []
     episode_offtrack = []
     episode_steer_variance = []
+    episode_mean_rank = []
+    episode_collision = []
     results_dir = Path(config["paths"]["results_dir"])
     results_dir.mkdir(parents=True, exist_ok=True)
     video_writer = None
@@ -306,23 +385,35 @@ def evaluate_torch_model(model_path, config, n_episodes=10, record_video=True, s
         start_time = None
         offtrack_seen = False
         steer_values = []
-        while not done:
-            # (H,W,C) -> (1,C,H,W), normalize to [0,1]
-            obs_t = torch.as_tensor(obs, dtype=torch.float32, device=device) / 255.0
-            obs_t = obs_t.permute(2, 0, 1).unsqueeze(0)  # HWC -> CHW, add batch
+        rank_values = []
+        collision_seen = False
+        while not done_to_bool(done):
+            obs_policy = obs_to_policy_batch(obs, obs_layout)
+            obs_t = torch.as_tensor(obs_policy, dtype=torch.float32, device=device) / 255.0
             with torch.no_grad():
                 raw_action, _, _ = policy.act(obs_t, deterministic=True)
-            env_action = policy_cls.raw_to_env_action(raw_action).cpu().numpy().squeeze(0)
+            env_action = policy_cls.raw_to_env_action(raw_action).cpu().numpy()
+            env_action = action_batch_to_env(env_action, n_envs=1, n_agents=num_agents)
             env_action = np.clip(env_action, action_low, action_high)
+            if num_agents <= 1:
+                env_action = env_action.reshape(-1)
+            else:
+                env_action = env_action.reshape(num_agents, action_dim)
             obs, reward, done, info = base_env.step(env_action)
-            episode_reward += float(reward)
+            episode_reward += reward_to_scalar(reward)
             episode_length += 1
-            steer_values.append(float(env_action[0]))
-            info = info if isinstance(info, dict) else {}
-            if int(info.get("events/offtrack", 0)) > 0:
-                offtrack_seen = True
-            if start_time is None and info.get("time") is not None:
-                start_time = info["time"]
+            steer_values.extend(np.asarray(env_action).reshape(-1, action_dim)[:, 0].astype(np.float32).tolist())
+            agent_infos = info if isinstance(info, (list, tuple)) else [info]
+            info0 = first_agent_info(info)
+            for agent_info in agent_infos:
+                if not isinstance(agent_info, dict):
+                    continue
+                offtrack_seen = offtrack_seen or int(agent_info.get("events/offtrack", 0)) > 0
+                collision_seen = collision_seen or int(agent_info.get("events/collision", 0)) > 0
+                if "telemetry/rank" in agent_info:
+                    rank_values.append(float(agent_info.get("telemetry/rank", 0.0)))
+            if start_time is None and info0.get("time") is not None:
+                start_time = info0["time"]
             frame = base_env.render(mode="rgb_array")
             if frame is not None:
                 if record_video:
@@ -333,8 +424,13 @@ def evaluate_torch_model(model_path, config, n_episodes=10, record_video=True, s
                 frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
                 cv2.imshow("Racecar Gym (Torch policy)", frame_bgr)
                 cv2.waitKey(1)
-        progress = info.get("progress", 0.0)
-        final_time = info.get("time", 0.0)
+        progress_values = [
+            float(agent_info.get("progress", 0.0))
+            for agent_info in (info if isinstance(info, (list, tuple)) else [info])
+            if isinstance(agent_info, dict)
+        ]
+        progress = float(np.mean(progress_values)) if progress_values else 0.0
+        final_time = info0.get("time", 0.0)
         episode_time = final_time - start_time if start_time is not None else 0.0
         episode_rewards.append(episode_reward)
         episode_lengths.append(episode_length)
@@ -342,7 +438,13 @@ def evaluate_torch_model(model_path, config, n_episodes=10, record_video=True, s
         episode_times.append(episode_time)
         episode_offtrack.append(int(offtrack_seen))
         episode_steer_variance.append(float(np.var(steer_values)) if len(steer_values) > 1 else 0.0)
-        print(f"Episode {episode + 1}/{n_episodes}: Reward={episode_reward:.2f}, Length={episode_length}, Progress={progress:.2%}, Time={episode_time:.2f}s")
+        episode_mean_rank.append(float(np.mean(rank_values)) if rank_values else 1.0)
+        episode_collision.append(int(collision_seen))
+        print(
+            f"Episode {episode + 1}/{n_episodes}: Reward={episode_reward:.2f}, "
+            f"Length={episode_length}, Progress={progress:.2%}, Time={episode_time:.2f}s, "
+            f"MeanRank={np.mean(rank_values) if rank_values else 1.0:.2f}, Collision={int(collision_seen)}"
+        )
     if video_writer is not None:
         video_writer.release()
         print(f"Video saved to {video_path}")
@@ -361,18 +463,24 @@ def evaluate_torch_model(model_path, config, n_episodes=10, record_video=True, s
         "std_time": float(np.std(episode_times)),
         "offtrack_rate": float(np.mean(episode_offtrack)),
         "mean_steer_variance": float(np.mean(episode_steer_variance)),
+        "mean_rank": float(np.mean(episode_mean_rank)),
+        "collision_rate": float(np.mean(episode_collision)),
         "episode_rewards": episode_rewards,
         "episode_lengths": episode_lengths,
         "episode_progress": episode_progress,
         "episode_times": episode_times,
         "episode_offtrack": episode_offtrack,
         "episode_steer_variance": episode_steer_variance,
+        "episode_mean_rank": episode_mean_rank,
+        "episode_collision": episode_collision,
     }
     return stats, str(video_path) if video_path else None
 
 
 def evaluate_model(model_path, config, n_episodes=10, record_video=True, seed=42):
     """Evaluate a trained SB3 model."""
+    if int(config.get('environment', {}).get('num_agents', 1)) > 1:
+        raise ValueError("SB3 evaluation is not supported for multi-agent configs in this repo.")
     print(f"Loading model from {model_path}")
     model = PPO.load(model_path)
     
@@ -413,17 +521,18 @@ def evaluate_model(model_path, config, n_episodes=10, record_video=True, seed=42
         offtrack_seen = False
         steer_values = []
         
-        while not done:
+        while not done_to_bool(done):
             action, _ = model.predict(obs, deterministic=True)
             steer_values.append(float(np.asarray(action).reshape(-1)[0]))
             
             obs, reward, done, info = env.step(action)
             
-            episode_reward += float(reward[0])
+            episode_reward += reward_to_scalar(reward)
             episode_length += 1
             
             # Record first frame time
-            info0 = info[0] if isinstance(info, (list, tuple)) else info
+            info_env = info[0] if isinstance(info, (list, tuple)) else info
+            info0 = first_agent_info(info_env)
             if start_time is None and isinstance(info0, dict) and 'time' in info0:
                 start_time = info0['time']
             if isinstance(info0, dict) and int(info0.get("events/offtrack", 0)) > 0:
@@ -517,6 +626,10 @@ def print_stats(stats):
         print(f"Off-track Rate: {stats['offtrack_rate']:.2%}")
     if 'mean_steer_variance' in stats:
         print(f"Mean Steering Variance: {stats['mean_steer_variance']:.5f}")
+    if 'mean_rank' in stats:
+        print(f"Mean Rank: {stats['mean_rank']:.2f}")
+    if 'collision_rate' in stats:
+        print(f"Collision Rate: {stats['collision_rate']:.2%}")
     print("="*50)
 
 
