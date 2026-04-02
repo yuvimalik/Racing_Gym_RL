@@ -1,0 +1,22 @@
+{
+  "branch_dir": "C:\\Users\\yuv05\\OneDrive\\Documents\\GitHub\\Racing_Gym_RL\\autoresearch\\results\\recursive_cap100_phase2",
+  "created_at": "2026-03-25T10:44:04.971105",
+  "updated_at": "2026-03-25T10:44:04.971105",
+  "mode": "fully_autonomous",
+  "candidates_per_batch": 4,
+  "timesteps_per_candidate": 300000,
+  "eval_episodes": 3,
+  "max_generations": 3,
+  "model": "gemini-2.5-flash",
+  "search_profile": "balanced_phase2",
+  "throughput_mode": "experiments_per_day",
+  "current_generation": 0,
+  "parent": {
+    "checkpoint_path": "C:\\Users\\yuv05\\OneDrive\\Documents\\GitHub\\Racing_Gym_RL\\autoresearch\\results\\recursive_cap100\\generation_003\\03_explore_brake_and_lower_corner_speed\\final.pt",
+    "config_path": "C:\\Users\\yuv05\\OneDrive\\Documents\\GitHub\\Racing_Gym_RL\\autoresearch\\results\\recursive_cap100\\promoted\\config.yaml",
+    "code_path": "C:\\Users\\yuv05\\OneDrive\\Documents\\GitHub\\Racing_Gym_RL\\autoresearch\\results\\recursive_cap100\\promoted\\train_ppo.py",
+    "metrics": null,
+    "patterns": []
+  },
+  "num_envs": 8
+}

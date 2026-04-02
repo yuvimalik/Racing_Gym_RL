@@ -1,0 +1,31 @@
+{
+  "candidates": [
+    {
+      "name": "aggressive_brake_and_corner_penalties",
+      "rationale": "The agent still exhibits 'throttle_saturation_no_brake' and a high 'offtrack_rate'. This experiment increases the general brake penalty and introduces a penalty for overspeeding in corners to further discourage reckless driving and encourage appropriate speed control for cornering.",
+      "config_overrides": {
+        "reward_shaping.brake_penalty_scale": 0.05,
+        "reward_shaping.corner_overspeed_penalty_scale": 0.1
+      },
+      "code_change": "keep_parent"
+    },
+    {
+      "name": "explore_brake_and_lower_corner_speed",
+      "rationale": "Given the persistent 'throttle_saturation_no_brake' and very low mean_brake, increasing the minimum exploration for non-steer actions (including brake) may help the agent discover more effective braking timings. A slightly lower corner target speed will encourage a more controlled entry into turns.",
+      "config_overrides": {
+        "ppo.min_log_std": -0.75,
+        "reward_shaping.corner_target_speed": 7.0
+      },
+      "code_change": "keep_parent"
+    },
+    {
+      "name": "ppo_fast_learning_more_epochs",
+      "rationale": "After recent reward shaping changes, increasing the learning rate and the number of PPO epochs per update can help the agent adapt more quickly and stabilize policy updates, especially when new reward signals are introduced.",
+      "config_overrides": {
+        "ppo.learning_rate": 0.0005,
+        "ppo.n_epochs": 4
+      },
+      "code_change": "keep_parent"
+    }
+  ]
+}

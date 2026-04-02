@@ -1,0 +1,10 @@
+{
+  "generation": 1,
+  "candidate_index": 1,
+  "candidate_name": "baseline_continuation",
+  "rationale": "Continue training the current parent unchanged as the control candidate.",
+  "source": "baseline",
+  "config_overrides": {},
+  "code_change": "keep_parent",
+  "parent_checkpoint": "C:\\Users\\yuv05\\OneDrive\\Documents\\GitHub\\Racing_Gym_RL\\autoresearch\\results\\recursive_cap100\\generation_003\\03_explore_brake_and_lower_corner_speed\\final.pt"
+}

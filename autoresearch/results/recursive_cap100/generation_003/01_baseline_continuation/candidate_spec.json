@@ -1,0 +1,10 @@
+{
+  "generation": 3,
+  "candidate_index": 1,
+  "candidate_name": "baseline_continuation",
+  "rationale": "Continue training the current parent unchanged as the control candidate.",
+  "source": "baseline",
+  "config_overrides": {},
+  "code_change": "keep_parent",
+  "parent_checkpoint": "C:\\Users\\yuv05\\OneDrive\\Documents\\GitHub\\Racing_Gym_RL\\autoresearch\\results\\recursive_cap100\\generation_002\\03_enhance_braking_cornering_rewards\\final.pt"
+}

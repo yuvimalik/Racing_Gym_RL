@@ -1,0 +1,12 @@
+Candidate aggressive_brake_and_corner_penalties (pre-run)
+=========================================================
+
+Rationale: The agent still exhibits 'throttle_saturation_no_brake' and a high 'offtrack_rate'. This experiment increases the general brake penalty and introduces a penalty for overspeeding in corners to further discourage reckless driving and encourage appropriate speed control for cornering.
+Parent patterns: ['throttle_saturation_no_brake']
+
+Config changes:
+- reward_shaping.brake_penalty_scale: 0.01 -> 0.05
+- reward_shaping.corner_overspeed_penalty_scale: 0.0 -> 0.1
+
+Code changes:
+No code changes.

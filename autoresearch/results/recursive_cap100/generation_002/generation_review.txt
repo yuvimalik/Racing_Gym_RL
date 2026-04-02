@@ -1,0 +1,9 @@
+Generation 2
+Mode: fully_autonomous
+Parent checkpoint: C:\Users\yuv05\OneDrive\Documents\GitHub\Racing_Gym_RL\models\v2_ceiling_cap100\best_model_torch.pt
+Promoted candidate: enhance_braking_cornering_rewards
+
+- baseline_continuation: reward=-108.99, progress=0.637, speed=32.47, offtrack=0.437, patterns=['throttle_saturation_no_brake'], gate=[], promoted=False
+- reduce_action_exploration_steer_general: reward=-301.47, progress=0.201, speed=19.90, offtrack=0.771, patterns=['throttle_saturation_no_brake'], gate=['offtrack>0.600'], promoted=False
+- enhance_braking_cornering_rewards: reward=-77.93, progress=0.666, speed=35.49, offtrack=0.491, patterns=['throttle_saturation_no_brake'], gate=[], promoted=True
+- ppo_stability_gae_clip: reward=-234.63, progress=0.303, speed=23.61, offtrack=0.778, patterns=['throttle_saturation_no_brake'], gate=['offtrack>0.600'], promoted=False

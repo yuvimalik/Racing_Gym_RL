@@ -1,0 +1,9 @@
+Generation 1
+Mode: fully_autonomous
+Parent checkpoint: C:\Users\yuv05\OneDrive\Documents\GitHub\Racing_Gym_RL\models\v2_ceiling_cap100\best_model_torch.pt
+Promoted candidate: none
+
+- baseline_continuation: reward=-507.58, progress=0.208, speed=20.23, offtrack=0.739, patterns=['throttle_saturation_no_brake'], gate=['reward<-500.00', 'offtrack>0.600'], promoted=False
+- ppo_lr_bs_epochs: reward=-294.36, progress=0.189, speed=20.30, offtrack=0.825, patterns=['throttle_saturation_no_brake', 'same_length_failure_signature', 'late_or_missing_brake'], gate=['offtrack>0.600', 'throttle_saturated_without_progress'], promoted=False
+- ppo_exploration_gae_steer_std: reward=-378.73, progress=0.019, speed=11.55, offtrack=0.962, patterns=['early_offtrack', 'throttle_saturation_no_brake', 'low_steer_variance_circling_or_understeer', 'instability_collapse', 'same_length_failure_signature', 'late_or_missing_brake'], gate=['progress<0.050', 'offtrack>0.600', 'throttle_saturated_without_progress'], promoted=False
+- reward_corner_lateral_smooth_penalty: reward=-1061.35, progress=0.016, speed=11.55, offtrack=0.963, patterns=['early_offtrack', 'throttle_saturation_no_brake', 'instability_collapse', 'same_length_failure_signature', 'late_or_missing_brake'], gate=['reward<-500.00', 'progress<0.050', 'offtrack>0.600', 'throttle_saturated_without_progress'], promoted=False

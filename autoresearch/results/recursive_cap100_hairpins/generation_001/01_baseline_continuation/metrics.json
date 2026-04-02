@@ -1,0 +1,48 @@
+{
+  "generation": 1,
+  "candidate_index": 1,
+  "candidate_id": "g001_c01",
+  "candidate_name": "baseline_continuation",
+  "rationale": "Continue training the current parent unchanged as the control candidate.",
+  "source": "baseline",
+  "config_overrides": {},
+  "code_change": "keep_parent",
+  "candidate_config_path": "C:\\Users\\yuv05\\OneDrive\\Documents\\GitHub\\Racing_Gym_RL\\autoresearch\\results\\recursive_cap100_hairpins\\generation_001\\01_baseline_continuation\\candidate_config.yaml",
+  "candidate_code_path": "C:\\Users\\yuv05\\OneDrive\\Documents\\GitHub\\Racing_Gym_RL\\autoresearch\\results\\recursive_cap100_hairpins\\generation_001\\01_baseline_continuation\\candidate_train_ppo.py",
+  "checkpoint_path": "C:\\Users\\yuv05\\OneDrive\\Documents\\GitHub\\Racing_Gym_RL\\autoresearch\\results\\recursive_cap100_hairpins\\generation_001\\01_baseline_continuation\\final.pt",
+  "passed_gate": false,
+  "gate_reasons": [
+    "reward<-500.00",
+    "progress<0.050",
+    "offtrack>0.600",
+    "speed<5.00"
+  ],
+  "patterns": [
+    "speed_collapse"
+  ],
+  "score": -1199.0,
+  "resume_mode": "policy_only",
+  "num_envs": 4,
+  "stderr_tail": [
+    "[experiment] CUDA device: NVIDIA GeForce RTX 4070 Laptop GPU",
+    "[experiment] Loading config...",
+    "[experiment] Creating 4 environments with DummyVecEnv...",
+    "[prepare] Creating DummyVecEnv with 4 envs (serial stepping; Windows-safe but CPU-bound).",
+    "C:\\Users\\yuv05\\OneDrive\\Documents\\GitHub\\Racing_Gym_RL\\.venv310\\lib\\site-packages\\gym\\logger.py:30: UserWarning: \u001b[33mWARN: Box bound precision lowered by casting to float32\u001b[0m",
+    "  warnings.warn(colorize('%s: %s'%('WARN', msg % args), 'yellow'))",
+    "[experiment] Envs created in 2.8s | env_mode=DummyVecEnv",
+    "[experiment] Starting experiment #g001_c01",
+    "[experiment] Setup | device=cuda | obs_shape=(3, 96, 96) | action_dim=3 | timesteps=300,000 | num_envs=4 | seed=143 | env_mode=DummyVecEnv | params=2,239,911",
+    "[experiment] Plan | steps_per_rollout=4,096 (1024 x 4) | planned_iterations=73",
+    "[experiment] Hyperparams | learning_rate=0.00025, n_steps=1024, batch_size=1536, n_epochs=3, gamma=0.99, gae_lambda=0.95, clip_range=0.2, ent_coef=0.05, vf_coef=0.25, max_grad_norm=0.5, min_log_std=-0.75, max_log_std=0.5, steer_min_log_std=-0.5, steer_max_log_std=0.0",
+    "[experiment] Resumed from C:\\Users\\yuv05\\OneDrive\\Documents\\GitHub\\Racing_Gym_RL\\autoresearch\\results\\recursive_cap100\\generation_003\\03_explore_brake_and_lower_corner_speed\\final.pt | mode=policy_only",
+    "[experiment] Progress | iter=1/73 |   1.4% | steps=4,096/300,000 | sps=60.7 | recent_sps=60.8 | elapsed=1.1m | eta=1.4h | rollout_s=59.98 | update_s=0.00 | rollout_reward=-363.74 | pg=0.0024 vf=15.6259 ent=3.1900",
+    "[experiment] Progress | iter=3/73 |   4.1% | steps=12,288/300,000 | sps=40.1 | recent_sps=34.3 | elapsed=5.1m | eta=2.0h | rollout_s=127.26 | update_s=0.00 | rollout_reward=-371.91 | pg=-0.0019 vf=11.4592 ent=3.1930",
+    "[experiment] Progress | iter=6/73 |   8.2% | steps=24,576/300,000 | sps=34.9 | recent_sps=31.0 | elapsed=11.7m | eta=2.2h | rollout_s=125.71 | update_s=0.00 | rollout_reward=-384.60 | pg=-0.0014 vf=8.4974 ent=3.1959"
+  ],
+  "stdout_tail": [],
+  "promoted": false,
+  "mean_reward": -999.0,
+  "error": "Timeout after 7200s",
+  "return_code": 1
+}
