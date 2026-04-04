@@ -1,10 +1,8 @@
-# Control-first shared-policy MARL config.
+# Short control-first MARL validation run.
 #
-# This version bootstraps from the stronger single-agent control baselines in
-# `config/multi_car_config.yaml` and
-# `config/multi_car_config_recursive_cap100_long_offtrack.yaml`.
-# The goal is to make both cars stay on track before aggressive competition
-# shaping matters.
+# Use this before any long training run. It shares the same reward structure as
+# `multi_car_marl_config.yaml` but evaluates and checkpoints more often so you
+# can reject bad runs quickly.
 
 environment:
   env_id: MultiCarRacing-v0
@@ -40,52 +38,39 @@ training:
   trainer_backend: torch
   marl_paradigm: shared_policy_ippo
   torch_policy_variant: autoresearch_run_008
-  # Trainer timesteps are counted per agent stream.
-  # With 2 agents and 1 env, 1,000,000 stream steps ~= 500,000 env steps.
-  total_timesteps: 1000000
-  # Keep subprocess evaluation so MARL checkpoints can be scored and visualized
-  # without reusing the training process viewer state.
-  eval_freq: 50000
+  total_timesteps: 150000
+  eval_freq: 25000
   eval_subprocess: true
   n_eval_episodes: 3
-  # Save often enough to resume, but not every eval.
-  save_freq: 100000
+  save_freq: 25000
   log_interval: 5
   num_envs: 1
   fail_fast:
     enabled: true
-    min_timesteps_before_check: 100000
+    min_timesteps_before_check: 50000
     min_mean_progress: 0.05
     min_mean_speed: 1.0
-    patience_evals: 4
+    patience_evals: 3
   visual_eval:
     enabled: false
-    freq: 200000
+    freq: 100000
     n_episodes: 1
   success_gate:
-    enabled: true
-    mean_reward_threshold: 150.0
-    mean_progress_threshold: 0.60
-    max_offtrack_rate: 0.35
-    min_eval_episodes: 3
+    enabled: false
 
 paths:
-  model_dir: ./models/v3_marl_control_bootstrap
-  log_dir: ./logs/v3_marl_control_bootstrap
-  results_dir: ./results/v3_marl_control_bootstrap
+  model_dir: ./models/v3_marl_control_bootstrap_smoke
+  log_dir: ./logs/v3_marl_control_bootstrap_smoke
+  results_dir: ./results/v3_marl_control_bootstrap_smoke
 
-device: cuda  # Falls back to mps/cpu when CUDA is unavailable.
+device: cuda
 
 reward_shaping:
   enabled: true
   use_custom_reward: true
-
-  # Keep real track progress as the main signal.
   forward_progress_scale: 600.0
   track_alignment_scale: 0.0
   straight_speed_scale: 0.0
-
-  # Reuse the stronger corner-entry priors from the best single-agent configs.
   sharp_turn_threshold: 0.35
   sharp_turn_lookahead: 6
   corner_target_speed: 7.0
@@ -111,24 +96,18 @@ reward_shaping:
   no_progress_max_steps: 900
   no_progress_terminal_penalty: -10.0
   yaw_rate_penalty: 0.05
-  # End the rollout when a car leaves the track so shared-policy IPPO gets a
-  # much cleaner "stay on the road" signal during early training.
   off_track_mode: terminate
   off_track_terminal_penalty: -50.0
   off_track_step_penalty: -0.5
 
   multi_agent:
     enabled: true
-
-    # Keep competition present, but make it much weaker than control progress.
     rank_reward_scale: 0.15
     relative_velocity_scale: 0.02
     relative_velocity_cap: 6.0
     nearest_opponent_max_distance: 12.0
     overtake_bonus: 0.5
     overtake_margin: 0.002
-
-    # Mild collision shaping during bring-up; avoid letting contacts dominate.
     collision_distance_threshold: 3.5
     collision_overlap_distance: 2.2
     collision_min_closing_speed: 0.75

@@ -1,14 +1,16 @@
 # Racing Gym RL - PPO Training Project
 
-A reinforcement learning project for training a Proximal Policy Optimization (PPO) agent to drive a car in the `multi_car_racing` environment using Stable-Baselines3.
+A reinforcement learning project for training policies in the `multi_car_racing` environment. The repo supports the legacy single-agent SB3 flow and a maintained local torch path for single-agent and multi-agent training.
 
 Google Colab:[https://colab.research.google.com/github/yuvimalik/Racing_Gym_RL/blob/main/colab_training.ipynb]
 
 ## Project Overview
 
-This project implements a complete training pipeline for a single-agent car racing setup using:
+This project implements a complete training pipeline for car racing using:
 - **Environment**: `multi_car_racing` (Gym-based multi-agent car racing)
-- **Algorithm**: Proximal Policy Optimization (PPO) from Stable-Baselines3
+- **Algorithms**:
+  - Stable-Baselines3 PPO for the legacy single-agent path
+  - Local torch PPO for the maintained single-agent and multi-agent paths
 - **Observation Space**: 96x96 RGB image
 - **Action Space**: Continuous controls (steer, gas, brake)
 
@@ -16,6 +18,7 @@ Current torch training ground truth:
 - **Autoresearch run 008** is the promoted torch policy variant for long training.
 - It uses a tanh-squashed Gaussian policy with tanh log-prob correction.
 - The legacy torch policy remains available for comparison and regression testing.
+- Multi-agent training uses `training.trainer_backend: torch`, `training.marl_paradigm: shared_policy_ippo`, and `config/multi_car_marl_config.yaml`.
 
 ## Project Structure
 
@@ -25,10 +28,12 @@ Racing_Gym_RL/
 ├── requirements.txt               # Python dependencies
 ├── train.py                       # Main training script
 ├── evaluate.py                    # Model evaluation script
+├── distributed_train.py           # CUDA-only distributed torch entry point
 ├── colab_training.ipynb           # Google Colab notebook for training
 ├── config/
 │   ├── circle_config.yaml         # Legacy config (racecar_gym)
-│   └── multi_car_config.yaml      # Training configuration for multi_car_racing
+│   ├── multi_car_config.yaml      # Single-agent torch config
+│   └── multi_car_marl_config.yaml # Shared-policy multi-agent torch config
 ├── models/                        # Saved model checkpoints (gitignored)
 ├── logs/                          # Training logs and TensorBoard data (gitignored)
 └── results/                       # Evaluation results and videos (gitignored)
@@ -74,7 +79,13 @@ The notebook will install all dependencies and create necessary directories auto
 
 ## Configuration
 
-Training parameters are configured in `config/multi_car_config.yaml`. Key settings include:
+Training parameters are configured in YAML files under `config/`.
+
+Recommended entry points:
+- `config/multi_car_config.yaml`: single-agent torch training
+- `config/multi_car_marl_config.yaml`: shared-policy multi-agent torch training
+
+Key settings include:
 
 - **Environment**: Track selection, rendering options
 - **PPO Hyperparameters**: Learning rate, batch size, number of epochs, etc.
@@ -83,8 +94,8 @@ Training parameters are configured in `config/multi_car_config.yaml`. Key settin
 
 ### Environment Options
 
-Key options in `config/multi_car_config.yaml`:
-- `num_agents`: Set to 1 for single-agent training
+Key options in the multi-car configs:
+- `num_agents`: `1` for single-agent training, `>1` for shared-policy multi-agent training
 - `direction`: Track direction (`CW` or `CCW`)
 - `use_random_direction`: Randomize direction
 - `backwards_flag`, `h_ratio`, `use_ego_color`: Rendering/visual options
@@ -93,14 +104,24 @@ Key options in `config/multi_car_config.yaml`:
 
 ### Training
 
-Train a new model:
+Train a new single-agent torch model:
 ```bash
 python train.py --config config/multi_car_config.yaml --seed 42
 ```
 
-Resume training from a checkpoint:
+Train a multi-agent torch model:
 ```bash
-python train.py --config config/multi_car_config.yaml --resume models/ppo_racecar_50000_steps.zip
+python train.py --config config/multi_car_marl_config.yaml --seed 42
+```
+
+Run a short MARL smoke test before any long run:
+```bash
+python train.py --config config/multi_car_marl_smoke_config.yaml --seed 42
+```
+
+Resume a torch checkpoint:
+```bash
+python train.py --config config/multi_car_marl_config.yaml --resume models/v3_marl_control_bootstrap/best_model_torch.pt --seed 42
 ```
 
 Train with the promoted autoresearch policy variant explicitly:
@@ -118,17 +139,74 @@ Run the legacy torch policy for comparison:
 python train.py --config config/multi_car_config.yaml --trainer_backend torch --torch_policy_variant legacy --seed 42
 ```
 
+Distributed multi-GPU torch training is available through `distributed_train.py`, but it is currently CUDA-only and keeps `MultiCarRacing-v0` at one `DummyVecEnv` per rank:
+```bash
+torchrun --nproc_per_node=NUM_GPUS distributed_train.py --config config/multi_car_marl_config.yaml --seed 42
+```
+
 Training will:
 - Save checkpoints periodically (default: every 50,000 steps)
 - Save the best model based on evaluation performance
-- Log training metrics to TensorBoard
+- Log torch training metrics to TensorBoard and JSONL files
 - Save final model upon completion
+- Write a run manifest and summary under `results/.../torch_<timestamp>_seed<seed>/`
+
+### Recommended MARL Training Ladder
+
+The current `models/v2_marl_reward/final_model_torch.pt` checkpoint is not a good resume point for racing behavior. It can be visualized, but it should be treated as a failed control branch rather than a strong multi-agent baseline.
+
+Recommended sequence:
+
+1. Smoke-test the control-first MARL config:
+```bash
+python train.py --config config/multi_car_marl_smoke_config.yaml --seed 42
+```
+
+2. Evaluate the smoke run's best checkpoint:
+```bash
+python evaluate.py --model models/v3_marl_control_bootstrap_smoke/best_model_torch.pt --config config/multi_car_marl_smoke_config.yaml --episodes 5 --no-video --seed 42
+```
+
+3. If the smoke run passes, launch the longer control-first MARL run:
+```bash
+python train.py --config config/multi_car_marl_config.yaml --seed 42
+```
+
+4. Resume from the best checkpoint, not the final checkpoint:
+```bash
+python train.py --config config/multi_car_marl_config.yaml --resume models/v3_marl_control_bootstrap/best_model_torch.pt --seed 42 --timesteps_add 500000
+```
+
+Go / no-go criteria after the smoke run:
+- Stop and retune if eval still shows near-zero steering variance, `100%` off-track, or progress stuck near zero.
+- Continue if progress becomes clearly non-zero, steering variance stays alive, and off-track rate trends down from the current failure case.
+- Prefer `best_model_torch.pt` over `final_model_torch.pt` whenever periodic eval is enabled.
 
 ### Evaluation
 
-Evaluate a trained model:
+Evaluate a trained SB3 `.zip` model:
 ```bash
 python evaluate.py --model models/best_model/best_model.zip --episodes 10
+```
+
+Evaluate a torch `.pt` checkpoint, including multi-agent checkpoints:
+```bash
+python evaluate.py --model models/v3_marl_control_bootstrap/best_model_torch.pt --config config/multi_car_marl_config.yaml --episodes 10
+```
+
+Watch a multi-agent checkpoint live in a window without writing a video:
+```bash
+python evaluate.py --model models/v3_marl_control_bootstrap/best_model_torch.pt --config config/multi_car_marl_config.yaml --episodes 1 --show-window --no-video --seed 42
+```
+
+Save a multi-agent evaluation video to an explicit path:
+```bash
+python evaluate.py --model models/v3_marl_control_bootstrap/best_model_torch.pt --config config/multi_car_marl_config.yaml --episodes 5 --seed 42 --output-video results/v3_marl_control_bootstrap/best_model_torch_seed42_evaluation.mp4
+```
+
+Save a headless JSON summary to a specific path:
+```bash
+python evaluate.py --model models/v3_marl_control_bootstrap/best_model_torch.pt --config config/multi_car_marl_config.yaml --episodes 5 --no-video --output-json results/v3_marl_control_bootstrap/manual_eval_best.json
 ```
 
 Options:
@@ -136,12 +214,25 @@ Options:
 - `--config`: Configuration file (default: `config/multi_car_config.yaml`)
 - `--episodes`: Number of evaluation episodes (default: 10)
 - `--no-video`: Disable video recording
+- `--output-video`: Explicit path for the saved evaluation video
+- `--output-json`: Explicit path for the saved evaluation summary
 - `--seed`: Random seed for evaluation
+- `--show-window`: Show the OpenCV evaluation window during evaluation
+
+If `--output-video` or `--output-json` is omitted, `evaluate.py` now uses deterministic default names under the configured `results_dir` based on the checkpoint stem and seed. Re-running the same command with the same seed overwrites the same artifacts, which makes comparison easier.
 
 Evaluation generates:
-- Performance statistics (mean reward, episode length, progress, etc.)
+- Performance statistics (mean reward, episode length, progress, and MARL metrics such as rank/collision when present)
 - Video recording of agent performance (if enabled)
 - JSON file with detailed metrics
+- Metadata including checkpoint path, config path, seed, and video path when present
+
+For `MultiCarRacing-v0` multi-agent evaluation, the renderer returns one frame per car. `evaluate.py` now tiles those per-car views side-by-side into a single RGB frame so both live viewing and MP4 export work reliably.
+
+Interpretation note for showcase runs:
+- A successful video export does not mean the policy is good.
+- If eval shows near-zero progress, `100%` off-track, or near-zero steering variance, the checkpoint is not showcase-ready even if the viewer works.
+- The current `models/v2_marl_reward/final_model_torch.pt` checkpoint should be treated as a debugging artifact rather than a good racing demo unless later evals improve materially.
 
 ### TensorBoard Visualization
 
@@ -151,6 +242,11 @@ tensorboard --logdir logs
 ```
 
 Then open `http://localhost:6006` in your browser.
+
+Generate saved figures from a completed run:
+```bash
+python plot_marl_results.py --run-dir results/v2_marl_reward/torch_<timestamp>_seed42
+```
 
 ## Observation and Action Spaces
 
@@ -183,6 +279,10 @@ The main config `config/multi_car_config.yaml` now defaults to:
 - `training.trainer_backend: torch`
 - `training.torch_policy_variant: autoresearch_run_008`
 
+The multi-agent config `config/multi_car_marl_config.yaml` additionally sets:
+- `environment.num_agents: 2`
+- `training.marl_paradigm: shared_policy_ippo`
+
 ## Training Details
 
 ### PPO Hyperparameters (Default)
@@ -199,11 +299,31 @@ The main config `config/multi_car_config.yaml` now defaults to:
 
 ### Training Process
 
-1. Environment creation with `MultiCarRacing-v0` and `num_agents=1`
-2. Model initialization with `CnnPolicy`
-3. Training loop with periodic evaluation
-4. Automatic checkpointing and best model saving
-5. TensorBoard logging for monitoring
+1. Environment creation with `MultiCarRacing-v0` and the configured `num_agents`
+2. Space wrapping so the torch trainer sees consistent per-agent image/action tensors
+3. Shared-policy PPO rollout collection and updates across all agent streams
+4. Periodic evaluation, checkpointing, and best-model saving
+5. TensorBoard plus JSONL logging for monitoring and later visualization
+
+### Multi-Agent Notes
+
+- Multi-agent training uses one shared actor-critic policy across all cars.
+- Trainer timestep accounting is per agent stream. With `num_envs=1` and `num_agents=2`, each simulator step advances the trainer by `2` timesteps.
+- `MultiCarRacing-v0` is currently supported only with a single `DummyVecEnv` in `train.py`.
+- Multi-agent eval can run through a subprocess (`training.eval_subprocess: true`) so evaluation writes saved JSON artifacts without reusing the training process viewer state.
+- On macOS, requesting `device: cuda` falls back to `mps` or `cpu` when CUDA is unavailable.
+- `distributed_train.py` is CUDA-only and uses one `DummyVecEnv` per rank for `MultiCarRacing-v0`.
+
+### Run Artifacts
+
+Each torch MARL run now writes a self-contained results directory such as `results/v2_marl_reward/torch_20260402_153000_seed42/` with:
+- `run_manifest.json`: resolved config and run metadata
+- `run_summary.json`: final summary with key artifact paths
+- `training_metrics.jsonl`: per-update losses, KL, clip fraction, learning rate, throughput, and step semantics
+- `episode_summaries.jsonl`: episodic reward and length records when available
+- `torch_eval_history.jsonl`: scalar eval history
+- `evaluations/*.json`: saved checkpoint evaluation summaries
+- `plots/*.png`: figures generated by `plot_marl_results.py`
 
 ## Results Interpretation
 
@@ -213,6 +333,7 @@ The main config `config/multi_car_config.yaml` now defaults to:
 - **Episode Length**: Average number of steps per episode
 - **Progress**: Average track progress (0.0 to 1.0, where 1.0 = one complete lap)
 - **Episode Time**: Average simulation time per episode
+- **Mean Rank / Collision Rate**: Multi-agent metrics reported by torch evaluation when `num_agents > 1`
 
 ### Performance Indicators
 
@@ -232,10 +353,11 @@ The main config `config/multi_car_config.yaml` now defaults to:
 **CUDA/GPU Issues**
 - Set `device: cpu` in config file to force CPU usage
 - Check PyTorch CUDA installation: `python -c "import torch; print(torch.cuda.is_available())"`
+- On macOS, `device: cuda` in this repo falls back to `mps` or `cpu`
 
 **Image Observation Issues**
 - Ensure `CnnPolicy` is used (default in config)
-- Ensure `VecTransposeImage` is applied (handled in `train.py`)
+- Ensure `VecTransposeImage` is applied only for single-agent image training (handled in `train.py`)
 
 **Memory Issues**
 - Reduce `batch_size` or `n_steps` in config
@@ -244,6 +366,12 @@ The main config `config/multi_car_config.yaml` now defaults to:
 
 **Environment Not Found**
 - Ensure `gym_multi_car_racing` is imported before `gym.make`
+
+**Multi-Agent Launch Issues**
+- Use `training.trainer_backend: torch`; SB3 multi-agent training/evaluation is not supported in this repo
+- Use `config/multi_car_marl_config.yaml` for multiple cars
+- Evaluate multi-agent checkpoints with torch `.pt` files, not SB3 `.zip` files
+- Keep `training.num_envs: 1` for `MultiCarRacing-v0` in the main trainer
 
 ## Google Colab Specific Notes
 

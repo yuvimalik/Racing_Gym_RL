@@ -8,6 +8,7 @@ generating metrics and optionally recording videos.
 import os
 import yaml
 import argparse
+import json
 import numpy as np
 from pathlib import Path
 import gym
@@ -22,11 +23,23 @@ import torch
 
 # Import Torch policy and wrappers from training module for consistency
 try:
-    from train import CnnActorCritic, RewardShapingWrapper, TORCH_POLICY_VARIANTS
+    from train import (
+        CnnActorCritic,
+        MultiAgentSpaceWrapper,
+        RewardShapingWrapper,
+        TORCH_POLICY_VARIANTS,
+        mps_is_available,
+        validate_agent_space_contract,
+    )
 except ImportError:
     CnnActorCritic = None
+    MultiAgentSpaceWrapper = None
     RewardShapingWrapper = None
     TORCH_POLICY_VARIANTS = {}
+    validate_agent_space_contract = None
+
+    def mps_is_available():
+        return False
 
 
 def load_config(config_path):
@@ -106,6 +119,44 @@ def action_batch_to_env(action_batch, n_envs, n_agents):
     if n_agents <= 1:
         return action_batch.reshape(n_envs, -1)
     return action_batch.reshape(n_envs, n_agents, -1)
+
+
+def compose_render_frame(frame):
+    """Convert single-agent or stacked multi-agent render output into one RGB frame."""
+    if frame is None:
+        return None
+    frame_arr = np.asarray(frame)
+    if frame_arr.ndim == 3:
+        return frame_arr
+    if frame_arr.ndim == 4:
+        # MultiCarRacing returns one frame per car: (num_agents, H, W, C).
+        # Tile them side-by-side so OpenCV receives a standard HWC image.
+        return np.concatenate(list(frame_arr), axis=1)
+    raise ValueError(f"Unsupported render frame shape: {frame_arr.shape}")
+
+
+def seed_environment(env, seed):
+    """Seed the environment and spaces for reproducible evaluation rollouts."""
+    seed = int(seed)
+    if hasattr(env, "seed"):
+        env.seed(seed)
+    elif hasattr(env, "unwrapped") and hasattr(env.unwrapped, "seed"):
+        env.unwrapped.seed(seed)
+    if hasattr(env, "action_space") and hasattr(env.action_space, "seed"):
+        env.action_space.seed(seed)
+    if hasattr(env, "observation_space") and hasattr(env.observation_space, "seed"):
+        env.observation_space.seed(seed)
+
+
+def resolve_output_path(explicit_path, results_dir: Path, model_path, seed: int, suffix: str, extension: str) -> Path:
+    """Resolve explicit or deterministic default output artifact paths."""
+    if explicit_path:
+        path = Path(explicit_path)
+    else:
+        model_stem = Path(model_path).stem.replace(" ", "_")
+        path = results_dir / f"{model_stem}_seed{int(seed)}_{suffix}.{extension}"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 class SingleAgentWrapper(gym.Wrapper):
@@ -280,7 +331,7 @@ class ObservationAugmentWrapper(gym.Wrapper):
         return {"image": image, "state": state}, reward, done, info
 
 
-def create_env(config, render_mode='rgb_array'):
+def create_env(config, render_mode='rgb_array', seed=None):
     """Create evaluation environment with rendering."""
     env_config = config['environment']
     env_id = env_config.get('env_id', 'MultiCarRacing-v0')
@@ -302,6 +353,16 @@ def create_env(config, render_mode='rgb_array'):
 
     if env_config.get('num_agents', 1) == 1:
         env = SingleAgentWrapper(env)
+    elif env_config.get('num_agents', 1) > 1:
+        if MultiAgentSpaceWrapper is None:
+            raise RuntimeError("MultiAgentSpaceWrapper unavailable. Ensure train.py is importable.")
+        env = MultiAgentSpaceWrapper(env, env_config.get('num_agents', 1))
+    if validate_agent_space_contract is not None:
+        validate_agent_space_contract(env, int(env_config.get('num_agents', 1)), "evaluate.create_env")
+
+    governor_config = config.get('safety_governor', {})
+    if governor_config.get('enabled', False):
+        env = SafetyGovernorWrapper(env, governor_config)
 
     reward_config = config.get('reward_shaping', {})
     if reward_config.get('enabled', False):
@@ -309,29 +370,37 @@ def create_env(config, render_mode='rgb_array'):
             raise RuntimeError("RewardShapingWrapper unavailable. Ensure train.py is importable.")
         env = RewardShapingWrapper(env, reward_config)
 
-    governor_config = config.get('safety_governor', {})
-    if governor_config.get('enabled', False):
-        env = SafetyGovernorWrapper(env, governor_config)
-
     obs_config = config.get('observation', {})
     if obs_config.get('enabled', False):
+        if int(env_config.get('num_agents', 1)) > 1:
+            raise ValueError("Observation augmentation evaluation is not supported for multi-agent image observations.")
         env = ObservationAugmentWrapper(env, obs_config)
+    if seed is not None:
+        seed_environment(env, seed)
     
     return env
 
 
-def evaluate_torch_model(model_path, config, n_episodes=10, record_video=True, seed=42):
-    """Evaluate a Torch .pt checkpoint with live window and optional video."""
+def evaluate_torch_model(model_path, config, n_episodes=10, record_video=True, seed=42,
+                         show_window=False, video_path=None):
+    """Evaluate a Torch .pt checkpoint with optional video and optional live window."""
     if CnnActorCritic is None:
         raise RuntimeError("Cannot load Torch model: train.py CnnActorCritic not available")
     model_path = Path(model_path)
     if not model_path.is_file():
         raise FileNotFoundError(f"Torch checkpoint not found: {model_path}")
     print(f"Loading Torch checkpoint from {model_path}")
-    payload = torch.load(str(model_path), map_location="cpu")
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    payload = torch.load(str(model_path), map_location="cpu", weights_only=False)
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+    elif mps_is_available():
+        device = torch.device("mps")
+    else:
+        device = torch.device("cpu")
 
-    base_env = create_env(config)
+    np.random.seed(seed)
+    torch.manual_seed(int(seed))
+    base_env = create_env(config, seed=seed)
     num_agents, obs_shape, obs_layout = infer_image_space_layout(base_env.observation_space.shape)
     action_shape = tuple(base_env.action_space.shape)
     action_dim = int(action_shape[-1] if len(action_shape) >= 2 else action_shape[0])
@@ -370,13 +439,22 @@ def evaluate_torch_model(model_path, config, n_episodes=10, record_video=True, s
     episode_steer_variance = []
     episode_mean_rank = []
     episode_collision = []
+    episode_mean_speed = []
+    episode_mean_throttle = []
+    episode_mean_brake = []
+    episode_mean_overtakes = []
     results_dir = Path(config["paths"]["results_dir"])
     results_dir.mkdir(parents=True, exist_ok=True)
     video_writer = None
-    video_path = results_dir / f"evaluation_torch_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4" if record_video else None
+    if record_video:
+        video_path = resolve_output_path(video_path, results_dir, model_path, seed, "evaluation", "mp4")
+    else:
+        video_path = None
 
-    np.random.seed(seed)
-    print(f"Evaluating Torch model for {n_episodes} episodes (live window + {'video' if record_video else 'no video'})...")
+    print(
+        f"Evaluating Torch model for {n_episodes} episodes "
+        f"({'video' if record_video else 'no video'}, {'live window' if show_window else 'headless window'})..."
+    )
     for episode in range(n_episodes):
         obs = base_env.reset()
         done = False
@@ -387,6 +465,10 @@ def evaluate_torch_model(model_path, config, n_episodes=10, record_video=True, s
         steer_values = []
         rank_values = []
         collision_seen = False
+        speed_values = []
+        throttle_values = []
+        brake_values = []
+        overtake_count = 0
         while not done_to_bool(done):
             obs_policy = obs_to_policy_batch(obs, obs_layout)
             obs_t = torch.as_tensor(obs_policy, dtype=torch.float32, device=device) / 255.0
@@ -402,7 +484,12 @@ def evaluate_torch_model(model_path, config, n_episodes=10, record_video=True, s
             obs, reward, done, info = base_env.step(env_action)
             episode_reward += reward_to_scalar(reward)
             episode_length += 1
-            steer_values.extend(np.asarray(env_action).reshape(-1, action_dim)[:, 0].astype(np.float32).tolist())
+            flat_actions = np.asarray(env_action).reshape(-1, action_dim)
+            steer_values.extend(flat_actions[:, 0].astype(np.float32).tolist())
+            if action_dim >= 2:
+                throttle_values.extend(flat_actions[:, 1].astype(np.float32).tolist())
+            if action_dim >= 3:
+                brake_values.extend(flat_actions[:, 2].astype(np.float32).tolist())
             agent_infos = info if isinstance(info, (list, tuple)) else [info]
             info0 = first_agent_info(info)
             for agent_info in agent_infos:
@@ -410,20 +497,24 @@ def evaluate_torch_model(model_path, config, n_episodes=10, record_video=True, s
                     continue
                 offtrack_seen = offtrack_seen or int(agent_info.get("events/offtrack", 0)) > 0
                 collision_seen = collision_seen or int(agent_info.get("events/collision", 0)) > 0
+                speed_values.append(float(agent_info.get("telemetry/speed", 0.0)))
+                overtake_count += int(agent_info.get("events/overtake", 0))
                 if "telemetry/rank" in agent_info:
                     rank_values.append(float(agent_info.get("telemetry/rank", 0.0)))
             if start_time is None and info0.get("time") is not None:
                 start_time = info0["time"]
             frame = base_env.render(mode="rgb_array")
             if frame is not None:
+                frame = compose_render_frame(frame)
                 if record_video:
                     if video_writer is None:
                         h, w = frame.shape[:2]
                         video_writer = cv2.VideoWriter(str(video_path), cv2.VideoWriter_fourcc(*"mp4v"), 30.0, (w, h))
                     video_writer.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
-                frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-                cv2.imshow("Racecar Gym (Torch policy)", frame_bgr)
-                cv2.waitKey(1)
+                if show_window:
+                    frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                    cv2.imshow("Racecar Gym (Torch policy)", frame_bgr)
+                    cv2.waitKey(1)
         progress_values = [
             float(agent_info.get("progress", 0.0))
             for agent_info in (info if isinstance(info, (list, tuple)) else [info])
@@ -440,6 +531,10 @@ def evaluate_torch_model(model_path, config, n_episodes=10, record_video=True, s
         episode_steer_variance.append(float(np.var(steer_values)) if len(steer_values) > 1 else 0.0)
         episode_mean_rank.append(float(np.mean(rank_values)) if rank_values else 1.0)
         episode_collision.append(int(collision_seen))
+        episode_mean_speed.append(float(np.mean(speed_values)) if speed_values else 0.0)
+        episode_mean_throttle.append(float(np.mean(throttle_values)) if throttle_values else 0.0)
+        episode_mean_brake.append(float(np.mean(brake_values)) if brake_values else 0.0)
+        episode_mean_overtakes.append(int(overtake_count))
         print(
             f"Episode {episode + 1}/{n_episodes}: Reward={episode_reward:.2f}, "
             f"Length={episode_length}, Progress={progress:.2%}, Time={episode_time:.2f}s, "
@@ -449,7 +544,8 @@ def evaluate_torch_model(model_path, config, n_episodes=10, record_video=True, s
         video_writer.release()
         print(f"Video saved to {video_path}")
     base_env.close()
-    cv2.destroyAllWindows()
+    if show_window:
+        cv2.destroyAllWindows()
     stats = {
         "mean_reward": float(np.mean(episode_rewards)),
         "std_reward": float(np.std(episode_rewards)),
@@ -465,6 +561,10 @@ def evaluate_torch_model(model_path, config, n_episodes=10, record_video=True, s
         "mean_steer_variance": float(np.mean(episode_steer_variance)),
         "mean_rank": float(np.mean(episode_mean_rank)),
         "collision_rate": float(np.mean(episode_collision)),
+        "mean_speed": float(np.mean(episode_mean_speed)),
+        "mean_throttle": float(np.mean(episode_mean_throttle)),
+        "mean_brake": float(np.mean(episode_mean_brake)),
+        "mean_overtakes": float(np.mean(episode_mean_overtakes)),
         "episode_rewards": episode_rewards,
         "episode_lengths": episode_lengths,
         "episode_progress": episode_progress,
@@ -473,21 +573,28 @@ def evaluate_torch_model(model_path, config, n_episodes=10, record_video=True, s
         "episode_steer_variance": episode_steer_variance,
         "episode_mean_rank": episode_mean_rank,
         "episode_collision": episode_collision,
+        "episode_mean_speed": episode_mean_speed,
+        "episode_mean_throttle": episode_mean_throttle,
+        "episode_mean_brake": episode_mean_brake,
+        "episode_mean_overtakes": episode_mean_overtakes,
     }
     return stats, str(video_path) if video_path else None
 
 
-def evaluate_model(model_path, config, n_episodes=10, record_video=True, seed=42):
+def evaluate_model(model_path, config, n_episodes=10, record_video=True, seed=42,
+                   show_window=False, video_path=None):
     """Evaluate a trained SB3 model."""
     if int(config.get('environment', {}).get('num_agents', 1)) > 1:
         raise ValueError("SB3 evaluation is not supported for multi-agent configs in this repo.")
     print(f"Loading model from {model_path}")
     model = PPO.load(model_path)
+    np.random.seed(seed)
+    torch.manual_seed(int(seed))
     
     # Create environment
     # Note: render_mode parameter is ignored in create_env for Gym 0.17.3 compatibility
     # Rendering is handled via env.render() calls
-    base_env = create_env(config, render_mode='rgb_array' if record_video else None)
+    base_env = create_env(config, render_mode='rgb_array' if record_video else None, seed=seed)
     env = DummyVecEnv([lambda: base_env])
     if not config.get('observation', {}).get('enabled', False):
         env = VecTransposeImage(env)
@@ -505,10 +612,10 @@ def evaluate_model(model_path, config, n_episodes=10, record_video=True, seed=42
     
     # Create video writer lazily after first frame
     video_writer = None
-    video_path = None
     if record_video:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        video_path = results_dir / f'evaluation_{timestamp}.mp4'
+        video_path = resolve_output_path(video_path, results_dir, model_path, seed, "evaluation", "mp4")
+    else:
+        video_path = None
     
     print(f"Evaluating model for {n_episodes} episodes...")
     
@@ -539,7 +646,7 @@ def evaluate_model(model_path, config, n_episodes=10, record_video=True, seed=42
                 offtrack_seen = True
             
             # Get frame for video or live view
-            frame = base_env.render(mode='rgb_array')
+            frame = compose_render_frame(base_env.render(mode='rgb_array'))
             
             # Record video frame
             if record_video:
@@ -552,7 +659,7 @@ def evaluate_model(model_path, config, n_episodes=10, record_video=True, seed=42
                     video_writer.write(frame_bgr)
             
             # Show live window
-            if frame is not None:
+            if frame is not None and show_window:
                 # Convert if not already done
                 if 'frame_bgr' not in locals():
                      frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
@@ -585,7 +692,8 @@ def evaluate_model(model_path, config, n_episodes=10, record_video=True, seed=42
     
     env.close()
     base_env.close()
-    cv2.destroyAllWindows()
+    if show_window:
+        cv2.destroyAllWindows()
     
     # Calculate statistics
     stats = {
@@ -630,13 +738,19 @@ def print_stats(stats):
         print(f"Mean Rank: {stats['mean_rank']:.2f}")
     if 'collision_rate' in stats:
         print(f"Collision Rate: {stats['collision_rate']:.2%}")
+    if 'mean_speed' in stats:
+        print(f"Mean Speed: {stats['mean_speed']:.2f}")
+    if 'mean_throttle' in stats:
+        print(f"Mean Throttle: {stats['mean_throttle']:.2f}")
+    if 'mean_brake' in stats:
+        print(f"Mean Brake: {stats['mean_brake']:.2f}")
+    if 'mean_overtakes' in stats:
+        print(f"Mean Overtakes: {stats['mean_overtakes']:.2f}")
     print("="*50)
 
 
 def save_stats(stats, output_path):
     """Save statistics to file."""
-    import json
-    
     # Convert numpy arrays to lists for JSON serialization
     stats_json = {
         'mean_reward': float(stats['mean_reward']),
@@ -651,12 +765,30 @@ def save_stats(stats, output_path):
         'std_time': float(stats['std_time']),
         'offtrack_rate': float(stats.get('offtrack_rate', 0.0)),
         'mean_steer_variance': float(stats.get('mean_steer_variance', 0.0)),
+        'mean_rank': float(stats.get('mean_rank', 1.0)),
+        'collision_rate': float(stats.get('collision_rate', 0.0)),
         'episode_rewards': [float(r) for r in stats['episode_rewards']],
         'episode_lengths': [int(l) for l in stats['episode_lengths']],
         'episode_progress': [float(p) for p in stats['episode_progress']],
         'episode_times': [float(t) for t in stats['episode_times']],
         'episode_offtrack': [int(v) for v in stats.get('episode_offtrack', [])],
         'episode_steer_variance': [float(v) for v in stats.get('episode_steer_variance', [])],
+        'episode_mean_rank': [float(v) for v in stats.get('episode_mean_rank', [])],
+        'episode_collision': [int(v) for v in stats.get('episode_collision', [])],
+        'mean_speed': float(stats.get('mean_speed', 0.0)),
+        'mean_throttle': float(stats.get('mean_throttle', 0.0)),
+        'mean_brake': float(stats.get('mean_brake', 0.0)),
+        'mean_overtakes': float(stats.get('mean_overtakes', 0.0)),
+        'episode_mean_speed': [float(v) for v in stats.get('episode_mean_speed', [])],
+        'episode_mean_throttle': [float(v) for v in stats.get('episode_mean_throttle', [])],
+        'episode_mean_brake': [float(v) for v in stats.get('episode_mean_brake', [])],
+        'episode_mean_overtakes': [int(v) for v in stats.get('episode_mean_overtakes', [])],
+        'model_path': stats.get('model_path'),
+        'config_path': stats.get('config_path'),
+        'seed': int(stats.get('seed', 0)),
+        'episodes': int(stats.get('episodes', len(stats.get('episode_rewards', [])))),
+        'video_path': stats.get('video_path'),
+        'evaluated_at': stats.get('evaluated_at'),
     }
     
     with open(output_path, 'w') as f:
@@ -696,6 +828,23 @@ def main():
         default=42,
         help='Random seed for evaluation'
     )
+    parser.add_argument(
+        '--output-json',
+        type=str,
+        default=None,
+        help='Optional explicit path for the saved JSON summary'
+    )
+    parser.add_argument(
+        '--output-video',
+        type=str,
+        default=None,
+        help='Optional explicit path for the saved evaluation video'
+    )
+    parser.add_argument(
+        '--show-window',
+        action='store_true',
+        help='Display the OpenCV live window during evaluation'
+    )
     
     args = parser.parse_args()
     
@@ -711,6 +860,8 @@ def main():
             n_episodes=args.episodes,
             record_video=not args.no_video,
             seed=args.seed,
+            show_window=args.show_window,
+            video_path=args.output_video,
         )
     else:
         stats, video_path = evaluate_model(
@@ -719,15 +870,26 @@ def main():
             n_episodes=args.episodes,
             record_video=not args.no_video,
             seed=args.seed,
+            show_window=args.show_window,
+            video_path=args.output_video,
         )
+    stats["model_path"] = str(model_path.resolve())
+    stats["config_path"] = str(Path(args.config).resolve())
+    stats["seed"] = int(args.seed)
+    stats["episodes"] = int(args.episodes)
+    stats["video_path"] = str(video_path) if video_path else None
+    stats["evaluated_at"] = datetime.now().isoformat()
     
     # Print statistics
     print_stats(stats)
     
     # Save statistics
-    results_dir = Path(config['paths']['results_dir'])
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    stats_path = results_dir / f'evaluation_stats_{timestamp}.json'
+    if args.output_json:
+        stats_path = Path(args.output_json)
+        stats_path.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        results_dir = Path(config['paths']['results_dir'])
+        stats_path = resolve_output_path(None, results_dir, model_path, args.seed, "evaluation_stats", "json")
     save_stats(stats, stats_path)
 
 

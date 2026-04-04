@@ -7,9 +7,12 @@ Backends:
 """
 
 import os
+import sys
 import json
 import yaml
 import argparse
+import subprocess
+from copy import deepcopy
 from pathlib import Path
 from typing import Dict, Iterable, Tuple
 import gym
@@ -24,7 +27,7 @@ from stable_baselines3.common.utils import set_random_seed
 import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
-import threading
+from torch.utils.tensorboard import SummaryWriter
 import time
 import traceback
 from datetime import datetime, timedelta
@@ -39,6 +42,10 @@ def load_config(config_path):
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
     return config
+
+
+def mps_is_available() -> bool:
+    return bool(getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available())
 
 
 def debug_log_763171(run_id, hypothesis_id, location, message, data):
@@ -155,19 +162,63 @@ def action_batch_to_env(action_batch: np.ndarray, n_envs: int, n_agents: int) ->
     return action_batch.reshape(n_envs, n_agents, -1)
 
 
-def flatten_transition_array(values, n_envs: int, n_agents: int, dtype=np.float32, default=0.0) -> np.ndarray:
+def flatten_transition_array(values, n_envs: int, n_agents: int, dtype=np.float32, default=0.0,
+                             value_name: str = "transition") -> np.ndarray:
+    expected_size = int(n_envs * n_agents)
     if values is None:
-        return np.full(n_envs * n_agents, default, dtype=dtype)
+        return np.full(expected_size, default, dtype=dtype)
     arr = np.asarray(values, dtype=dtype)
     if arr.ndim == 0:
-        return np.full(n_envs * n_agents, arr.item(), dtype=dtype)
-    if arr.ndim == 1 and n_agents == 1 and arr.shape[0] == n_envs:
-        return arr.astype(dtype, copy=False)
-    if arr.ndim == 1 and arr.shape[0] == n_envs * n_agents:
-        return arr.astype(dtype, copy=False)
-    if arr.ndim >= 2 and arr.shape[0] == n_envs:
-        return arr.reshape(n_envs * n_agents).astype(dtype, copy=False)
-    return arr.reshape(-1).astype(dtype, copy=False)
+        return np.full(expected_size, arr.item(), dtype=dtype)
+    flat = arr.reshape(-1)
+    if n_agents == 1 and flat.size == n_envs:
+        return flat.astype(dtype, copy=False)
+    if flat.size != expected_size:
+        raise ValueError(
+            f"{value_name} shape {tuple(arr.shape)} cannot be flattened to the expected "
+            f"{expected_size} values for n_envs={n_envs}, num_agents={n_agents}."
+        )
+    return flat.astype(dtype, copy=False)
+
+
+def validate_agent_space_contract(env, configured_num_agents: int, context: str) -> None:
+    obs_shape = tuple(getattr(env.observation_space, "shape", ()))
+    action_shape = tuple(getattr(env.action_space, "shape", ()))
+    configured_num_agents = int(max(1, configured_num_agents))
+
+    if configured_num_agents <= 1:
+        if len(obs_shape) == 4 and obs_shape[0] != 1:
+            raise ValueError(
+                f"{context}: single-agent config expected observation space without a multi-agent "
+                f"leading axis, got shape {obs_shape}."
+            )
+        if len(action_shape) == 2 and action_shape[0] != 1:
+            raise ValueError(
+                f"{context}: single-agent config expected action space without a multi-agent "
+                f"leading axis, got shape {action_shape}."
+            )
+        return
+
+    if len(obs_shape) != 4:
+        raise ValueError(
+            f"{context}: multi-agent config with num_agents={configured_num_agents} expected "
+            f"observation space shape (num_agents, ...), got {obs_shape}."
+        )
+    if len(action_shape) != 2:
+        raise ValueError(
+            f"{context}: multi-agent config with num_agents={configured_num_agents} expected "
+            f"action space shape (num_agents, action_dim), got {action_shape}."
+        )
+    if int(obs_shape[0]) != configured_num_agents:
+        raise ValueError(
+            f"{context}: configured num_agents={configured_num_agents} but observation space "
+            f"reports {obs_shape[0]} agents."
+        )
+    if int(action_shape[0]) != configured_num_agents:
+        raise ValueError(
+            f"{context}: configured num_agents={configured_num_agents} but action space "
+            f"reports {action_shape[0]} agents."
+        )
 
 
 class CnnActorCritic(nn.Module):
@@ -483,6 +534,7 @@ class TorchPPOTrainer:
     """PPO training loop implemented locally in PyTorch."""
 
     def __init__(self, env, eval_env, config, device, model_dir: Path, log_dir: Path,
+                 results_dir: Path = None, config_path: str = None, seed: int = 0,
                  local_rank: int = 0, world_size: int = 1):
         self.env = env
         self.eval_env = eval_env
@@ -491,9 +543,13 @@ class TorchPPOTrainer:
         self.world_size = int(world_size)
         self.rank = local_rank  # within-node rank; for multi-node use dist.get_rank()
         self.distributed = world_size > 1
-        self.device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
+        self.device = torch.device(device)
         self.model_dir = Path(model_dir)
         self.log_dir = Path(log_dir)
+        self.results_root = Path(results_dir) if results_dir is not None else self.log_dir.parent / "results"
+        self.config_path = str(Path(config_path).resolve()) if config_path else None
+        self.seed = int(seed)
+        self.eval_seed = self.seed + 1000
 
         if not hasattr(env.observation_space, "shape"):
             raise ValueError("Torch backend currently supports Box image observations only.")
@@ -507,6 +563,9 @@ class TorchPPOTrainer:
                 f"Unsupported torch MARL paradigm: {self.marl_paradigm}. "
                 "Only shared_policy_ippo is currently implemented."
             )
+        env_cfg = config.get("environment", {}) or {}
+        configured_num_agents = int(max(1, env_cfg.get("num_agents", 1)))
+        validate_agent_space_contract(env, configured_num_agents, "TorchPPOTrainer")
 
         inferred_agents, policy_obs_shape, obs_layout = infer_image_space_layout(tuple(env.observation_space.shape))
         self.obs_shape = tuple(policy_obs_shape)
@@ -522,12 +581,38 @@ class TorchPPOTrainer:
             self.per_agent_action_dim = int(action_shape[-1])
         else:
             raise ValueError(f"Unsupported action space shape for torch backend: {action_shape}")
+        if self.num_agents != configured_num_agents:
+            raise ValueError(
+                f"TorchPPOTrainer: configured num_agents={configured_num_agents} but inferred "
+                f"{self.num_agents} agents from env spaces."
+            )
         self.multi_agent = self.num_agents > 1
         self.action_dim = self.per_agent_action_dim
         self.env_action_low = np.asarray(env.action_space.low, dtype=np.float32)
         self.env_action_high = np.asarray(env.action_space.high, dtype=np.float32)
         self.obs_mode = "per_agent_image"
         self.policy_sharing_mode = "shared"
+        run_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.run_id = f"torch_{run_stamp}_seed{self.seed}"
+        self.run_dir = self.results_root / self.run_id
+        self.eval_results_dir = self.run_dir / "evaluations"
+        self.plots_dir = self.run_dir / "plots"
+        self.training_history_path = self.run_dir / "training_metrics.jsonl"
+        self.episode_history_path = self.run_dir / "episode_summaries.jsonl"
+        self.eval_history_path = self.run_dir / "torch_eval_history.jsonl"
+        self.run_manifest_path = self.run_dir / "run_manifest.json"
+        self.run_summary_path = self.run_dir / "run_summary.json"
+        self.tb_log_dir = self.log_dir / self.run_id
+        self.tb_writer = None
+        self.latest_train_metrics = {}
+        self.latest_eval_stats = None
+        self.use_subprocess_eval = bool(training_cfg.get("eval_subprocess", self.multi_agent))
+        if not self.distributed or self.rank == 0:
+            self.run_dir.mkdir(parents=True, exist_ok=True)
+            self.eval_results_dir.mkdir(parents=True, exist_ok=True)
+            self.plots_dir.mkdir(parents=True, exist_ok=True)
+            self.tb_log_dir.mkdir(parents=True, exist_ok=True)
+            self.tb_writer = SummaryWriter(log_dir=str(self.tb_log_dir))
         debug_log_763171(
             "pre-fix",
             "H1",
@@ -541,6 +626,8 @@ class TorchPPOTrainer:
                 "per_agent_action_dim": self.per_agent_action_dim,
                 "obs_layout": self.obs_layout,
                 "multi_agent": self.multi_agent,
+                "rollout_collection_mode": "main_thread",
+                "selected_device": str(self.device),
             },
         )
 
@@ -578,12 +665,216 @@ class TorchPPOTrainer:
             self.policy = DDP(self.policy, device_ids=[self.local_rank])
         self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=self.learning_rate)
         self.num_timesteps = 0
-        self.eval_history_path = self.log_dir / "torch_eval_history.jsonl"
 
         # Phase 4A: AMP (mixed precision)
         self.use_amp = self.device.type == "cuda"
         self.amp_dtype = torch.bfloat16 if (self.use_amp and torch.cuda.is_bf16_supported()) else torch.float16
         self.grad_scaler = torch.amp.GradScaler("cuda", enabled=(self.use_amp and self.amp_dtype == torch.float16))
+        self._write_run_manifest()
+
+    def _write_jsonl(self, path: Path, payload: Dict) -> None:
+        if self.distributed and self.rank != 0:
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(payload) + "\n")
+
+    def _write_json(self, path: Path, payload: Dict) -> None:
+        if self.distributed and self.rank != 0:
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+
+    def _step_metadata(self) -> Dict[str, int]:
+        n_envs = int(self.env.num_envs)
+        stream_steps = int(self.num_timesteps)
+        env_steps = int(stream_steps // max(1, self.num_agents))
+        update_steps = int(max(1, self.n_steps * n_envs * self.num_agents))
+        updates_completed = int(stream_steps // update_steps)
+        return {
+            "stream_steps": stream_steps,
+            "env_steps": env_steps,
+            "n_envs": n_envs,
+            "num_agents": int(self.num_agents),
+            "update_steps": update_steps,
+            "updates_completed": updates_completed,
+        }
+
+    def _write_run_manifest(self) -> None:
+        manifest = {
+            "run_id": self.run_id,
+            "created_at": datetime.now().isoformat(),
+            "seed": self.seed,
+            "device": str(self.device),
+            "config_path": self.config_path,
+            "model_dir": str(self.model_dir.resolve()),
+            "log_dir": str(self.log_dir.resolve()),
+            "tensorboard_log_dir": str(self.tb_log_dir.resolve()),
+            "results_dir": str(self.run_dir.resolve()),
+            "training_topology": {
+                "backend": "torch",
+                "marl_paradigm": self.marl_paradigm,
+                "policy_variant": self.policy_variant,
+                "num_agents": self.num_agents,
+                "policy_sharing_mode": self.policy_sharing_mode,
+                "obs_mode": self.obs_mode,
+                "eval_mode": "subprocess" if self.use_subprocess_eval else "in_process",
+            },
+            "artifacts": {
+                "training_metrics_jsonl": str(self.training_history_path.resolve()),
+                "episode_summaries_jsonl": str(self.episode_history_path.resolve()),
+                "eval_history_jsonl": str(self.eval_history_path.resolve()),
+                "evaluations_dir": str(self.eval_results_dir.resolve()),
+                "plots_dir": str(self.plots_dir.resolve()),
+            },
+            "step_semantics": {
+                "stream_steps_description": "Counts vectorized agent streams (n_envs * num_agents per env step).",
+                "env_steps_description": "Approximate vectorized environment steps derived from stream_steps / num_agents.",
+            },
+            "config": self.config,
+        }
+        self._write_json(self.run_manifest_path, manifest)
+
+    def _record_episode_summary(self, episode_summary: Dict) -> None:
+        if not isinstance(episode_summary, dict):
+            return
+        record = {
+            "timestamp": datetime.now().isoformat(),
+            **self._step_metadata(),
+            "reward": float(episode_summary.get("r", 0.0)),
+            "length": int(episode_summary.get("l", 0)),
+            "time": float(episode_summary.get("t", 0.0)),
+        }
+        self._write_jsonl(self.episode_history_path, record)
+
+    def _record_training_metrics(self, metrics: Dict, elapsed_seconds: float, rollout_seconds: float, update_seconds: float) -> None:
+        step_meta = self._step_metadata()
+        steps_per_second = float(step_meta["update_steps"] / max(elapsed_seconds, 1e-9))
+        env_steps_per_second = float((step_meta["update_steps"] / max(1, self.num_agents)) / max(elapsed_seconds, 1e-9))
+        record = {
+            "timestamp": datetime.now().isoformat(),
+            **step_meta,
+            "elapsed_seconds": float(elapsed_seconds),
+            "rollout_seconds": float(rollout_seconds),
+            "update_seconds": float(update_seconds),
+            "steps_per_second": steps_per_second,
+            "env_steps_per_second": env_steps_per_second,
+            "learning_rate": float(self.optimizer.param_groups[0]["lr"]),
+            **{k: float(v) for k, v in metrics.items()},
+        }
+        self.latest_train_metrics = record
+        self._write_jsonl(self.training_history_path, record)
+        if self.tb_writer is not None:
+            tb_step = step_meta["stream_steps"]
+            scalar_map = {
+                "train/policy_loss": record["policy_loss"],
+                "train/value_loss": record["value_loss"],
+                "train/entropy_loss": record["entropy_loss"],
+                "train/clip_fraction": record["clip_fraction"],
+                "train/approx_kl": record["approx_kl"],
+                "train/grad_norm": record["grad_norm"],
+                "train/learning_rate": record["learning_rate"],
+                "train/steps_per_second": record["steps_per_second"],
+                "train/env_steps_per_second": record["env_steps_per_second"],
+                "train/rollout_seconds": record["rollout_seconds"],
+                "train/update_seconds": record["update_seconds"],
+                "meta/env_steps": record["env_steps"],
+                "meta/updates_completed": record["updates_completed"],
+            }
+            for tag, value in scalar_map.items():
+                self.tb_writer.add_scalar(tag, value, tb_step)
+            self.tb_writer.flush()
+
+    def _record_eval_metrics(self, stats: Dict, source: str, duration_seconds: float = 0.0) -> None:
+        if not isinstance(stats, dict):
+            return
+        record = {
+            "timestamp": datetime.now().isoformat(),
+            "source": source,
+            "duration_seconds": float(duration_seconds),
+            **self._step_metadata(),
+            **stats,
+        }
+        self.latest_eval_stats = record
+        self._write_jsonl(self.eval_history_path, record)
+        if self.tb_writer is not None:
+            tb_step = record["stream_steps"]
+            for key in (
+                "mean_reward",
+                "std_reward",
+                "mean_progress",
+                "offtrack_rate",
+                "mean_steer_variance",
+                "mean_speed",
+                "mean_rank",
+                "collision_rate",
+                "mean_overtakes",
+                "mean_length",
+            ):
+                if key in record:
+                    self.tb_writer.add_scalar(f"eval/{key}", float(record[key]), tb_step)
+            self.tb_writer.flush()
+
+    def write_run_summary(self, final_model_path: Path, best_model_path: Path = None) -> None:
+        summary = {
+            "run_id": self.run_id,
+            "completed_at": datetime.now().isoformat(),
+            **self._step_metadata(),
+            "final_model_path": str(Path(final_model_path).resolve()),
+            "best_model_path": str(Path(best_model_path).resolve()) if best_model_path is not None and Path(best_model_path).exists() else None,
+            "latest_train_metrics": self.latest_train_metrics,
+            "latest_eval_metrics": self.latest_eval_stats,
+            "artifacts": {
+                "run_manifest": str(self.run_manifest_path.resolve()),
+                "training_metrics_jsonl": str(self.training_history_path.resolve()),
+                "episode_summaries_jsonl": str(self.episode_history_path.resolve()),
+                "eval_history_jsonl": str(self.eval_history_path.resolve()),
+                "evaluations_dir": str(self.eval_results_dir.resolve()),
+                "tensorboard_log_dir": str(self.tb_log_dir.resolve()),
+            },
+        }
+        self._write_json(self.run_summary_path, summary)
+
+    def _evaluate_via_subprocess(self, n_episodes: int = 5, record_video: bool = False) -> Dict:
+        if not self.config_path:
+            raise RuntimeError("Subprocess evaluation requires a config path.")
+        if self.distributed and self.rank != 0:
+            return {}
+        temp_checkpoint = self.eval_results_dir / f"eval_checkpoint_step_{self.num_timesteps}.pt"
+        output_json = self.eval_results_dir / f"evaluation_stats_step_{self.num_timesteps}.json"
+        self.save(temp_checkpoint)
+        command = [
+            sys.executable,
+            str(Path(__file__).resolve().parent / "evaluate.py"),
+            "--model",
+            str(temp_checkpoint),
+            "--config",
+            self.config_path,
+            "--episodes",
+            str(int(n_episodes)),
+            "--seed",
+            str(self.eval_seed),
+            "--output-json",
+            str(output_json),
+        ]
+        if not record_video:
+            command.append("--no-video")
+        result = subprocess.run(command, capture_output=True, text=True)
+        if result.returncode != 0:
+            error_record = {
+                "timestamp": datetime.now().isoformat(),
+                **self._step_metadata(),
+                "evaluation_error": result.stderr.strip() or result.stdout.strip() or "Unknown subprocess evaluation failure.",
+                "checkpoint_path": str(temp_checkpoint),
+            }
+            self._write_jsonl(self.eval_history_path, error_record)
+            print("[TorchPPO Eval] Subprocess evaluation failed; skipping this eval.", flush=True)
+            if result.stderr:
+                print(result.stderr.strip(), flush=True)
+            return {}
+        with open(output_json, "r", encoding="utf-8") as f:
+            return json.load(f)
 
     def _obs_to_policy_batch(self, obs: np.ndarray) -> np.ndarray:
         return obs_to_policy_batch(obs, self.obs_layout)
@@ -596,10 +887,24 @@ class TorchPPOTrainer:
         return np.clip(env_actions, self.env_action_low, self.env_action_high).astype(np.float64, copy=False)
 
     def _flatten_reward(self, rewards, n_envs: int) -> np.ndarray:
-        return flatten_transition_array(rewards, n_envs, self.num_agents, dtype=np.float32, default=0.0)
+        return flatten_transition_array(
+            rewards,
+            n_envs,
+            self.num_agents,
+            dtype=np.float32,
+            default=0.0,
+            value_name="reward",
+        )
 
     def _flatten_done(self, dones, n_envs: int) -> np.ndarray:
-        return flatten_transition_array(dones, n_envs, self.num_agents, dtype=np.float32, default=0.0)
+        return flatten_transition_array(
+            dones,
+            n_envs,
+            self.num_agents,
+            dtype=np.float32,
+            default=0.0,
+            value_name="done",
+        )
 
     def _unflatten_agent_values(self, flat_values: np.ndarray, n_envs: int) -> np.ndarray:
         if self.num_agents <= 1:
@@ -691,6 +996,7 @@ class TorchPPOTrainer:
 
             for ep in self._collect_episode_summaries(infos):
                 if ep is not None and "r" in ep:
+                    self._record_episode_summary(ep)
                     # Throttle: only print every 5th episode so progress lines stay visible
                     if getattr(self, "_episode_print_count", 0) % 5 == 0:
                         print(f"Episode reward: {ep['r']:.2f} | length: {ep.get('l', -1)}", flush=True)
@@ -773,6 +1079,8 @@ class TorchPPOTrainer:
 
     def _get_eval_base_env(self):
         env = self.eval_env
+        if env is None:
+            return None
         # Unwrap VecTransposeImage/DummyVecEnv wrappers until we reach the actual gym env.
         for attr in ("venv", "env"):
             while hasattr(env, attr):
@@ -839,6 +1147,10 @@ class TorchPPOTrainer:
         )
 
     def evaluate(self, n_episodes: int = 5):
+        if self.use_subprocess_eval:
+            return self._evaluate_via_subprocess(n_episodes=n_episodes, record_video=False)
+        if self.eval_env is None:
+            raise RuntimeError("Evaluation requested but no eval env is available.")
         rewards = []
         progresses = []
         offtrack_events = []
@@ -963,7 +1275,7 @@ class TorchPPOTrainer:
         resume_mode = str(resume_mode).strip().lower()
         if resume_mode not in {"full", "policy_only"}:
             raise ValueError(f"Unknown resume mode: {resume_mode}")
-        payload = torch.load(str(path), map_location=self.device)
+        payload = torch.load(str(path), map_location=self.device, weights_only=False)
         raw_policy = self.policy.module if isinstance(self.policy, DDP) else self.policy
         raw_policy.load_state_dict(payload["policy_state_dict"])
 
@@ -1097,27 +1409,13 @@ class TorchPPOTrainer:
 
         while self.num_timesteps < total_timesteps:
             lr_now = self._set_learning_rate(total_timesteps)
-
-            # Start collecting NEXT rollout in a background thread
-            next_obs_holder = [obs]
-            collect_exc_holder = [None]
-
-            def _collect_next(holder=next_obs_holder, exc_holder=collect_exc_holder, idx=1 - buf_idx):
-                try:
-                    holder[0], buffers[idx] = self._collect_rollout(holder[0])
-                except Exception as e:
-                    exc_holder[0] = e
-
-            collect_thread = threading.Thread(target=_collect_next, daemon=True)
-            collect_thread.start()
-
-            # GPU update on the current buffer while CPUs collect the next one
+            should_stop = False
+            update_started_at = time.time()
             train_metrics = self._update(buffers[buf_idx])
-
-            collect_thread.join()
-            if collect_exc_holder[0] is not None:
-                raise collect_exc_holder[0]
-            obs = next_obs_holder[0]
+            update_elapsed = time.time() - update_started_at
+            rollout_started_at = time.time()
+            obs, buffers[1 - buf_idx] = self._collect_rollout(obs)
+            rollout_elapsed = time.time() - rollout_started_at
 
             # Swap buffers
             buf_idx = 1 - buf_idx
@@ -1156,6 +1454,12 @@ class TorchPPOTrainer:
                 f"{gpu_mb} | last_eval={last_eval_wall_clock:.1f}s",
                 flush=True,
             )
+            self._record_training_metrics(
+                train_metrics,
+                elapsed_seconds=elapsed_since_last,
+                rollout_seconds=rollout_elapsed,
+                update_seconds=update_elapsed,
+            )
 
             # Save checkpoint every save_freq steps (boundary-based so we never miss)
             if save_freq > 0 and (self.num_timesteps - last_checkpoint_step) >= save_freq:
@@ -1170,19 +1474,27 @@ class TorchPPOTrainer:
 
             # Eval every eval_freq steps (boundary-based so we never miss)
             if eval_freq > 0 and (self.num_timesteps - last_eval_step) >= eval_freq:
+                if self.distributed and dist.is_available() and dist.is_initialized():
+                    dist.barrier()
                 eval_started_at = time.time()
                 eval_stats = self.evaluate(n_episodes=n_eval_episodes)
                 last_eval_wall_clock = time.time() - eval_started_at
-                eval_record = {
-                    "step": int(self.num_timesteps),
-                    "timestamp": datetime.now().isoformat(timespec="seconds"),
-                    "eval_wall_clock_seconds": float(last_eval_wall_clock),
-                    **{k: float(v) for k, v in eval_stats.items() if isinstance(v, (int, float, np.integer, np.floating))},
-                }
-                with open(self.eval_history_path, "a", encoding="utf-8") as f:
-                    f.write(json.dumps(eval_record) + "\n")
+                if eval_stats:
+                    self._record_eval_metrics(
+                        {k: v for k, v in eval_stats.items() if isinstance(v, (int, float, np.integer, np.floating))},
+                        source="subprocess" if self.use_subprocess_eval else "in_process",
+                        duration_seconds=last_eval_wall_clock,
+                    )
+                else:
+                    last_eval_step = self.num_timesteps
+                    if self.distributed and dist.is_available() and dist.is_initialized():
+                        dist.barrier()
+                    continue
                 mean_rew = eval_stats["mean_reward"]
                 std_rew = eval_stats["std_reward"]
+                mean_speed = float(eval_stats.get("mean_speed", 0.0))
+                mean_throttle = float(eval_stats.get("mean_throttle", 0.0))
+                mean_brake = float(eval_stats.get("mean_brake", 0.0))
                 is_first_eval = (best_eval_reward == -np.inf)
                 is_new_best = mean_rew > best_eval_reward
                 print(
@@ -1191,9 +1503,9 @@ class TorchPPOTrainer:
                     f"progress={eval_stats['mean_progress']:.2%} | "
                     f"offtrack_rate={eval_stats['offtrack_rate']:.2%} | "
                     f"steer_var={eval_stats['mean_steer_variance']:.5f} | "
-                    f"mean_speed={eval_stats['mean_speed']:.2f} | "
-                    f"throttle={eval_stats['mean_throttle']:.2f} | "
-                    f"brake={eval_stats['mean_brake']:.2f} | "
+                    f"mean_speed={mean_speed:.2f} | "
+                    f"throttle={mean_throttle:.2f} | "
+                    f"brake={mean_brake:.2f} | "
                     f"stage={curriculum_stage} | "
                     f"eval_time={last_eval_wall_clock:.1f}s"
                     f"{' (first eval)' if is_first_eval else (' (new best!)' if is_new_best else '')}",
@@ -1226,28 +1538,29 @@ class TorchPPOTrainer:
                             flush=True,
                         )
                         print(f"[TorchPPO] Solved checkpoint: {solved_path.resolve()}", flush=True)
-                        break
+                        should_stop = True
                 if curriculum_enabled and curriculum_stage == 1:
-                    if eval_stats["mean_progress"] >= promote_progress and eval_stats["mean_speed"] >= promote_speed:
+                    if eval_stats["mean_progress"] >= promote_progress and mean_speed >= promote_speed:
                         self.env.env_method("set_curriculum_stage", 2)
-                        self.eval_env.env_method("set_curriculum_stage", 2)
+                        if self.eval_env is not None:
+                            self.eval_env.env_method("set_curriculum_stage", 2)
                         curriculum_stage = 2
                         print(
                             f"[TorchPPO Curriculum] Promoted to stage 2 at step {self.num_timesteps:,} "
-                            f"(progress={eval_stats['mean_progress']:.2%}, speed={eval_stats['mean_speed']:.2f}).",
+                            f"(progress={eval_stats['mean_progress']:.2%}, speed={mean_speed:.2f}).",
                             flush=True,
                         )
                 if fail_fast_enabled and self.num_timesteps >= fail_fast_min_steps:
                     is_bad_eval = (
                         eval_stats["mean_progress"] < fail_fast_min_progress
-                        and eval_stats["mean_speed"] < fail_fast_min_speed
+                        and mean_speed < fail_fast_min_speed
                         and eval_stats.get("mean_throttle", 0.0) < 0.25
                     )
                     if is_bad_eval:
                         fail_fast_bad_evals += 1
                         print(
                             f"[TorchPPO FailFast] idle-pattern eval {fail_fast_bad_evals}/{fail_fast_patience} "
-                            f"(progress={eval_stats['mean_progress']:.2%}, speed={eval_stats['mean_speed']:.2f}).",
+                            f"(progress={eval_stats['mean_progress']:.2%}, speed={mean_speed:.2f}).",
                             flush=True,
                         )
                     else:
@@ -1260,8 +1573,12 @@ class TorchPPOTrainer:
                             f"Saved checkpoint: {fail_path.resolve()}",
                             flush=True,
                         )
-                        break
+                        should_stop = True
                 last_eval_step = self.num_timesteps
+                if self.distributed and dist.is_available() and dist.is_initialized():
+                    dist.barrier()
+                if should_stop:
+                    break
 
 
 class SingleAgentWrapper(gym.Wrapper):
@@ -1320,6 +1637,104 @@ class SingleAgentWrapper(gym.Wrapper):
         if isinstance(reward, (list, tuple)) or (hasattr(reward, "shape") and len(reward.shape) > 0 and reward.shape[0] == 1):
             reward = float(reward[0] if isinstance(reward, (list, tuple)) else reward[0])
         return obs, reward, done, info
+
+
+class MultiAgentSpaceWrapper(gym.Wrapper):
+    """Expose correct stacked Box spaces for multi-agent MultiCarRacing."""
+
+    def __init__(self, env, num_agents: int):
+        super().__init__(env)
+        self.num_agents = int(max(1, num_agents))
+        obs_space = env.observation_space
+        act_space = env.action_space
+        if hasattr(obs_space, "shape") and len(obs_space.shape) == 3:
+            obs_low = np.repeat(np.expand_dims(obs_space.low, axis=0), self.num_agents, axis=0)
+            obs_high = np.repeat(np.expand_dims(obs_space.high, axis=0), self.num_agents, axis=0)
+            self.observation_space = gym.spaces.Box(
+                low=obs_low,
+                high=obs_high,
+                shape=(self.num_agents, *obs_space.shape),
+                dtype=obs_space.dtype
+            )
+        elif hasattr(obs_space, "shape") and len(obs_space.shape) == 4:
+            if int(obs_space.shape[0]) != self.num_agents:
+                raise ValueError(
+                    f"MultiAgentSpaceWrapper expected {self.num_agents} agents in observation "
+                    f"space, got {tuple(obs_space.shape)}."
+                )
+            self.observation_space = obs_space
+        else:
+            raise ValueError(
+                f"MultiAgentSpaceWrapper expected image observations with rank 3 or 4, got "
+                f"shape {tuple(getattr(obs_space, 'shape', ()))}."
+            )
+        if hasattr(act_space, "shape") and len(act_space.shape) == 1:
+            act_low = np.repeat(np.expand_dims(act_space.low, axis=0), self.num_agents, axis=0)
+            act_high = np.repeat(np.expand_dims(act_space.high, axis=0), self.num_agents, axis=0)
+            self.action_space = gym.spaces.Box(
+                low=act_low,
+                high=act_high,
+                shape=(self.num_agents, *act_space.shape),
+                dtype=act_space.dtype
+            )
+        elif hasattr(act_space, "shape") and len(act_space.shape) == 2:
+            if int(act_space.shape[0]) != self.num_agents:
+                raise ValueError(
+                    f"MultiAgentSpaceWrapper expected {self.num_agents} agents in action "
+                    f"space, got {tuple(act_space.shape)}."
+                )
+            self.action_space = act_space
+        else:
+            raise ValueError(
+                f"MultiAgentSpaceWrapper expected Box actions with rank 1 or 2, got "
+                f"shape {tuple(getattr(act_space, 'shape', ()))}."
+            )
+
+    def reset(self, **kwargs):
+        return self.env.reset(**kwargs)
+
+    def step(self, action):
+        if action is not None:
+            action = np.asarray(action, dtype=np.float64).reshape(self.num_agents, -1)
+        return self.env.step(action)
+
+
+class MultiAgentDummyVecEnv(DummyVecEnv):
+    """DummyVecEnv variant that preserves per-agent rewards and done flags."""
+
+    def __init__(self, env_fns):
+        super().__init__(env_fns)
+        action_shape = tuple(getattr(self.action_space, "shape", ()))
+        self.num_agents = int(action_shape[0]) if len(action_shape) == 2 else 1
+        self.buf_dones = np.zeros((self.num_envs, self.num_agents), dtype=bool)
+        self.buf_rews = np.zeros((self.num_envs, self.num_agents), dtype=np.float32)
+
+    def step_wait(self):
+        for env_idx in range(self.num_envs):
+            obs, reward, done, info = self.envs[env_idx].step(self.actions[env_idx])
+            reward_arr = np.asarray(reward, dtype=np.float32).reshape(-1)
+            done_arr = np.asarray(done, dtype=np.bool_).reshape(-1)
+            if reward_arr.size != self.num_agents:
+                raise ValueError(
+                    f"MultiAgentDummyVecEnv expected {self.num_agents} rewards, got "
+                    f"shape {tuple(np.asarray(reward).shape)}."
+                )
+            if done_arr.size == 1:
+                done_arr = np.full(self.num_agents, bool(done_arr.item()), dtype=np.bool_)
+            elif done_arr.size != self.num_agents:
+                raise ValueError(
+                    f"MultiAgentDummyVecEnv expected {self.num_agents} done flags, got "
+                    f"shape {tuple(np.asarray(done).shape)}."
+                )
+            self.buf_rews[env_idx] = reward_arr
+            self.buf_dones[env_idx] = done_arr
+            self.buf_infos[env_idx] = info
+            if done_to_bool(done_arr):
+                if isinstance(self.buf_infos[env_idx], dict):
+                    self.buf_infos[env_idx]["terminal_observation"] = obs
+                obs = self.envs[env_idx].reset()
+            self._save_obs(env_idx, obs)
+        return self._obs_from_buf(), np.copy(self.buf_rews), np.copy(self.buf_dones), deepcopy(self.buf_infos)
 
 
 class RewardShapingWrapper(gym.Wrapper):
@@ -1470,7 +1885,28 @@ class RewardShapingWrapper(gym.Wrapper):
         self._training_mode = bool(mode)
 
     def reset(self, **kwargs):
+        debug_log_763171(
+            "pre-fix",
+            "H4",
+            "train.py:RewardShapingWrapper:reset:entry",
+            "reward wrapper reset entered",
+            {
+                "kwargs_keys": sorted(kwargs.keys()),
+                "configured_multi_agent": self.multi_agent_enabled,
+                "curriculum_enabled": self.curriculum_enabled,
+            },
+        )
         obs = self.env.reset(**kwargs)
+        debug_log_763171(
+            "pre-fix",
+            "H4",
+            "train.py:RewardShapingWrapper:reset:after_env_reset",
+            "reward wrapper base reset returned",
+            {
+                "obs_shape": tuple(np.asarray(obs).shape),
+                "obs_dtype": str(np.asarray(obs).dtype),
+            },
+        )
         base_env = self.env.unwrapped
         n_agents = self._infer_num_agents(base_env)
         self._reset_agent_buffers(n_agents)
@@ -1491,6 +1927,16 @@ class RewardShapingWrapper(gym.Wrapper):
             self._track_dirs = None
             self._n_track = 0
 
+        debug_log_763171(
+            "pre-fix",
+            "H4",
+            "train.py:RewardShapingWrapper:reset:exit",
+            "reward wrapper reset completed",
+            {
+                "n_agents": n_agents,
+                "track_len": self._n_track,
+            },
+        )
         return obs
 
     def _apply_curriculum_stage(self, stage: int):
@@ -2150,6 +2596,9 @@ def create_env(config, rank=0, seed=0):
 
     if env_config.get('num_agents', 1) == 1:
         env = SingleAgentWrapper(env)
+    elif env_config.get('num_agents', 1) > 1:
+        env = MultiAgentSpaceWrapper(env, env_config.get('num_agents', 1))
+    validate_agent_space_contract(env, int(env_config.get('num_agents', 1)), "create_env")
 
     # Safety governor (optional)
     governor_config = config.get('safety_governor', {})
@@ -2178,48 +2627,44 @@ def create_env(config, rank=0, seed=0):
         {"rank": rank, "wrapper_type": type(env).__name__},
     )
     
-    # Set seed
+    # Seed without forcing an eager reset. MultiCarRacing creates pyglet viewers
+    # during reset(), and a second reset at learn() startup can reuse stale windows
+    # and crash before training begins on macOS multi-agent runs.
     try:
-        reset_obs = env.reset(seed=seed)
-        debug_log(
-            "pre-fix",
-            "H3",
-            "train.py:create_env:reset",
-            "env reset with seed kwarg succeeded",
-            {"rank": rank, "seed": seed},
-        )
-    except TypeError:
         if hasattr(env, "seed"):
             env.seed(seed)
-        reset_obs = env.reset()
+        elif hasattr(env.unwrapped, "seed"):
+            env.unwrapped.seed(seed)
+        if hasattr(env.action_space, "seed"):
+            env.action_space.seed(seed)
+        if hasattr(env.observation_space, "seed"):
+            env.observation_space.seed(seed)
         debug_log(
-            "pre-fix",
+            "post-fix",
             "H3",
-            "train.py:create_env:reset",
-            "env reset fell back to legacy seed path",
+            "train.py:create_env:seed",
+            "env seeded without eager reset",
             {"rank": rank, "seed": seed},
         )
     except Exception as exc:
         debug_log(
-            "pre-fix",
+            "post-fix",
             "H3",
-            "train.py:create_env:reset",
-            "env reset failed",
+            "train.py:create_env:seed",
+            "env seed setup failed",
             {"rank": rank, "error": repr(exc), "traceback": traceback.format_exc()},
         )
         raise
     debug_log_763171(
-        "pre-fix",
+        "post-fix",
         "H1",
-        "train.py:create_env:reset",
-        "env reset observed shapes",
+        "train.py:create_env:seed",
+        "env spaces validated without eager reset",
         {
             "rank": rank,
             "configured_num_agents": int(env_config.get('num_agents', 1)),
             "obs_space_shape": tuple(getattr(env.observation_space, "shape", ())),
             "action_space_shape": tuple(getattr(env.action_space, "shape", ())),
-            "reset_obs_shape": tuple(np.asarray(reset_obs).shape),
-            "reset_obs_dtype": str(np.asarray(reset_obs).dtype),
             "wrapper_type": type(env).__name__,
         },
     )
@@ -2265,11 +2710,16 @@ def get_device(config):
     if device_config == 'auto':
         if torch.cuda.is_available():
             device = 'cuda'
+        elif mps_is_available():
+            device = 'mps'
         else:
             device = 'cpu'
     elif device_config == 'cuda':
         if torch.cuda.is_available():
             device = 'cuda'
+        elif mps_is_available():
+            print("WARNING: CUDA requested but not available. Falling back to Apple MPS.")
+            device = 'mps'
         else:
             print("WARNING: CUDA requested but not available. Falling back to CPU.")
             device = 'cpu'
@@ -2280,8 +2730,22 @@ def get_device(config):
     if device == 'cuda':
         print(f"GPU detected: {torch.cuda.get_device_name(0)}")
         print(f"CUDA version: {torch.version.cuda}")
+    elif device == 'mps':
+        print("GPU detected: Apple Metal (MPS)")
     else:
         print("Using CPU for training")
+    debug_log_763171(
+        "post-fix",
+        "H9",
+        "train.py:get_device",
+        "device selected",
+        {
+            "requested_device": device_config,
+            "selected_device": device,
+            "cuda_available": torch.cuda.is_available(),
+            "mps_available": mps_is_available(),
+        },
+    )
     
     return device
 
@@ -2593,8 +3057,9 @@ def main():
         num_envs = 1
     if env_id == 'MultiCarRacing-v0' and num_envs > 1:
         print(
-            "WARNING: MultiCarRacing-v0 is not reliable under SubprocVecEnv because reset() "
-            "creates pyglet render contexts. Falling back to DummyVecEnv with 1 environment."
+            "WARNING: MultiCarRacing-v0 multi-agent training is only supported with a single "
+            "DummyVecEnv because reset() creates pyglet render contexts. Falling back to "
+            "DummyVecEnv with 1 environment."
         )
         num_envs = 1
     obs_config = config.get('observation', {})
@@ -2602,15 +3067,21 @@ def main():
         env = SubprocVecEnv([make_env(config, rank=i, seed=args.seed) for i in range(num_envs)])
         print(f"Using SubprocVecEnv with {num_envs} parallel environments")
     else:
-        env = DummyVecEnv([lambda: create_env(config, rank=0, seed=args.seed)])
+        vec_env_cls = MultiAgentDummyVecEnv if (trainer_backend == 'torch' and num_agents > 1) else DummyVecEnv
+        env = vec_env_cls([lambda: create_env(config, rank=0, seed=args.seed)])
         print("Using DummyVecEnv with 1 environment")
     if not obs_config.get('enabled', False) and num_agents == 1:
         env = VecTransposeImage(env)
     
-    # Create evaluation environment
-    eval_env = DummyVecEnv([lambda: create_env(config, rank=1, seed=args.seed + 1000)])
-    if not obs_config.get('enabled', False) and num_agents == 1:
-        eval_env = VecTransposeImage(eval_env)
+    # Create evaluation environment. Multi-agent torch eval defaults to a subprocess path,
+    # so we skip the extra in-process eval env unless explicitly needed.
+    eval_env = None
+    use_subprocess_eval = bool(training_config.get("eval_subprocess", trainer_backend == 'torch' and num_agents > 1))
+    if not (trainer_backend == 'torch' and use_subprocess_eval):
+        eval_vec_env_cls = MultiAgentDummyVecEnv if (trainer_backend == 'torch' and num_agents > 1) else DummyVecEnv
+        eval_env = eval_vec_env_cls([lambda: create_env(config, rank=1, seed=args.seed + 1000)])
+        if not obs_config.get('enabled', False) and num_agents == 1:
+            eval_env = VecTransposeImage(eval_env)
     print("Environment created successfully!\n")
 
     if trainer_backend == 'torch':
@@ -2675,6 +3146,9 @@ def main():
             device=device,
             model_dir=model_dir,
             log_dir=log_dir,
+            results_dir=Path(config["paths"]["results_dir"]),
+            config_path=args.config,
+            seed=args.seed,
         )
         if args.resume:
             print(f"Loading torch checkpoint from {resume_path}")
@@ -2709,14 +3183,28 @@ def main():
         print("-"*70)
         print("TRAINING SETTINGS")
         print("-"*70)
+        step_streams = max(1, num_envs * num_agents)
+        eval_freq_steps = int(training_config['eval_freq'])
+        save_freq_steps = int(training_config['save_freq'])
         print(f"Configured total timesteps: {configured_total:,}")
         if args.timesteps_add is not None:
             print(f"Resume +N target timesteps: {target_total_timesteps:,}")
         else:
             print(f"Run target timesteps: {target_total_timesteps:,}")
-        print(f"Evaluation frequency: {training_config['eval_freq']:,} steps")
+        print(
+            f"Step accounting: {step_streams} agent-stream transitions per vectorized env step "
+            f"({num_envs} env x {num_agents} agent)."
+        )
+        print(f"Approx vectorized env steps to target: {target_total_timesteps / float(step_streams):,.0f}")
+        print(
+            f"Evaluation frequency: {eval_freq_steps:,} stream steps "
+            f"(~{eval_freq_steps / float(step_streams):,.0f} vectorized env steps)"
+        )
         print(f"Evaluation episodes: {training_config['n_eval_episodes']}")
-        print(f"Checkpoint frequency: {training_config['save_freq']:,} steps")
+        print(
+            f"Checkpoint frequency: {save_freq_steps:,} stream steps "
+            f"(~{save_freq_steps / float(step_streams):,.0f} vectorized env steps)"
+        )
         visual_cfg = training_config.get('visual_eval', {})
         print(
             f"Visual eval: enabled={bool(visual_cfg.get('enabled', True))}, "
@@ -2748,7 +3236,9 @@ def main():
         print(f"  Best copies (per step): {model_dir.resolve() / 'best_model_torch_step_<step>.pt'}")
         print(f"  Checkpoints: {model_dir.resolve() / 'torch_ppo_step_<step>.pt'}")
         print(f"Log directory: {log_dir}")
-        print(f"Eval history log: {log_dir / 'torch_eval_history.jsonl'}")
+        print(f"TensorBoard run directory: {trainer.tb_log_dir}")
+        print(f"Run results directory: {trainer.run_dir}")
+        print(f"Eval history log: {trainer.eval_history_path}")
         print("-"*70 + "\n")
 
         trainer.learn(
@@ -2762,6 +3252,9 @@ def main():
         )
         final_model_path = model_dir / 'final_model_torch.pt'
         trainer.save(final_model_path)
+        trainer.write_run_summary(final_model_path, model_dir / 'best_model_torch.pt')
+        if trainer.tb_writer is not None:
+            trainer.tb_writer.close()
 
         print("\n" + "="*70)
         print("TRAINING SUMMARY")
@@ -2769,11 +3262,13 @@ def main():
         print(f"Final model saved to: {final_model_path}")
         print(f"Best model saved to: {model_dir / 'best_model_torch.pt'}")
         print(f"Checkpoints saved to: {model_dir}")
-        print(f"TensorBoard logs: {log_dir}")
+        print(f"TensorBoard logs: {trainer.tb_log_dir}")
+        print(f"Run artifacts: {trainer.run_dir}")
         print("="*70 + "\n")
 
         env.close()
-        eval_env.close()
+        if eval_env is not None:
+            eval_env.close()
         print("Environments closed. Training complete!")
         return
     

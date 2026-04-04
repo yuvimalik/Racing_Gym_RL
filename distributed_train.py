@@ -27,10 +27,10 @@ from stable_baselines3.common.utils import set_random_seed
 
 from train import (
     load_config,
+    MultiAgentDummyVecEnv,
     TorchPPOTrainer,
     make_env,
     create_env,
-    get_device,
 )
 
 
@@ -47,6 +47,13 @@ def main():
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     world_size = int(os.environ.get("WORLD_SIZE", 1))
     global_rank = int(os.environ.get("RANK", 0))
+    is_master = (global_rank == 0)
+
+    if not torch.cuda.is_available():
+        raise ValueError(
+            "distributed_train.py currently supports CUDA-only launches. "
+            "Use train.py for CPU/MPS or single-process training."
+        )
 
     if world_size > 1:
         dist.init_process_group(
@@ -55,7 +62,6 @@ def main():
         )
 
     torch.cuda.set_device(local_rank)
-    is_master = (global_rank == 0)
 
     # -------------------------------------------------------------------------
     # Config + reproducibility
@@ -63,8 +69,11 @@ def main():
     config = load_config(args.config)
     set_random_seed(args.seed + global_rank)  # different seed per rank
 
+    env_config = config.get("environment", {})
     training_config = config.get("training", {})
     obs_config = config.get("observation", {})
+    env_id = str(env_config.get("env_id", "MultiCarRacing-v0")).strip()
+    num_agents = int(env_config.get("num_agents", 1))
 
     model_dir = Path(config["paths"]["model_dir"]).resolve()
     log_dir = Path(config["paths"]["log_dir"])
@@ -90,40 +99,47 @@ def main():
     # -------------------------------------------------------------------------
     # Environments — each rank gets its own slice of envs
     # -------------------------------------------------------------------------
-    total_num_envs = int(training_config.get("num_envs", 8))
-    # Divide envs evenly across ranks; remainder goes to last rank
-    envs_per_rank = total_num_envs // world_size
-    if global_rank == world_size - 1:
-        envs_per_rank += total_num_envs % world_size  # pick up any remainder
+    total_num_envs = int(training_config.get("num_envs", 1))
+    if env_id == "MultiCarRacing-v0":
+        envs_per_rank = 1
+        if is_master and total_num_envs != world_size:
+            print(
+                "[distributed_train] WARNING: MultiCarRacing-v0 only supports one DummyVecEnv "
+                "per rank in this repo. Ignoring training.num_envs and using 1 env per rank."
+            )
+    else:
+        # Divide envs evenly across ranks; remainder goes to last rank
+        envs_per_rank = total_num_envs // world_size
+        if global_rank == world_size - 1:
+            envs_per_rank += total_num_envs % world_size  # pick up any remainder
 
     env_seed = args.seed + global_rank * 1000
 
-    if envs_per_rank > 1:
+    if env_id != "MultiCarRacing-v0" and envs_per_rank > 1:
         env = SubprocVecEnv([
             make_env(config, rank=i, seed=env_seed)
             for i in range(envs_per_rank)
         ])
     else:
-        env = DummyVecEnv([lambda: create_env(config, rank=0, seed=env_seed)])
+        vec_env_cls = MultiAgentDummyVecEnv if num_agents > 1 else DummyVecEnv
+        env = vec_env_cls([lambda: create_env(config, rank=0, seed=env_seed)])
 
-    if not obs_config.get("enabled", False):
+    if not obs_config.get("enabled", False) and num_agents == 1:
         env = VecTransposeImage(env)
 
-    # Eval env only on master (to avoid redundant evaluation on workers)
+    # Eval env only when the trainer is using in-process evaluation.
     eval_env = None
-    if is_master:
-        eval_env = DummyVecEnv([lambda: create_env(config, rank=1, seed=env_seed + 1000)])
-        if not obs_config.get("enabled", False):
-            eval_env = VecTransposeImage(eval_env)
-    else:
-        # Workers need an eval_env stub — create a single env; evals only run on master
-        eval_env = DummyVecEnv([lambda: create_env(config, rank=1, seed=env_seed + 1000)])
-        if not obs_config.get("enabled", False):
+    use_subprocess_eval = bool(training_config.get("eval_subprocess", num_agents > 1))
+    if not use_subprocess_eval:
+        vec_env_cls = MultiAgentDummyVecEnv if num_agents > 1 else DummyVecEnv
+        eval_env = vec_env_cls([lambda: create_env(config, rank=1, seed=env_seed + 1000)])
+        if not obs_config.get("enabled", False) and num_agents == 1:
             eval_env = VecTransposeImage(eval_env)
 
     if is_master:
+        actual_total_envs = world_size if env_id == "MultiCarRacing-v0" else total_num_envs
         print(f"[Rank {global_rank}] World size: {world_size} | Local rank: {local_rank} | "
-              f"Envs this rank: {envs_per_rank} | Total envs: {total_num_envs}")
+              f"Envs this rank: {envs_per_rank} | Total envs: {actual_total_envs}")
 
     # -------------------------------------------------------------------------
     # Trainer — pass local_rank + world_size for DDP wrapping
@@ -135,6 +151,9 @@ def main():
         device=f"cuda:{local_rank}",
         model_dir=model_dir,
         log_dir=log_dir,
+        results_dir=results_dir,
+        config_path=args.config,
+        seed=args.seed,
         local_rank=local_rank,
         world_size=world_size,
     )
@@ -168,13 +187,17 @@ def main():
     if is_master:
         final_path = model_dir / "final_model_torch.pt"
         trainer.save(final_path)
+        trainer.write_run_summary(final_path, model_dir / "best_model_torch.pt")
+        if trainer.tb_writer is not None:
+            trainer.tb_writer.close()
         print(f"Final model saved: {final_path}")
 
     # -------------------------------------------------------------------------
     # Cleanup
     # -------------------------------------------------------------------------
     env.close()
-    eval_env.close()
+    if eval_env is not None:
+        eval_env.close()
 
     if world_size > 1:
         dist.destroy_process_group()
