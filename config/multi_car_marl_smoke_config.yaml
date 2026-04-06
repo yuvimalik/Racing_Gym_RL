@@ -102,11 +102,11 @@ reward_shaping:
 
   multi_agent:
     enabled: true
-    rank_reward_scale: 0.15
-    relative_velocity_scale: 0.02
+    rank_reward_scale: 0.05
+    relative_velocity_scale: 0.01
     relative_velocity_cap: 6.0
     nearest_opponent_max_distance: 12.0
-    overtake_bonus: 0.5
+    overtake_bonus: 0.1
     overtake_margin: 0.002
     collision_distance_threshold: 3.5
     collision_overlap_distance: 2.2
@@ -114,9 +114,20 @@ reward_shaping:
     collision_low_speed_threshold: 1.5
     collision_medium_speed_threshold: 4.0
     collision_high_speed_threshold: 7.0
-    collision_low_penalty: -0.5
-    collision_medium_penalty: -1.5
-    collision_high_penalty: -4.0
+    collision_low_penalty: -2.0
+    collision_medium_penalty: -6.0
+    collision_high_penalty: -12.0
+    contact_penalty: -1.0
+    sustained_contact_steps: 2
+    sustained_contact_penalty: -2.5
+    hook_contact_steps: 4
+    hook_contact_speed_threshold: 1.75
+    hook_contact_penalty: -10.0
+    contact_termination_mode: both
+    contact_terminate_steps: 3
+    terminate_on_hook_contact: true
+    severe_contact_speed_threshold: 5.0
+    contact_terminal_penalty: -75.0
     shared_collision_penalty: 0.0
 
   curriculum:

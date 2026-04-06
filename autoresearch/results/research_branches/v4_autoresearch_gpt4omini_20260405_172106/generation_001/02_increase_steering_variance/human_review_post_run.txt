@@ -1,0 +1,16 @@
+Candidate increase_steering_variance (post-run)
+===============================================
+
+Rationale: Increase steering variance to promote better cornering behavior.
+
+Config changes:
+- ppo.steer_max_log_std: 0.0 -> 0.25
+- ppo.steer_min_log_std: -0.5 -> -0.25
+
+Surface changes:
+No surface code changes.
+
+Stage results:
+- smoke_control: reward=-999.00, progress=0.000, offtrack=1.000, contact=0.000, hook=0.000, overtakes=0.00, score=-1239.00
+
+Gate reasons: ['experiment_failed', 'progress_too_low', 'offtrack_near_total', 'steering_variance_dead', 'smoke_control_offtrack']

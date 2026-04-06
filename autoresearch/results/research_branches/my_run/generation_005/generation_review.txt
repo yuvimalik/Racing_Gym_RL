@@ -1,0 +1,7 @@
+Generation 5
+Promoted: none
+
+- baseline_continuation: score=-1239.00, gate=['experiment_failed', 'progress_too_low', 'offtrack_near_total', 'steering_variance_dead', 'smoke_control_offtrack'], err=train.py failed before producing a checkpoint
+- decrease_collider_penalty_high: score=-1239.00, gate=['experiment_failed', 'progress_too_low', 'offtrack_near_total', 'steering_variance_dead', 'smoke_control_offtrack'], err=train.py failed before producing a checkpoint
+- increase_overtake_bonus: score=-1239.00, gate=['experiment_failed', 'progress_too_low', 'offtrack_near_total', 'steering_variance_dead', 'smoke_control_offtrack'], err=train.py failed before producing a checkpoint
+- reduce_hook_contact_penalty: score=-1239.00, gate=['experiment_failed', 'progress_too_low', 'offtrack_near_total', 'steering_variance_dead', 'smoke_control_offtrack'], err=train.py failed before producing a checkpoint

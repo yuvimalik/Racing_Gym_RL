@@ -1,0 +1,15 @@
+Candidate baseline_continuation (post-screen)
+=============================================
+
+Rationale: Baseline for comparison against LLM candidates.
+
+Config changes:
+No config overrides.
+
+Surface changes:
+No surface code changes.
+
+Stage results:
+- screen: reward=136.81, progress=0.490, offtrack=1.000, contact=0.000, hook=0.000, overtakes=110.50, score=248.88
+
+Gate reasons: ['offtrack_near_total', 'smoke_control_offtrack']

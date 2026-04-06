@@ -1,0 +1,10 @@
+Candidate increase_brake_penalty (pre-run)
+==========================================
+
+Rationale: Encourages earlier braking to recover control before aggression.
+
+Config changes:
+- reward_shaping.brake_penalty_scale: 0.01 -> 0.05
+
+Surface changes:
+No surface code changes.

@@ -1,0 +1,10 @@
+Candidate increase_overtake_bonus (pre-run)
+===========================================
+
+Rationale: A higher overtake bonus encourages agents to execute overtakes more systematically, leading to fewer collisions.
+
+Config changes:
+- reward_shaping.multi_agent.overtake_bonus: 0.1 -> 0.25
+
+Surface changes:
+No surface code changes.

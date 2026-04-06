@@ -1,0 +1,10 @@
+Candidate decrease_collision_high_penalty (pre-run)
+===================================================
+
+Rationale: A less severe penalty may allow agents to be more lenient with minimizing contact while racing.
+
+Config changes:
+- reward_shaping.multi_agent.collision_high_penalty: -12.0 -> -8.0
+
+Surface changes:
+No surface code changes.

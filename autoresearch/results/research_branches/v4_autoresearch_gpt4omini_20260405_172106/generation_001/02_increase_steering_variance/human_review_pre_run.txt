@@ -1,0 +1,11 @@
+Candidate increase_steering_variance (pre-run)
+==============================================
+
+Rationale: Increase steering variance to promote better cornering behavior.
+
+Config changes:
+- ppo.steer_max_log_std: 0.0 -> 0.25
+- ppo.steer_min_log_std: -0.5 -> -0.25
+
+Surface changes:
+No surface code changes.

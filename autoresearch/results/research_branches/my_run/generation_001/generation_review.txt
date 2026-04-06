@@ -1,0 +1,7 @@
+Generation 1
+Promoted: none
+
+- baseline_continuation: score=248.88, gate=['offtrack_near_total', 'smoke_control_offtrack'], err=None
+- reduce_contact_penalties: score=-1239.00, gate=['experiment_failed', 'progress_too_low', 'offtrack_near_total', 'steering_variance_dead', 'smoke_control_offtrack'], err=evaluate.py failed after training
+- increase_overtake_bonus: score=-1239.00, gate=['experiment_failed', 'progress_too_low', 'offtrack_near_total', 'steering_variance_dead', 'smoke_control_offtrack'], err=train.py failed before producing a checkpoint
+- steer_smoothness_penalty_adjustment: score=-1239.00, gate=['experiment_failed', 'progress_too_low', 'offtrack_near_total', 'steering_variance_dead', 'smoke_control_offtrack'], err=train.py failed before producing a checkpoint

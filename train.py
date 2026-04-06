@@ -7,14 +7,25 @@ Backends:
 """
 
 import os
+
+# Headless servers (SSH without a display): MultiCarRacing reset() uses pyglet via
+# state_pixels rendering. Set RACING_HEADLESS_PYGLET=1 before imports so pyglet uses
+# its headless EGL path (Linux with EGL libs). On macOS, EGL is usually absent—omit
+# this and use a normal display, or use: xvfb-run -a python train.py ...
+if str(os.environ.get("RACING_HEADLESS_PYGLET", "")).strip().lower() in ("1", "true", "yes"):
+    import pyglet
+
+    pyglet.options["headless"] = True
+
 import sys
 import json
 import yaml
 import argparse
 import subprocess
+import importlib.util
 from copy import deepcopy
 from pathlib import Path
-from typing import Dict, Iterable, Tuple
+from typing import Any, Callable, Dict, Iterable, Optional, Tuple
 import gym
 import gym_multi_car_racing
 import numpy as np
@@ -46,6 +57,61 @@ def load_config(config_path):
 
 def mps_is_available() -> bool:
     return bool(getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available())
+
+
+def resolve_surface_path(surface_source: str, config_path: Optional[str] = None) -> Path:
+    candidate = Path(surface_source).expanduser()
+    if candidate.is_absolute():
+        return candidate.resolve()
+    if config_path:
+        return (Path(config_path).resolve().parent / candidate).resolve()
+    return candidate.resolve()
+
+
+def load_external_torch_surface(
+    surface_source: Optional[str],
+    config_path: Optional[str] = None,
+) -> tuple[Dict[str, Any], Optional[Callable], Dict[str, Any]]:
+    if not surface_source:
+        return {}, None, {}
+
+    surface_path = resolve_surface_path(surface_source, config_path=config_path)
+    if not surface_path.is_file():
+        raise FileNotFoundError(f"External torch policy surface not found: {surface_path}")
+
+    module_name = f"autoresearch_surface_{surface_path.stem}_{abs(hash(str(surface_path)))}"
+    spec = importlib.util.spec_from_file_location(module_name, surface_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Could not load surface module from {surface_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    get_policy_variants = getattr(module, "get_policy_variants", None)
+    if get_policy_variants is None or not callable(get_policy_variants):
+        raise ValueError(
+            f"Surface module {surface_path} must define callable get_policy_variants()."
+        )
+    variants = get_policy_variants()
+    if not isinstance(variants, dict) or not variants:
+        raise ValueError(
+            f"Surface module {surface_path} returned invalid policy variants: {type(variants).__name__}"
+        )
+
+    optimizer_builder = getattr(module, "build_optimizer", None)
+    if optimizer_builder is not None and not callable(optimizer_builder):
+        raise ValueError(
+            f"Surface module {surface_path} build_optimizer must be callable when provided."
+        )
+
+    metadata_builder = getattr(module, "surface_metadata", None)
+    metadata = metadata_builder() if callable(metadata_builder) else {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+    metadata = {
+        **metadata,
+        "surface_source": str(surface_path),
+    }
+    return variants, optimizer_builder, metadata
 
 
 def debug_log_763171(run_id, hypothesis_id, location, message, data):
@@ -563,6 +629,17 @@ class TorchPPOTrainer:
                 f"Unsupported torch MARL paradigm: {self.marl_paradigm}. "
                 "Only shared_policy_ippo is currently implemented."
             )
+        self.policy_surface_source = training_cfg.get("torch_policy_variant_source")
+        self.external_policy_variants, self.external_optimizer_builder, self.policy_surface_metadata = (
+            load_external_torch_surface(
+                self.policy_surface_source,
+                config_path=self.config_path,
+            )
+        )
+        self.available_policy_variants = {
+            **TORCH_POLICY_VARIANTS,
+            **self.external_policy_variants,
+        }
         env_cfg = config.get("environment", {}) or {}
         configured_num_agents = int(max(1, env_cfg.get("num_agents", 1)))
         validate_agent_space_contract(env, configured_num_agents, "TorchPPOTrainer")
@@ -633,10 +710,10 @@ class TorchPPOTrainer:
 
         ppo_cfg = config["ppo"]
         self.policy_variant = str(training_cfg.get("torch_policy_variant", "legacy")).strip().lower()
-        if self.policy_variant not in TORCH_POLICY_VARIANTS:
+        if self.policy_variant not in self.available_policy_variants:
             raise ValueError(
                 f"Unknown torch policy variant: {self.policy_variant}. "
-                f"Expected one of: {sorted(TORCH_POLICY_VARIANTS)}"
+                f"Expected one of: {sorted(self.available_policy_variants)}"
             )
         self.learning_rate = float(ppo_cfg["learning_rate"])
         self.n_steps = int(ppo_cfg["n_steps"])
@@ -655,7 +732,7 @@ class TorchPPOTrainer:
         steer_min_log_std = float(steer_min_log_std) if steer_min_log_std is not None else None
         steer_max_log_std = float(steer_max_log_std) if steer_max_log_std is not None else None
 
-        policy_cls = TORCH_POLICY_VARIANTS[self.policy_variant]
+        policy_cls = self.available_policy_variants[self.policy_variant]
         self.policy = policy_cls(
             self.obs_shape, self.action_dim,
             min_log_std=min_log_std, max_log_std=max_log_std,
@@ -663,7 +740,11 @@ class TorchPPOTrainer:
         ).to(self.device)
         if self.distributed:
             self.policy = DDP(self.policy, device_ids=[self.local_rank])
-        self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=self.learning_rate)
+        optimizer_builder = self.external_optimizer_builder
+        if optimizer_builder is not None:
+            self.optimizer = optimizer_builder(self.policy, self.learning_rate)
+        else:
+            self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=self.learning_rate)
         self.num_timesteps = 0
 
         # Phase 4A: AMP (mixed precision)
@@ -716,6 +797,8 @@ class TorchPPOTrainer:
                 "backend": "torch",
                 "marl_paradigm": self.marl_paradigm,
                 "policy_variant": self.policy_variant,
+                "policy_variant_source": self.policy_surface_metadata.get("surface_source"),
+                "policy_surface_metadata": self.policy_surface_metadata,
                 "num_agents": self.num_agents,
                 "policy_sharing_mode": self.policy_sharing_mode,
                 "obs_mode": self.obs_mode,
@@ -809,6 +892,10 @@ class TorchPPOTrainer:
                 "mean_speed",
                 "mean_rank",
                 "collision_rate",
+                "contact_rate",
+                "hook_contact_rate",
+                "contact_termination_rate",
+                "mean_max_contact_steps",
                 "mean_overtakes",
                 "mean_length",
             ):
@@ -1160,6 +1247,10 @@ class TorchPPOTrainer:
         mean_brakes = []
         mean_ranks = []
         collision_rates = []
+        contact_rates = []
+        hook_contact_rates = []
+        contact_termination_rates = []
+        max_contact_steps = []
         overtake_counts = []
         lengths = []
         for _ in range(n_episodes):
@@ -1169,12 +1260,16 @@ class TorchPPOTrainer:
             final_progress = 0.0
             episode_offtrack = 0
             episode_collision = 0
+            episode_contact = 0
+            episode_hook_contact = 0
+            episode_contact_termination = 0
             episode_overtakes = 0
             final_rank_values = []
             steer_values = []
             speed_values = []
             throttle_values = []
             brake_values = []
+            episode_max_contact_steps = 0
             episode_len = 0
             while not done_to_bool(done):
                 obs_policy = self._obs_to_policy_batch(obs)
@@ -1203,8 +1298,15 @@ class TorchPPOTrainer:
                     rank_values.append(float(agent_info.get("telemetry/rank", 0.0)))
                     episode_offtrack += int(agent_info.get("events/offtrack", 0) > 0)
                     episode_collision += int(agent_info.get("events/collision", 0) > 0)
+                    episode_contact += int(agent_info.get("events/contact", 0) > 0)
+                    episode_hook_contact += int(agent_info.get("events/hook_contact", 0) > 0)
+                    episode_contact_termination += int(agent_info.get("events/contact_termination", 0) > 0)
                     episode_overtakes += int(agent_info.get("events/overtake", 0))
                     speed_values.append(float(agent_info.get("telemetry/speed", 0.0)))
+                    episode_max_contact_steps = max(
+                        episode_max_contact_steps,
+                        int(agent_info.get("telemetry/collision_contact_steps", 0)),
+                    )
                 if progress_values:
                     final_progress = float(np.mean(progress_values))
                 if rank_values:
@@ -1219,6 +1321,10 @@ class TorchPPOTrainer:
             mean_brakes.append(float(np.mean(brake_values)) if brake_values else 0.0)
             mean_ranks.append(float(np.mean(final_rank_values)) if final_rank_values else 1.0)
             collision_rates.append(int(episode_collision > 0))
+            contact_rates.append(int(episode_contact > 0))
+            hook_contact_rates.append(int(episode_hook_contact > 0))
+            contact_termination_rates.append(int(episode_contact_termination > 0))
+            max_contact_steps.append(int(episode_max_contact_steps))
             overtake_counts.append(int(episode_overtakes))
         return {
             "mean_reward": float(np.mean(rewards)),
@@ -1232,12 +1338,21 @@ class TorchPPOTrainer:
             "mean_brake": float(np.mean(mean_brakes)),
             "mean_rank": float(np.mean(mean_ranks)),
             "collision_rate": float(np.mean(collision_rates)),
+            "contact_rate": float(np.mean(contact_rates)),
+            "hook_contact_rate": float(np.mean(hook_contact_rates)),
+            "contact_termination_rate": float(np.mean(contact_termination_rates)),
+            "mean_max_contact_steps": float(np.mean(max_contact_steps)),
             "mean_overtakes": float(np.mean(overtake_counts)),
             "mean_length": float(np.mean(lengths)),
             "episode_rewards": rewards,
             "episode_progress": progresses,
             "episode_offtrack": offtrack_events,
             "episode_steer_variance": steer_variances,
+            "episode_collision": collision_rates,
+            "episode_contact": contact_rates,
+            "episode_hook_contact": hook_contact_rates,
+            "episode_contact_termination": contact_termination_rates,
+            "episode_max_contact_steps": max_contact_steps,
         }
 
     def save(self, path: Path):
@@ -1495,6 +1610,9 @@ class TorchPPOTrainer:
                 mean_speed = float(eval_stats.get("mean_speed", 0.0))
                 mean_throttle = float(eval_stats.get("mean_throttle", 0.0))
                 mean_brake = float(eval_stats.get("mean_brake", 0.0))
+                contact_rate = float(eval_stats.get("contact_rate", eval_stats.get("collision_rate", 0.0)))
+                hook_contact_rate = float(eval_stats.get("hook_contact_rate", 0.0))
+                contact_termination_rate = float(eval_stats.get("contact_termination_rate", 0.0))
                 is_first_eval = (best_eval_reward == -np.inf)
                 is_new_best = mean_rew > best_eval_reward
                 print(
@@ -1502,6 +1620,9 @@ class TorchPPOTrainer:
                     f"mean_reward={mean_rew:.2f} +/- {std_rew:.2f} | "
                     f"progress={eval_stats['mean_progress']:.2%} | "
                     f"offtrack_rate={eval_stats['offtrack_rate']:.2%} | "
+                    f"contact_rate={contact_rate:.2%} | "
+                    f"hook_rate={hook_contact_rate:.2%} | "
+                    f"contact_term_rate={contact_termination_rate:.2%} | "
                     f"steer_var={eval_stats['mean_steer_variance']:.5f} | "
                     f"mean_speed={mean_speed:.2f} | "
                     f"throttle={mean_throttle:.2f} | "
@@ -1818,6 +1939,21 @@ class RewardShapingWrapper(gym.Wrapper):
         self.collision_low_penalty = float(marl_cfg.get("collision_low_penalty", -1.0))
         self.collision_medium_penalty = float(marl_cfg.get("collision_medium_penalty", -4.0))
         self.collision_high_penalty = float(marl_cfg.get("collision_high_penalty", -10.0))
+        self.contact_penalty = float(marl_cfg.get("contact_penalty", 0.0))
+        self.sustained_contact_steps = int(max(1, marl_cfg.get("sustained_contact_steps", 2)))
+        self.sustained_contact_penalty = float(marl_cfg.get("sustained_contact_penalty", 0.0))
+        self.hook_contact_steps = int(max(1, marl_cfg.get("hook_contact_steps", self.sustained_contact_steps + 2)))
+        self.hook_contact_speed_threshold = float(
+            marl_cfg.get("hook_contact_speed_threshold", max(1.0, self.collision_min_closing_speed))
+        )
+        self.hook_contact_penalty = float(marl_cfg.get("hook_contact_penalty", 0.0))
+        self.contact_termination_mode = str(marl_cfg.get("contact_termination_mode", "none")).strip().lower()
+        self.contact_terminate_steps = int(max(0, marl_cfg.get("contact_terminate_steps", 0)))
+        self.terminate_on_hook_contact = bool(marl_cfg.get("terminate_on_hook_contact", False))
+        self.severe_contact_speed_threshold = float(
+            marl_cfg.get("severe_contact_speed_threshold", self.collision_high_speed_threshold)
+        )
+        self.contact_terminal_penalty = float(marl_cfg.get("contact_terminal_penalty", 0.0))
         self.shared_collision_penalty = float(marl_cfg.get("shared_collision_penalty", 0.0))
 
         self._training_mode = True
@@ -1837,7 +1973,7 @@ class RewardShapingWrapper(gym.Wrapper):
         self._episode_steps = np.zeros(0, dtype=np.int32)
         self._last_track_index = np.zeros(0, dtype=np.int32)
         self._prev_race_progress = np.zeros(0, dtype=np.float32)
-        self._active_collision_pairs = set()
+        self._active_collision_pairs = {}
 
         self._needs_track_context = (
             self.track_alignment_scale != 0.0
@@ -1875,7 +2011,7 @@ class RewardShapingWrapper(gym.Wrapper):
         self._episode_steps = np.zeros(self._num_agents, dtype=np.int32)
         self._last_track_index = np.zeros(self._num_agents, dtype=np.int32)
         self._prev_race_progress = np.full(self._num_agents, np.nan, dtype=np.float32)
-        self._active_collision_pairs = set()
+        self._active_collision_pairs = {}
 
     def _ensure_agent_buffers(self, n_agents: int):
         if self._num_agents != int(max(1, n_agents)):
@@ -2160,12 +2296,25 @@ class RewardShapingWrapper(gym.Wrapper):
         penalties = np.zeros(self._num_agents, dtype=np.float32)
         shared = np.zeros(self._num_agents, dtype=np.float32)
         collision_counts = np.zeros(self._num_agents, dtype=np.int32)
+        contact_counts = np.zeros(self._num_agents, dtype=np.int32)
         collision_relative_speed = np.zeros(self._num_agents, dtype=np.float32)
+        collision_contact_steps = np.zeros(self._num_agents, dtype=np.int32)
+        hook_counts = np.zeros(self._num_agents, dtype=np.int32)
+        contact_termination = np.zeros(self._num_agents, dtype=np.bool_)
         if self._num_agents <= 1 or not self.multi_agent_enabled:
-            self._active_collision_pairs = set()
-            return penalties, shared, collision_counts, collision_relative_speed
+            self._active_collision_pairs = {}
+            return (
+                penalties,
+                shared,
+                collision_counts,
+                contact_counts,
+                collision_relative_speed,
+                collision_contact_steps,
+                hook_counts,
+                contact_termination,
+            )
 
-        current_pairs = set()
+        current_pairs = {}
         new_collision_pairs = 0
         for i in range(self._num_agents):
             for j in range(i + 1, self._num_agents):
@@ -2189,13 +2338,41 @@ class RewardShapingWrapper(gym.Wrapper):
                     continue
 
                 pair = (i, j)
-                current_pairs.add(pair)
-                if pair in self._active_collision_pairs:
-                    continue
+                prev_contact_steps = int(self._active_collision_pairs.get(pair, 0))
+                contact_steps = prev_contact_steps + 1
+                current_pairs[pair] = contact_steps
+                impact_speed = max(rel_speed, closing_speed)
+                is_overlap = distance <= self.collision_overlap_distance
+                hook_contact = (
+                    contact_steps >= self.hook_contact_steps
+                    and rel_speed <= self.hook_contact_speed_threshold
+                )
+                severe_contact = is_overlap and impact_speed >= self.severe_contact_speed_threshold
 
-                penalty = self._tiered_collision_penalty(max(rel_speed, closing_speed))
-                if penalty == 0.0 and self.shared_collision_penalty == 0.0:
-                    continue
+                penalty = 0.0
+                if prev_contact_steps == 0:
+                    penalty += self._tiered_collision_penalty(impact_speed)
+                if is_overlap:
+                    penalty += self.contact_penalty
+                    contact_counts[i] += 1
+                    contact_counts[j] += 1
+                    if contact_steps >= self.sustained_contact_steps:
+                        penalty += self.sustained_contact_penalty
+                    if hook_contact:
+                        penalty += self.hook_contact_penalty
+                        hook_counts[i] += 1
+                        hook_counts[j] += 1
+                    if self.contact_termination_mode == "both":
+                        terminate_pair = False
+                        if self.contact_terminate_steps > 0 and contact_steps >= self.contact_terminate_steps:
+                            terminate_pair = True
+                        if self.terminate_on_hook_contact and hook_contact:
+                            terminate_pair = True
+                        if severe_contact:
+                            terminate_pair = True
+                        if terminate_pair:
+                            contact_termination[i] = True
+                            contact_termination[j] = True
 
                 penalties[i] += penalty
                 penalties[j] += penalty
@@ -2203,12 +2380,24 @@ class RewardShapingWrapper(gym.Wrapper):
                 collision_counts[j] += 1
                 collision_relative_speed[i] = max(collision_relative_speed[i], rel_speed)
                 collision_relative_speed[j] = max(collision_relative_speed[j], rel_speed)
-                new_collision_pairs += 1
+                collision_contact_steps[i] = max(collision_contact_steps[i], contact_steps)
+                collision_contact_steps[j] = max(collision_contact_steps[j], contact_steps)
+                if prev_contact_steps == 0:
+                    new_collision_pairs += 1
 
         self._active_collision_pairs = current_pairs
         if new_collision_pairs > 0 and self.shared_collision_penalty != 0.0:
             shared += float(new_collision_pairs) * self.shared_collision_penalty
-        return penalties, shared, collision_counts, collision_relative_speed
+        return (
+            penalties,
+            shared,
+            collision_counts,
+            contact_counts,
+            collision_relative_speed,
+            collision_contact_steps,
+            hook_counts,
+            contact_termination,
+        )
 
     def step(self, action):
         obs, reward, done, info = self.env.step(action)
@@ -2264,13 +2453,26 @@ class RewardShapingWrapper(gym.Wrapper):
         comp_collision = np.zeros(self._num_agents, dtype=np.float32)
         comp_shared_collision = np.zeros(self._num_agents, dtype=np.float32)
         collision_counts = np.zeros(self._num_agents, dtype=np.int32)
+        contact_counts = np.zeros(self._num_agents, dtype=np.int32)
         collision_relative_speed = np.zeros(self._num_agents, dtype=np.float32)
+        collision_contact_steps = np.zeros(self._num_agents, dtype=np.int32)
+        hook_counts = np.zeros(self._num_agents, dtype=np.int32)
+        contact_termination = np.zeros(self._num_agents, dtype=np.bool_)
 
         if self.multi_agent_enabled and self._num_agents > 1:
             comp_rank, ranks = self._compute_rank_reward(race_progress)
             comp_relative_velocity, nearest_idx, nearest_dist = self._compute_relative_velocity_reward(positions, speeds)
             comp_overtake, overtake_counts = self._compute_overtake_bonus(race_progress)
-            comp_collision, comp_shared_collision, collision_counts, collision_relative_speed = self._compute_collision_penalties(
+            (
+                comp_collision,
+                comp_shared_collision,
+                collision_counts,
+                contact_counts,
+                collision_relative_speed,
+                collision_contact_steps,
+                hook_counts,
+                contact_termination,
+            ) = self._compute_collision_penalties(
                 positions,
                 velocity_vecs,
             )
@@ -2378,6 +2580,10 @@ class RewardShapingWrapper(gym.Wrapper):
             total_reward[is_no_progress] = float(self.no_progress_terminal_penalty)
             terminal_mask |= is_no_progress
 
+        if np.any(contact_termination):
+            total_reward[contact_termination] = float(self.contact_terminal_penalty)
+            terminal_mask |= contact_termination
+
         done_arr, done_was_scalar = self._coerce_bool_array(done, self._num_agents)
         done_arr = np.logical_or(done_arr, terminal_mask)
         if done_was_scalar:
@@ -2393,10 +2599,15 @@ class RewardShapingWrapper(gym.Wrapper):
             agent_info["_track_index"] = int(self._last_track_index[idx]) if self._last_track_index.size > idx else 0
             agent_info["events/offtrack"] = int(is_offtrack[idx])
             agent_info["events/stuck"] = int(is_stuck[idx])
+            agent_info["events/contact"] = int(contact_counts[idx] > 0)
+            agent_info["events/collision"] = int(contact_counts[idx] > 0)
+            agent_info["events/hook_contact"] = int(hook_counts[idx] > 0)
+            agent_info["events/contact_termination"] = int(contact_termination[idx])
             agent_info["telemetry/speed"] = float(speeds[idx])
+            agent_info["telemetry/collision_contact_steps"] = int(collision_contact_steps[idx])
+            agent_info["telemetry/collision_relative_speed"] = float(collision_relative_speed[idx])
             if not self._training_mode:
                 agent_info["events/no_progress"] = int(is_no_progress[idx])
-                agent_info["events/collision"] = int(collision_counts[idx] > 0)
                 agent_info["events/overtake"] = int(overtake_counts[idx])
                 agent_info["telemetry/yaw_rate"] = float(yaw_rates[idx])
                 agent_info["telemetry/curriculum_stage"] = int(self.curriculum_stage)
@@ -2409,7 +2620,6 @@ class RewardShapingWrapper(gym.Wrapper):
                 agent_info["telemetry/race_progress"] = float(race_progress[idx])
                 agent_info["telemetry/nearest_opponent"] = int(nearest_idx[idx])
                 agent_info["telemetry/nearest_opponent_distance"] = float(nearest_dist[idx]) if np.isfinite(nearest_dist[idx]) else -1.0
-                agent_info["telemetry/collision_relative_speed"] = float(collision_relative_speed[idx])
                 agent_info["rewards/forward_progress"] = float(comp_forward[idx])
                 agent_info["rewards/alignment"] = float(comp_alignment[idx])
                 agent_info["rewards/straight_speed"] = float(comp_straight_speed[idx])
@@ -2547,7 +2757,19 @@ class ObservationAugmentWrapper(gym.Wrapper):
         return {"image": image, "state": state}, reward, done, info
 
 
-def create_env(config, rank=0, seed=0):
+def set_reward_shaping_training_mode(env, training_mode: bool):
+    current = env
+    visited = set()
+    while current is not None and id(current) not in visited:
+        visited.add(id(current))
+        if isinstance(current, RewardShapingWrapper):
+            current.set_training_mode(training_mode)
+            return True
+        current = getattr(current, "env", None)
+    return False
+
+
+def create_env(config, rank=0, seed=0, training_mode=True):
     """Create and wrap the multi_car_racing environment."""
     env_config = config['environment']
     debug_log(
@@ -2609,6 +2831,7 @@ def create_env(config, rank=0, seed=0):
     reward_config = config.get('reward_shaping', {})
     if reward_config.get('enabled', False):
         env = RewardShapingWrapper(env, reward_config)
+        set_reward_shaping_training_mode(env, training_mode)
 
     # Observation augmentation (optional)
     obs_config = config.get('observation', {})
@@ -2682,7 +2905,7 @@ def make_env(config, rank, seed):
             {"rank": rank, "seed": seed + rank, "pid": os.getpid()},
         )
         try:
-            env = create_env(config, rank=rank, seed=seed + rank)
+            env = create_env(config, rank=rank, seed=seed + rank, training_mode=True)
             debug_log(
                 "pre-fix",
                 "H4",
@@ -2975,6 +3198,12 @@ def main():
         help='Torch policy variant override. Defaults to config.training.torch_policy_variant or legacy.'
     )
     parser.add_argument(
+        '--torch_policy_variant_source',
+        type=str,
+        default=None,
+        help='Optional path to an external torch policy surface module.'
+    )
+    parser.add_argument(
         '--resume_mode',
         type=str,
         default='full',
@@ -2989,6 +3218,9 @@ def main():
     training_config = config.get('training', {})
     if args.torch_policy_variant is not None:
         training_config['torch_policy_variant'] = args.torch_policy_variant
+        config['training'] = training_config
+    if args.torch_policy_variant_source is not None:
+        training_config['torch_policy_variant_source'] = args.torch_policy_variant_source
         config['training'] = training_config
     trainer_backend = (
         args.trainer_backend
@@ -3068,7 +3300,7 @@ def main():
         print(f"Using SubprocVecEnv with {num_envs} parallel environments")
     else:
         vec_env_cls = MultiAgentDummyVecEnv if (trainer_backend == 'torch' and num_agents > 1) else DummyVecEnv
-        env = vec_env_cls([lambda: create_env(config, rank=0, seed=args.seed)])
+        env = vec_env_cls([lambda: create_env(config, rank=0, seed=args.seed, training_mode=True)])
         print("Using DummyVecEnv with 1 environment")
     if not obs_config.get('enabled', False) and num_agents == 1:
         env = VecTransposeImage(env)
@@ -3079,7 +3311,7 @@ def main():
     use_subprocess_eval = bool(training_config.get("eval_subprocess", trainer_backend == 'torch' and num_agents > 1))
     if not (trainer_backend == 'torch' and use_subprocess_eval):
         eval_vec_env_cls = MultiAgentDummyVecEnv if (trainer_backend == 'torch' and num_agents > 1) else DummyVecEnv
-        eval_env = eval_vec_env_cls([lambda: create_env(config, rank=1, seed=args.seed + 1000)])
+        eval_env = eval_vec_env_cls([lambda: create_env(config, rank=1, seed=args.seed + 1000, training_mode=False)])
         if not obs_config.get('enabled', False) and num_agents == 1:
             eval_env = VecTransposeImage(eval_env)
     print("Environment created successfully!\n")
@@ -3217,6 +3449,8 @@ def main():
             f"Torch policy variant: {trainer.policy_variant} | "
             f"log_std=[{ppo_config.get('min_log_std', -1.5)}, {ppo_config.get('max_log_std', 1.0)}]"
         )
+        if trainer.policy_surface_metadata.get("surface_source"):
+            print(f"Policy surface source: {trainer.policy_surface_metadata.get('surface_source')}")
         if trainer.policy_variant == 'autoresearch_run_008':
             print("Action mapping: tanh-squashed Gaussian PPO with tanh log-prob correction")
             print("Env transform: steer=tanh output, throttle/brake mapped from (-1, 1) to (0, 1)")

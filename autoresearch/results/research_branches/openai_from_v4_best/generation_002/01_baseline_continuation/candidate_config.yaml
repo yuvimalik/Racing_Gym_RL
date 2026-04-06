@@ -1,0 +1,132 @@
+environment:
+  env_id: MultiCarRacing-v0
+  max_episode_steps: 2000
+  num_agents: 2
+  direction: CCW
+  use_random_direction: false
+  backwards_flag: true
+  h_ratio: 0.25
+  use_ego_color: false
+  render_mode: null
+ppo:
+  learning_rate: 0.00025
+  n_steps: 1024
+  batch_size: 1536
+  n_epochs: 3
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_range: 0.2
+  ent_coef: 0.05
+  vf_coef: 0.25
+  max_grad_norm: 0.5
+  min_log_std: -0.75
+  max_log_std: 0.5
+  steer_min_log_std: -0.5
+  steer_max_log_std: 0.0
+policy:
+  policy_type: CnnPolicy
+training:
+  trainer_backend: torch
+  marl_paradigm: shared_policy_ippo
+  torch_policy_variant: marl_surface_baseline
+  total_timesteps: 4000000
+  eval_freq: 50000
+  eval_subprocess: true
+  n_eval_episodes: 3
+  save_freq: 100000
+  log_interval: 5
+  num_envs: 1
+  fail_fast:
+    enabled: true
+    min_timesteps_before_check: 100000
+    min_mean_progress: 0.05
+    min_mean_speed: 1.0
+    patience_evals: 4
+  visual_eval:
+    enabled: false
+    freq: 200000
+    n_episodes: 1
+  success_gate:
+    enabled: true
+    mean_reward_threshold: 150.0
+    mean_progress_threshold: 0.6
+    max_offtrack_rate: 0.35
+    min_eval_episodes: 3
+  torch_policy_variant_source: /Users/epablo/Documents/UPenn/SophmoreSpring26/STAT4830/WedApr1_Work/Racing_Gym_RL/autoresearch/results/research_branches/openai_from_v4_best/generation_002/01_baseline_continuation/candidate_surface.py
+paths:
+  model_dir: ./models/v4_marl_anti_contact_4m
+  log_dir: ./logs/v4_marl_anti_contact_4m
+  results_dir: ./results/v4_marl_anti_contact_4m
+device: cuda
+reward_shaping:
+  enabled: true
+  use_custom_reward: true
+  forward_progress_scale: 600.0
+  track_alignment_scale: 0.0
+  straight_speed_scale: 0.0
+  sharp_turn_threshold: 0.35
+  sharp_turn_lookahead: 6
+  corner_target_speed: 7.0
+  corner_overspeed_penalty_scale: 0.0
+  apex_decel_reward_scale: 0.2
+  apex_decel_reward_cap: 2.0
+  steer_smoothness_penalty: 0.03
+  steer_delta_cap: 0.5
+  steer_magnitude_penalty: 0.005
+  lateral_velocity_penalty: 0.0
+  time_penalty: -0.1
+  idle_speed_threshold: 1.0
+  idle_penalty: -0.3
+  throttle_bonus_scale: 0.0
+  brake_penalty_scale: 0.01
+  launch_boost_steps: 0
+  launch_speed_target: 5.0
+  launch_bonus_scale: 0.0
+  stuck_speed_threshold: 0.8
+  stuck_progress_epsilon: 0.001
+  stuck_max_steps: 200
+  stuck_terminal_penalty: -20.0
+  no_progress_max_steps: 900
+  no_progress_terminal_penalty: -10.0
+  yaw_rate_penalty: 0.05
+  off_track_mode: terminate
+  off_track_terminal_penalty: -50.0
+  off_track_step_penalty: -0.5
+  multi_agent:
+    enabled: true
+    rank_reward_scale: 0.05
+    relative_velocity_scale: 0.01
+    relative_velocity_cap: 6.0
+    nearest_opponent_max_distance: 12.0
+    overtake_bonus: 0.1
+    overtake_margin: 0.002
+    collision_distance_threshold: 3.5
+    collision_overlap_distance: 2.2
+    collision_min_closing_speed: 0.75
+    collision_low_speed_threshold: 1.5
+    collision_medium_speed_threshold: 4.0
+    collision_high_speed_threshold: 7.0
+    collision_low_penalty: -2.0
+    collision_medium_penalty: -6.0
+    collision_high_penalty: -12.0
+    contact_penalty: -1.0
+    sustained_contact_steps: 2
+    sustained_contact_penalty: -2.5
+    hook_contact_steps: 4
+    hook_contact_speed_threshold: 1.75
+    hook_contact_penalty: -10.0
+    contact_termination_mode: both
+    contact_terminate_steps: 3
+    terminate_on_hook_contact: true
+    severe_contact_speed_threshold: 5.0
+    contact_terminal_penalty: -75.0
+    shared_collision_penalty: 0.0
+  curriculum:
+    enabled: false
+observation:
+  enabled: false
+safety_governor:
+  enabled: true
+  speed_cap_ratio: 0.5
+  speed_cap_top_speed: 60.0
+  speed_cap_brake: 0.4

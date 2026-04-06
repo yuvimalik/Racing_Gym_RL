@@ -67,6 +67,15 @@ pip install git+https://github.com/igilitschenski/multi_car_racing.git --no-deps
 
 Note: `multi_car_racing` is installed from GitHub and registers the environment during import.
 
+5. If you want to use the autoresearch loops, add an API key in `.env`:
+```bash
+# Gemini
+GOOGLE_API_KEY=...
+
+# OpenAI / Codex-compatible provider path
+OPENAI_API_KEY=...
+```
+
 ### Google Colab
 
 The project includes a complete Colab notebook (`colab_training.ipynb`) that handles all setup automatically. Simply:
@@ -139,6 +148,35 @@ Run the legacy torch policy for comparison:
 python train.py --config config/multi_car_config.yaml --trainer_backend torch --torch_policy_variant legacy --seed 42
 ```
 
+### Autoresearch Providers
+
+The autoresearch entrypoints now support both Gemini and OpenAI/Codex-style APIs through a shared provider adapter.
+
+Examples:
+
+Run the classic single-agent autoresearch loop with Gemini:
+```bash
+python -m autoresearch.run_loop --provider gemini --model gemini-2.5-flash
+```
+
+Run the classic single-agent autoresearch loop with OpenAI:
+```bash
+python -m autoresearch.run_loop --provider openai --model gpt-4.1-mini
+```
+
+Run the MARL recursive loop with OpenAI:
+```bash
+python -m autoresearch.run_marl_recursive --provider openai --model gpt-4.1-mini --base-config config/multi_car_marl_config.yaml --results-subdir research_branches/control_recovery
+```
+
+Fixed warm-start MARL search (every candidate fine-tunes the same checkpoint; promoted bundle under `autoresearch/results/.../promoted/`):
+```bash
+python -m autoresearch.marl_search_loop --provider openai --model gpt-4o-mini --warm-start-ckpt models/v3_marl_control_bootstrap/best_model_torch.pt --base-config config/multi_car_marl_config.yaml --results-subdir research_branches/my_search
+```
+Long-running helper: `./run_marl_search.sh` (set `WARM_START_CKPT`, `BASE_CONFIG`, `OPENAI_API_KEY`).
+
+If you pass `--provider codex`, the loop uses the OpenAI backend and expects `OPENAI_API_KEY`.
+
 Distributed multi-GPU torch training is available through `distributed_train.py`, but it is currently CUDA-only and keeps `MultiCarRacing-v0` at one `DummyVecEnv` per rank:
 ```bash
 torchrun --nproc_per_node=NUM_GPUS distributed_train.py --config config/multi_car_marl_config.yaml --seed 42
@@ -167,6 +205,12 @@ python train.py --config config/multi_car_marl_smoke_config.yaml --seed 42
 python evaluate.py --model models/v3_marl_control_bootstrap_smoke/best_model_torch.pt --config config/multi_car_marl_smoke_config.yaml --episodes 5 --no-video --seed 42
 ```
 
+Inspect the anti-contact metrics in that eval before promoting the policy:
+- `contact_rate`: how often an episode had real overlap/contact.
+- `hook_contact_rate`: how often cars got stuck in wheel-hooking style contact.
+- `contact_termination_rate`: how often the stricter anti-contact cutoff ended the interaction.
+- `mean_max_contact_steps`: how long the worst contact streak lasted per episode.
+
 3. If the smoke run passes, launch the longer control-first MARL run:
 ```bash
 python train.py --config config/multi_car_marl_config.yaml --seed 42
@@ -179,6 +223,7 @@ python train.py --config config/multi_car_marl_config.yaml --resume models/v3_ma
 
 Go / no-go criteria after the smoke run:
 - Stop and retune if eval still shows near-zero steering variance, `100%` off-track, or progress stuck near zero.
+- Stop and retune if `contact_rate` or `hook_contact_rate` stays materially above zero, or if `mean_max_contact_steps` shows that cars are still leaning on each other for multiple steps.
 - Continue if progress becomes clearly non-zero, steering variance stays alive, and off-track rate trends down from the current failure case.
 - Prefer `best_model_torch.pt` over `final_model_torch.pt` whenever periodic eval is enabled.
 
@@ -222,7 +267,7 @@ Options:
 If `--output-video` or `--output-json` is omitted, `evaluate.py` now uses deterministic default names under the configured `results_dir` based on the checkpoint stem and seed. Re-running the same command with the same seed overwrites the same artifacts, which makes comparison easier.
 
 Evaluation generates:
-- Performance statistics (mean reward, episode length, progress, and MARL metrics such as rank/collision when present)
+- Performance statistics (mean reward, episode length, progress, and MARL metrics such as rank/collision/contact when present)
 - Video recording of agent performance (if enabled)
 - JSON file with detailed metrics
 - Metadata including checkpoint path, config path, seed, and video path when present
@@ -232,6 +277,7 @@ For `MultiCarRacing-v0` multi-agent evaluation, the renderer returns one frame p
 Interpretation note for showcase runs:
 - A successful video export does not mean the policy is good.
 - If eval shows near-zero progress, `100%` off-track, or near-zero steering variance, the checkpoint is not showcase-ready even if the viewer works.
+- For strict anti-contact runs, treat non-trivial `contact_rate`, `hook_contact_rate`, or repeated contact terminations as a sign that the cars are still trying to interfere with each other instead of race cleanly.
 - The current `models/v2_marl_reward/final_model_torch.pt` checkpoint should be treated as a debugging artifact rather than a good racing demo unless later evals improve materially.
 
 ### TensorBoard Visualization

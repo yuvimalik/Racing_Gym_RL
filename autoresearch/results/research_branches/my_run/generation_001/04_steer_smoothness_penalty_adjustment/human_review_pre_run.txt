@@ -1,0 +1,10 @@
+Candidate steer_smoothness_penalty_adjustment (pre-run)
+=======================================================
+
+Rationale: A higher steer smoothness penalty may lead to smoother steering and reduced contact issues.
+
+Config changes:
+- reward_shaping.steer_smoothness_penalty: 0.03 -> 0.1
+
+Surface changes:
+No surface code changes.

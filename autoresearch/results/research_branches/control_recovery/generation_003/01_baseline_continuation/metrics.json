@@ -1,0 +1,67 @@
+{
+  "generation": 3,
+  "candidate_index": 1,
+  "candidate_name": "baseline_continuation",
+  "rationale": "Continue the current parent through the validation ladder as the control branch.",
+  "source": "baseline",
+  "config_overrides": {},
+  "code_change": "keep_parent",
+  "resume_policy": "inherit_parent",
+  "candidate_config_path": "/Users/epablo/Documents/UPenn/SophmoreSpring26/STAT4830/WedApr1_Work/Racing_Gym_RL/autoresearch/results/research_branches/control_recovery/generation_003/01_baseline_continuation/candidate_config.yaml",
+  "candidate_surface_path": "/Users/epablo/Documents/UPenn/SophmoreSpring26/STAT4830/WedApr1_Work/Racing_Gym_RL/autoresearch/results/research_branches/control_recovery/generation_003/01_baseline_continuation/candidate_surface.py",
+  "checkpoint_path": null,
+  "passed_gate": false,
+  "gate_reasons": [
+    "experiment_failed",
+    "progress_too_low",
+    "offtrack_near_total",
+    "steering_variance_dead",
+    "smoke_control_offtrack"
+  ],
+  "patterns": [
+    "speed_collapse"
+  ],
+  "deepest_stage": "smoke_control",
+  "score": -1239.0,
+  "stage_records": [
+    {
+      "stage": "smoke_control",
+      "timesteps": 100000,
+      "eval_episodes": 2,
+      "resume_from": null,
+      "patterns": [
+        "speed_collapse"
+      ],
+      "passed_gate": false,
+      "gate_reasons": [
+        "experiment_failed",
+        "progress_too_low",
+        "offtrack_near_total",
+        "steering_variance_dead",
+        "smoke_control_offtrack"
+      ],
+      "score": -1239.0,
+      "mean_reward": -999.0,
+      "error": "train.py failed before producing a checkpoint",
+      "train_return_code": 1,
+      "train_wall_clock_seconds": 1.2115478515625,
+      "effective_config_path": "/Users/epablo/Documents/UPenn/SophmoreSpring26/STAT4830/WedApr1_Work/Racing_Gym_RL/autoresearch/results/research_branches/control_recovery/generation_003/01_baseline_continuation/smoke_control/effective_config.yaml",
+      "run_summary_path": null,
+      "return_code": 0
+    }
+  ],
+  "stderr_tail": [],
+  "stdout_tail": [],
+  "promoted": false,
+  "stage": "smoke_control",
+  "timesteps": 100000,
+  "eval_episodes": 2,
+  "resume_from": null,
+  "mean_reward": -999.0,
+  "error": "train.py failed before producing a checkpoint",
+  "train_return_code": 1,
+  "train_wall_clock_seconds": 1.2115478515625,
+  "effective_config_path": "/Users/epablo/Documents/UPenn/SophmoreSpring26/STAT4830/WedApr1_Work/Racing_Gym_RL/autoresearch/results/research_branches/control_recovery/generation_003/01_baseline_continuation/smoke_control/effective_config.yaml",
+  "run_summary_path": null,
+  "return_code": 0
+}

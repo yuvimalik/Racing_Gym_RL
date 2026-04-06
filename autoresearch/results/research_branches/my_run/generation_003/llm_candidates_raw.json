@@ -1,0 +1,32 @@
+{
+  "candidates": [
+    {
+      "name": "increase_collision_penalty_scale",
+      "hypothesis": "Increasing collision penalties will reduce contact rates during racing.",
+      "rationale": "Higher penalties for collisions should discourage aggressive interactions that lead to contact.",
+      "config_overrides": {
+        "reward_shaping.multi_agent.collision_high_penalty": -20.0,
+        "reward_shaping.multi_agent.collision_medium_penalty": -12.0
+      },
+      "code_change": "keep_parent"
+    },
+    {
+      "name": "enhance_overtake_bonus",
+      "hypothesis": "Boosting the overtake bonus will encourage overtaking behavior without causing excessive contact.",
+      "rationale": "A higher bonus for clean overtakes promotes strategic passing while minimizing blocking.",
+      "config_overrides": {
+        "reward_shaping.multi_agent.overtake_bonus": 0.3
+      },
+      "code_change": "keep_parent"
+    },
+    {
+      "name": "reduce_hook_contact_penalty",
+      "hypothesis": "Reducing the hook contact penalty will allow for more aggressive passing without invoking severe penalties.",
+      "rationale": "A less severe penalty for hook contact may promote more competitive behavior while maintaining safety.",
+      "config_overrides": {
+        "reward_shaping.multi_agent.hook_contact_penalty": -5.0
+      },
+      "code_change": "keep_parent"
+    }
+  ]
+}

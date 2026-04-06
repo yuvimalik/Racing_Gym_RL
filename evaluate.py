@@ -6,6 +6,12 @@ generating metrics and optionally recording videos.
 """
 
 import os
+
+if str(os.environ.get("RACING_HEADLESS_PYGLET", "")).strip().lower() in ("1", "true", "yes"):
+    import pyglet
+
+    pyglet.options["headless"] = True
+
 import yaml
 import argparse
 import json
@@ -29,6 +35,7 @@ try:
         RewardShapingWrapper,
         TORCH_POLICY_VARIANTS,
         mps_is_available,
+        set_reward_shaping_training_mode,
         validate_agent_space_contract,
     )
 except ImportError:
@@ -36,6 +43,7 @@ except ImportError:
     MultiAgentSpaceWrapper = None
     RewardShapingWrapper = None
     TORCH_POLICY_VARIANTS = {}
+    set_reward_shaping_training_mode = None
     validate_agent_space_contract = None
 
     def mps_is_available():
@@ -331,7 +339,7 @@ class ObservationAugmentWrapper(gym.Wrapper):
         return {"image": image, "state": state}, reward, done, info
 
 
-def create_env(config, render_mode='rgb_array', seed=None):
+def create_env(config, render_mode='rgb_array', seed=None, training_mode=False):
     """Create evaluation environment with rendering."""
     env_config = config['environment']
     env_id = env_config.get('env_id', 'MultiCarRacing-v0')
@@ -369,6 +377,8 @@ def create_env(config, render_mode='rgb_array', seed=None):
         if RewardShapingWrapper is None:
             raise RuntimeError("RewardShapingWrapper unavailable. Ensure train.py is importable.")
         env = RewardShapingWrapper(env, reward_config)
+        if set_reward_shaping_training_mode is not None:
+            set_reward_shaping_training_mode(env, training_mode)
 
     obs_config = config.get('observation', {})
     if obs_config.get('enabled', False):
@@ -400,7 +410,7 @@ def evaluate_torch_model(model_path, config, n_episodes=10, record_video=True, s
 
     np.random.seed(seed)
     torch.manual_seed(int(seed))
-    base_env = create_env(config, seed=seed)
+    base_env = create_env(config, seed=seed, training_mode=False)
     num_agents, obs_shape, obs_layout = infer_image_space_layout(base_env.observation_space.shape)
     action_shape = tuple(base_env.action_space.shape)
     action_dim = int(action_shape[-1] if len(action_shape) >= 2 else action_shape[0])
@@ -439,6 +449,10 @@ def evaluate_torch_model(model_path, config, n_episodes=10, record_video=True, s
     episode_steer_variance = []
     episode_mean_rank = []
     episode_collision = []
+    episode_contact = []
+    episode_hook_contact = []
+    episode_contact_termination = []
+    episode_max_contact_steps = []
     episode_mean_speed = []
     episode_mean_throttle = []
     episode_mean_brake = []
@@ -465,6 +479,10 @@ def evaluate_torch_model(model_path, config, n_episodes=10, record_video=True, s
         steer_values = []
         rank_values = []
         collision_seen = False
+        contact_seen = False
+        hook_contact_seen = False
+        contact_termination_seen = False
+        max_contact_steps = 0
         speed_values = []
         throttle_values = []
         brake_values = []
@@ -497,7 +515,11 @@ def evaluate_torch_model(model_path, config, n_episodes=10, record_video=True, s
                     continue
                 offtrack_seen = offtrack_seen or int(agent_info.get("events/offtrack", 0)) > 0
                 collision_seen = collision_seen or int(agent_info.get("events/collision", 0)) > 0
+                contact_seen = contact_seen or int(agent_info.get("events/contact", 0)) > 0
+                hook_contact_seen = hook_contact_seen or int(agent_info.get("events/hook_contact", 0)) > 0
+                contact_termination_seen = contact_termination_seen or int(agent_info.get("events/contact_termination", 0)) > 0
                 speed_values.append(float(agent_info.get("telemetry/speed", 0.0)))
+                max_contact_steps = max(max_contact_steps, int(agent_info.get("telemetry/collision_contact_steps", 0)))
                 overtake_count += int(agent_info.get("events/overtake", 0))
                 if "telemetry/rank" in agent_info:
                     rank_values.append(float(agent_info.get("telemetry/rank", 0.0)))
@@ -531,6 +553,10 @@ def evaluate_torch_model(model_path, config, n_episodes=10, record_video=True, s
         episode_steer_variance.append(float(np.var(steer_values)) if len(steer_values) > 1 else 0.0)
         episode_mean_rank.append(float(np.mean(rank_values)) if rank_values else 1.0)
         episode_collision.append(int(collision_seen))
+        episode_contact.append(int(contact_seen))
+        episode_hook_contact.append(int(hook_contact_seen))
+        episode_contact_termination.append(int(contact_termination_seen))
+        episode_max_contact_steps.append(int(max_contact_steps))
         episode_mean_speed.append(float(np.mean(speed_values)) if speed_values else 0.0)
         episode_mean_throttle.append(float(np.mean(throttle_values)) if throttle_values else 0.0)
         episode_mean_brake.append(float(np.mean(brake_values)) if brake_values else 0.0)
@@ -538,7 +564,9 @@ def evaluate_torch_model(model_path, config, n_episodes=10, record_video=True, s
         print(
             f"Episode {episode + 1}/{n_episodes}: Reward={episode_reward:.2f}, "
             f"Length={episode_length}, Progress={progress:.2%}, Time={episode_time:.2f}s, "
-            f"MeanRank={np.mean(rank_values) if rank_values else 1.0:.2f}, Collision={int(collision_seen)}"
+            f"MeanRank={np.mean(rank_values) if rank_values else 1.0:.2f}, "
+            f"Collision={int(collision_seen)}, Hook={int(hook_contact_seen)}, "
+            f"ContactTerminate={int(contact_termination_seen)}"
         )
     if video_writer is not None:
         video_writer.release()
@@ -561,6 +589,10 @@ def evaluate_torch_model(model_path, config, n_episodes=10, record_video=True, s
         "mean_steer_variance": float(np.mean(episode_steer_variance)),
         "mean_rank": float(np.mean(episode_mean_rank)),
         "collision_rate": float(np.mean(episode_collision)),
+        "contact_rate": float(np.mean(episode_contact)),
+        "hook_contact_rate": float(np.mean(episode_hook_contact)),
+        "contact_termination_rate": float(np.mean(episode_contact_termination)),
+        "mean_max_contact_steps": float(np.mean(episode_max_contact_steps)),
         "mean_speed": float(np.mean(episode_mean_speed)),
         "mean_throttle": float(np.mean(episode_mean_throttle)),
         "mean_brake": float(np.mean(episode_mean_brake)),
@@ -573,6 +605,10 @@ def evaluate_torch_model(model_path, config, n_episodes=10, record_video=True, s
         "episode_steer_variance": episode_steer_variance,
         "episode_mean_rank": episode_mean_rank,
         "episode_collision": episode_collision,
+        "episode_contact": episode_contact,
+        "episode_hook_contact": episode_hook_contact,
+        "episode_contact_termination": episode_contact_termination,
+        "episode_max_contact_steps": episode_max_contact_steps,
         "episode_mean_speed": episode_mean_speed,
         "episode_mean_throttle": episode_mean_throttle,
         "episode_mean_brake": episode_mean_brake,
@@ -738,6 +774,14 @@ def print_stats(stats):
         print(f"Mean Rank: {stats['mean_rank']:.2f}")
     if 'collision_rate' in stats:
         print(f"Collision Rate: {stats['collision_rate']:.2%}")
+    if 'contact_rate' in stats:
+        print(f"Contact Rate: {stats['contact_rate']:.2%}")
+    if 'hook_contact_rate' in stats:
+        print(f"Hook-Contact Rate: {stats['hook_contact_rate']:.2%}")
+    if 'contact_termination_rate' in stats:
+        print(f"Contact-Termination Rate: {stats['contact_termination_rate']:.2%}")
+    if 'mean_max_contact_steps' in stats:
+        print(f"Mean Max Contact Steps: {stats['mean_max_contact_steps']:.2f}")
     if 'mean_speed' in stats:
         print(f"Mean Speed: {stats['mean_speed']:.2f}")
     if 'mean_throttle' in stats:
@@ -767,6 +811,10 @@ def save_stats(stats, output_path):
         'mean_steer_variance': float(stats.get('mean_steer_variance', 0.0)),
         'mean_rank': float(stats.get('mean_rank', 1.0)),
         'collision_rate': float(stats.get('collision_rate', 0.0)),
+        'contact_rate': float(stats.get('contact_rate', 0.0)),
+        'hook_contact_rate': float(stats.get('hook_contact_rate', 0.0)),
+        'contact_termination_rate': float(stats.get('contact_termination_rate', 0.0)),
+        'mean_max_contact_steps': float(stats.get('mean_max_contact_steps', 0.0)),
         'episode_rewards': [float(r) for r in stats['episode_rewards']],
         'episode_lengths': [int(l) for l in stats['episode_lengths']],
         'episode_progress': [float(p) for p in stats['episode_progress']],
@@ -775,6 +823,10 @@ def save_stats(stats, output_path):
         'episode_steer_variance': [float(v) for v in stats.get('episode_steer_variance', [])],
         'episode_mean_rank': [float(v) for v in stats.get('episode_mean_rank', [])],
         'episode_collision': [int(v) for v in stats.get('episode_collision', [])],
+        'episode_contact': [int(v) for v in stats.get('episode_contact', [])],
+        'episode_hook_contact': [int(v) for v in stats.get('episode_hook_contact', [])],
+        'episode_contact_termination': [int(v) for v in stats.get('episode_contact_termination', [])],
+        'episode_max_contact_steps': [int(v) for v in stats.get('episode_max_contact_steps', [])],
         'mean_speed': float(stats.get('mean_speed', 0.0)),
         'mean_throttle': float(stats.get('mean_throttle', 0.0)),
         'mean_brake': float(stats.get('mean_brake', 0.0)),

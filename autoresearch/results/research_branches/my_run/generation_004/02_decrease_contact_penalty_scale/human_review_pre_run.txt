@@ -1,0 +1,11 @@
+Candidate decrease_contact_penalty_scale (pre-run)
+==================================================
+
+Rationale: Lowering the penalty may help agents to avoid panic braking and maintain close racing without excessive penalties.
+
+Config changes:
+- reward_shaping.multi_agent.contact_penalty: -1.0 -> -3.0
+- reward_shaping.multi_agent.contact_terminal_penalty: -75.0 -> -100.0
+
+Surface changes:
+No surface code changes.

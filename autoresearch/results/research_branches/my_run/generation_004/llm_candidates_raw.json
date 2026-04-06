@@ -1,0 +1,32 @@
+{
+  "candidates": [
+    {
+      "name": "decrease_contact_penalty_scale",
+      "hypothesis": "Reducing the contact penalty will encourage less aggressive interactions that may lead to contact.",
+      "rationale": "Lowering the penalty may help agents to avoid panic braking and maintain close racing without excessive penalties.",
+      "config_overrides": {
+        "reward_shaping.multi_agent.contact_penalty": -3.0,
+        "reward_shaping.multi_agent.contact_terminal_penalty": -100.0
+      },
+      "code_change": "keep_parent"
+    },
+    {
+      "name": "increase_overtake_bonus",
+      "hypothesis": "Increasing the overtaking bonus will promote cleaner overtaking strategies, reducing the likelihood of collisions.",
+      "rationale": "A higher reward for overtaking can incentivize agents to seek valid passing opportunities without targeting aggressive maneuvers.",
+      "config_overrides": {
+        "reward_shaping.multi_agent.overtake_bonus": 0.3
+      },
+      "code_change": "keep_parent"
+    },
+    {
+      "name": "reduce_hook_contact_penalty",
+      "hypothesis": "Reducing the hook contact penalty can allow agents to maintain speed while negotiating close proximity with opponents.",
+      "rationale": "Minimizing penalties for hook contacts may reduce panic reactions leading to more consistent and stable behavior.",
+      "config_overrides": {
+        "reward_shaping.multi_agent.hook_contact_penalty": -5.0
+      },
+      "code_change": "keep_parent"
+    }
+  ]
+}

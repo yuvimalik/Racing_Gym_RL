@@ -1,0 +1,10 @@
+Candidate enhance_overtake_bonus (pre-run)
+==========================================
+
+Rationale: Boosting the overtake bonus can incentivize cleaner passing behavior among agents.
+
+Config changes:
+- reward_shaping.multi_agent.overtake_bonus: 0.1 -> 0.2
+
+Surface changes:
+No surface code changes.

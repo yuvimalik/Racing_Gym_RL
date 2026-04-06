@@ -1,0 +1,21 @@
+{
+  "candidates": [
+    {
+      "name": "increase_steering_variance",
+      "rationale": "Increase steering variance to promote better cornering behavior.",
+      "config_overrides": {
+        "ppo.steer_max_log_std": 0.25,
+        "ppo.steer_min_log_std": -0.25
+      },
+      "code_change": "keep_parent"
+    },
+    {
+      "name": "enhanced_overtake_bonus",
+      "rationale": "Encourage cleaner overtakes by increasing the overtaking bonus.",
+      "config_overrides": {
+        "reward_shaping.multi_agent.overtake_bonus": 0.2
+      },
+      "code_change": "keep_parent"
+    }
+  ]
+}

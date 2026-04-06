@@ -1,0 +1,10 @@
+Candidate increase_overtake_bonus (pre-run)
+===========================================
+
+Rationale: A higher reward for overtaking can encourage more aggressive yet safely executed passes.
+
+Config changes:
+- reward_shaping.multi_agent.overtake_bonus: 0.1 -> 0.3
+
+Surface changes:
+No surface code changes.
