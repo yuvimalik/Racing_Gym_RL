@@ -1,5 +1,6 @@
 """World-model package for staged offline racing experiments."""
 
+from .control import FrozenWorldModel, LatentActor, LatentCritic
 from .models import (
     Decoder,
     DynamicsModel,
@@ -24,4 +25,7 @@ __all__ = [
     "RewardPredictor",
     "SequenceModel",
     "SequenceReplayDataset",
+    "FrozenWorldModel",
+    "LatentActor",
+    "LatentCritic",
 ]

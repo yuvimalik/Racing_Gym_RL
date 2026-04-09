@@ -66,10 +66,17 @@ class ReplayWriter:
 class SequenceReplayDataset(Dataset):
     """Returns fixed-length windows without crossing episode boundaries."""
 
-    def __init__(self, episode_paths: list[str | Path], sequence_length: int = 50, normalize: bool = True):
+    def __init__(
+        self,
+        episode_paths: list[str | Path],
+        sequence_length: int = 50,
+        normalize: bool = True,
+        window_stride: int = 1,
+    ):
         self.episode_paths = [Path(path) for path in episode_paths]
         self.sequence_length = int(sequence_length)
         self.normalize = bool(normalize)
+        self.window_stride = max(1, int(window_stride))
         self._episodes = [ReplayWriter.load_episode(path) for path in self.episode_paths]
         self._index: list[tuple[int, int]] = []
 
@@ -77,7 +84,7 @@ class SequenceReplayDataset(Dataset):
             length = int(episode.observations_uint8.shape[0])
             if length < self.sequence_length:
                 continue
-            for start_index in range(length - self.sequence_length + 1):
+            for start_index in range(0, length - self.sequence_length + 1, self.window_stride):
                 self._index.append((episode_index, start_index))
 
     def __len__(self) -> int:

@@ -152,6 +152,57 @@ tensorboard --logdir logs
 
 Then open `http://localhost:6006` in your browser.
 
+## World Model Status
+
+The repository now also contains an offline PyTorch world-model pipeline under `world_model/`.
+
+Current scope:
+- Recurrent State Space Model (RSSM)
+- frozen-world-model latent actor-critic baseline
+- replay-based imagined rollout training plus real-environment actor evaluation
+
+Implemented pieces:
+- vision encoder and decoder
+- deterministic GRU sequence model
+- stochastic prior and posterior latent models
+- reward predictor
+- offline replay loader and sequence sampling
+- manual and automatic replay collection scripts
+- offline RSSM training with checkpoint and hallucination video saving
+- frozen RSSM control wrapper with latent-state flattening
+- latent actor and critic MLP heads
+- imagined latent-rollout actor-critic training script
+- real-environment actor evaluation on top of the frozen RSSM
+
+Useful entry points:
+```bash
+python world_model_autoencoder.py --config config/world_model_config.yaml
+python world_model_prepare_dataset.py --config config/world_model_config.yaml
+python world_model_train.py --config config/world_model_config.yaml --epochs 10
+python world_model_train_control.py --config config/world_model_config.yaml --epochs 10
+```
+
+Current qualitative status:
+- straight-line hallucinations are broadly coherent
+- car, grass, road corridor, and bottom HUD-like structure are usually preserved
+- corner consistency is the main current weakness
+- latent-control training now assumes the RSSM is frozen and uses it as a differentiable simulator
+
+Current training defaults for the local RTX 4070 Laptop GPU:
+- world-model training uses replay windowing, CUDA AMP, and worker-based loading
+- latent-control training uses a short real context plus imagined rollouts from the frozen RSSM
+
+Artifacts:
+- checkpoints: `models/world_model/<run_name>/`
+- latest checkpoint: `models/world_model/rssm_sequence.pt`
+- hallucinations: `results/world_model/artifacts/hallucination/<run_name>/`
+- latest hallucination: `results/world_model/artifacts/hallucination/hallucination.mp4`
+- latent-control checkpoints: `models/world_model_control/<run_name>/`
+- latest latent-control checkpoint: `models/world_model_control/latent_actor_critic.pt`
+- latent-control metrics: `results/world_model/control/<run_name>/`
+
+See `WORLD_MODEL_PROGRESS.md` for a concise progress log and next-step roadmap.
+
 ## Observation and Action Spaces
 
 ### Observation Space

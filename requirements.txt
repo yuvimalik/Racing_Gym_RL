@@ -12,6 +12,7 @@ pyglet==1.5.27
 # Visualization and logging
 matplotlib>=3.7.0
 opencv-python>=4.8.0
+pygame>=2.5.0
 tensorboard>=2.13.0
 
 # Configuration

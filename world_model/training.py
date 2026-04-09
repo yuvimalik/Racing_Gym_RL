@@ -11,7 +11,7 @@ from torch.utils.data import DataLoader
 
 from world_model.losses import free_bits_kl, reconstruction_loss, reward_loss
 from world_model.models import Decoder, Encoder, RSSMSequence
-from world_model.replay import SequenceReplayDataset
+from world_model.replay import ReplayWriter, SequenceReplayDataset
 
 
 @dataclass
@@ -83,9 +83,29 @@ def build_replay_loader(
     sequence_length: int = 50,
     batch_size: int = 8,
     shuffle: bool = True,
+    window_stride: int = 1,
+    num_workers: int = 0,
+    pin_memory: bool = False,
+    persistent_workers: bool = False,
+    prefetch_factor: int | None = None,
 ) -> DataLoader:
-    dataset = SequenceReplayDataset(list(episode_paths), sequence_length=sequence_length, normalize=True)
-    return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
+    dataset = SequenceReplayDataset(
+        list(episode_paths),
+        sequence_length=sequence_length,
+        normalize=True,
+        window_stride=window_stride,
+    )
+    loader_kwargs = {
+        "batch_size": batch_size,
+        "shuffle": shuffle,
+        "num_workers": int(num_workers),
+        "pin_memory": bool(pin_memory),
+    }
+    if int(num_workers) > 0:
+        loader_kwargs["persistent_workers"] = bool(persistent_workers)
+        if prefetch_factor is not None:
+            loader_kwargs["prefetch_factor"] = int(prefetch_factor)
+    return DataLoader(dataset, **loader_kwargs)
 
 
 def train_world_model_epoch(
@@ -96,38 +116,61 @@ def train_world_model_epoch(
     free_nats: float = 1.0,
     kl_scale: float = 1.0,
     reward_scale: float = 1.0,
+    log_every: int = 0,
+    use_amp: bool = False,
+    grad_scaler: torch.amp.GradScaler | None = None,
 ) -> dict[str, float]:
     device = torch.device(device)
+    device_type = "cuda" if device.type == "cuda" else "cpu"
+    non_blocking = device.type == "cuda"
     model.train()
     totals = {"recon_loss": 0.0, "reward_loss": 0.0, "kl_loss": 0.0, "total_loss": 0.0}
     num_batches = 0
 
-    for batch in loader:
-        images = batch["images"].to(device)
-        actions = batch["actions"].to(device)
-        rewards = batch["rewards"].to(device)
-        is_first = batch["is_first"].to(device)
+    for batch_index, batch in enumerate(loader, start=1):
+        images = batch["images"].to(device, non_blocking=non_blocking)
+        actions = batch["actions"].to(device, non_blocking=non_blocking)
+        rewards = batch["rewards"].to(device, non_blocking=non_blocking)
+        is_first = batch["is_first"].to(device, non_blocking=non_blocking)
 
         optimizer.zero_grad(set_to_none=True)
-        output = model(images=images, actions=actions, is_first=is_first)
-        recon = reconstruction_loss(output.reconstruction, images)
-        rew = reward_loss(output.reward, rewards)
-        kl = free_bits_kl(
-            posterior_mean=output.posterior_mean,
-            posterior_std=output.posterior_std,
-            prior_mean=output.prior_mean,
-            prior_std=output.prior_std,
-            free_nats=free_nats,
-        )
-        total = recon + (reward_scale * rew) + (kl_scale * kl)
-        total.backward()
-        optimizer.step()
+        with torch.autocast(device_type=device_type, dtype=torch.float16, enabled=bool(use_amp and device.type == "cuda")):
+            output = model(images=images, actions=actions, is_first=is_first)
+            recon = reconstruction_loss(output.reconstruction, images)
+            rew = reward_loss(output.reward, rewards)
+            kl = free_bits_kl(
+                posterior_mean=output.posterior_mean,
+                posterior_std=output.posterior_std,
+                prior_mean=output.prior_mean,
+                prior_std=output.prior_std,
+                free_nats=free_nats,
+            )
+            total = recon + (reward_scale * rew) + (kl_scale * kl)
+
+        if grad_scaler is not None and bool(use_amp and device.type == "cuda"):
+            grad_scaler.scale(total).backward()
+            grad_scaler.step(optimizer)
+            grad_scaler.update()
+        else:
+            total.backward()
+            optimizer.step()
 
         totals["recon_loss"] += float(recon.item())
         totals["reward_loss"] += float(rew.item())
         totals["kl_loss"] += float(kl.item())
         totals["total_loss"] += float(total.item())
         num_batches += 1
+
+        if log_every > 0 and (batch_index == 1 or batch_index % log_every == 0):
+            print(
+                "[RSSM][batch "
+                f"{batch_index}/{len(loader)}] "
+                f"recon={recon.item():.6f} "
+                f"reward={rew.item():.6f} "
+                f"kl={kl.item():.6f} "
+                f"total={total.item():.6f}",
+                flush=True,
+            )
 
     if num_batches == 0:
         raise ValueError("Replay loader produced zero batches.")
@@ -178,6 +221,41 @@ def save_video(frames_thwc_uint8: np.ndarray, path: str | Path, fps: float = 10.
     return path
 
 
+def build_curated_eval_batch(
+    episode_path: str | Path,
+    start_index: int,
+    context_length: int,
+    horizon: int,
+    device: str | torch.device = "cpu",
+) -> dict[str, torch.Tensor]:
+    episode = ReplayWriter.load_episode(episode_path)
+    total_length = int(context_length) + int(horizon)
+    start_index = int(start_index)
+    end_index = start_index + total_length
+    if end_index > int(episode.observations_uint8.shape[0]):
+        raise ValueError(
+            f"Curated clip {episode_path} start_index={start_index} exceeds episode length "
+            f"{int(episode.observations_uint8.shape[0])} for required window {total_length}."
+        )
+
+    images = torch.from_numpy(episode.observations_uint8[start_index:end_index]).permute(0, 3, 1, 2).float() / 255.0
+    actions = torch.from_numpy(episode.actions[start_index:end_index]).float()
+    rewards = torch.from_numpy(episode.rewards[start_index:end_index]).float().unsqueeze(-1)
+    dones = torch.from_numpy(episode.dones[start_index:end_index].astype(np.float32))
+    is_first = torch.zeros(total_length, dtype=torch.bool)
+    if start_index == 0:
+        is_first[0] = True
+
+    batch = {
+        "images": images.unsqueeze(0).to(device),
+        "actions": actions.unsqueeze(0).to(device),
+        "rewards": rewards.unsqueeze(0).to(device),
+        "dones": dones.unsqueeze(0).to(device),
+        "is_first": is_first.unsqueeze(0).to(device),
+    }
+    return batch
+
+
 def save_hallucination_video(
     model: RSSMSequence,
     batch: dict[str, torch.Tensor],
@@ -185,6 +263,7 @@ def save_hallucination_video(
     device: str | torch.device,
     context_length: int = 50,
     horizon: int = 50,
+    fps: float = 10.0,
 ) -> Path:
     device = torch.device(device)
     model.eval()
@@ -194,4 +273,27 @@ def save_hallucination_video(
         imagined = hallucinate_future(model, images, actions, context_length=context_length, horizon=horizon)
     frames = imagined[0].detach().cpu().permute(0, 2, 3, 1).numpy()
     frames_uint8 = np.clip(frames * 255.0, 0.0, 255.0).astype(np.uint8)
-    return save_video(frames_uint8, output_path)
+    return save_video(frames_uint8, output_path, fps=fps)
+
+
+def save_side_by_side_hallucination_video(
+    model: RSSMSequence,
+    batch: dict[str, torch.Tensor],
+    output_path: str | Path,
+    device: str | torch.device,
+    context_length: int = 50,
+    horizon: int = 50,
+    fps: float = 10.0,
+) -> Path:
+    device = torch.device(device)
+    model.eval()
+    with torch.no_grad():
+        images = batch["images"].to(device)
+        actions = batch["actions"].to(device)
+        imagined = hallucinate_future(model, images, actions, context_length=context_length, horizon=horizon)
+    real_frames = images[0, context_length : context_length + horizon].detach().cpu().permute(0, 2, 3, 1).numpy()
+    imagined_frames = imagined[0].detach().cpu().permute(0, 2, 3, 1).numpy()
+    real_uint8 = np.clip(real_frames * 255.0, 0.0, 255.0).astype(np.uint8)
+    imagined_uint8 = np.clip(imagined_frames * 255.0, 0.0, 255.0).astype(np.uint8)
+    side_by_side = np.concatenate([real_uint8, imagined_uint8], axis=2)
+    return save_video(side_by_side, output_path, fps=fps)
