@@ -1,0 +1,127 @@
+base_config_path: config/multi_car_config.yaml
+
+paths:
+  replay_dir: ./results/world_model/replay
+  artifacts_dir: ./results/world_model/artifacts
+  checkpoints_dir: ./models/world_model
+
+collector:
+  automatic:
+    seed: 42
+    render: true
+    record_video: true
+    video_fps: 30.0
+    splits:
+      train_frames: 500
+      val_frames: 100
+    directions:
+      - CCW
+      - CW
+    regimes:
+      slow:
+        throttle_scale: 0.50
+        steering_scale: 0.85
+        brake_scale: 1.00
+        transition_steps: 4
+        config_overrides:
+          safety_governor:
+            enabled: true
+            speed_cap_ratio: 0.30
+      medium:
+        throttle_scale: 0.80
+        steering_scale: 1.00
+        brake_scale: 1.00
+        transition_steps: 4
+        config_overrides:
+          safety_governor:
+            enabled: true
+            speed_cap_ratio: 0.50
+      high:
+        throttle_scale: 1.00
+        steering_scale: 1.00
+        brake_scale: 1.00
+        transition_steps: 3
+        config_overrides:
+          safety_governor:
+            enabled: false
+  manual:
+    seed: 123
+    target_frames: 5000
+    render: true
+    record_video: true
+    video_fps: 30.0
+    direction: CCW
+    regime: high
+
+autoencoder:
+  batch_size: 16
+  epochs: 1000
+  learning_rate: 0.001
+
+rssm:
+  action_dim: 3
+  hidden_dim: 512
+  stochastic_dim: 32
+  embedding_dim: 512
+  min_std: 0.1
+  max_std: 2.0
+
+offline_training:
+  sequence_length: 50
+  batch_size: 16
+  learning_rate: 0.0003
+  free_nats: 1.0
+  kl_scale: 1.0
+  reward_scale: 1.0
+  hallucination_context: 50
+  hallucination_horizon: 100
+  hallucination_video_fps: 8.0
+  window_stride: 4
+  num_workers: 4
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 2
+  use_amp: true
+  curated_eval_clips:
+    - name: sharp_turn
+      clip_type: sharp_turn
+      episode_path: ./results/world_model/replay/manual_wide_line_20260404_145350/episode_000002.npz
+      start_index: 80
+      context_length: 50
+      horizon: 100
+    - name: gentle_turn
+      clip_type: gentle_turn
+      episode_path: ./results/world_model/replay/manual_wide_line_20260404_145350/episode_000001.npz
+      start_index: 1060
+      context_length: 50
+      horizon: 100
+    - name: recovery
+      clip_type: recovery
+      episode_path: ./results/world_model/replay/manual_wide_line_20260404_145350/episode_000001.npz
+      start_index: 1750
+      context_length: 50
+      horizon: 100
+
+control_training:
+  epochs: 10
+  context_length: 20
+  imagination_horizon: 12
+  batch_size: 32
+  actor_learning_rate: 0.0003
+  critic_learning_rate: 0.0003
+  discount: 0.99
+  action_l2_scale: 0.0001
+  actor_hidden_dim: 256
+  critic_hidden_dim: 256
+  eval_every: 1
+  eval_episodes: 3
+  eval_max_steps: 1000
+  eval_seed: 123
+  world_model_checkpoint: ./models/world_model/rssm_sequence.pt
+  checkpoints_dir: ./models/world_model_control
+  artifacts_dir: ./results/world_model/control
+  window_stride: 4
+  num_workers: 4
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 2
