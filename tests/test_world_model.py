@@ -10,7 +10,7 @@ from world_model.collector import _build_maneuver_actions, save_collection_manif
 from world_model.control import FrozenWorldModel, LatentActor, LatentCritic, discounted_bootstrap_returns, imagine_with_actor
 from world_model.models import Decoder, Encoder, RSSMCell, RSSMSequence
 from world_model.replay import EpisodeReplay, ReplayWriter, SequenceReplayDataset
-from world_model.control_training import train_latent_actor_critic_epoch
+from world_model.control_training import save_latent_actor_compare_video, train_latent_actor_critic_epoch
 from world_model.training import build_curated_eval_batch, build_replay_loader, save_side_by_side_hallucination_video, save_video
 
 
@@ -310,6 +310,23 @@ class WorldModelTests(unittest.TestCase):
             self.assertIn("imagined_reward_mean", metrics)
             self.assertTrue(all(parameter.grad is None for parameter in frozen.model.parameters()))
 
+    def test_latent_actor_compare_video_smoke(self):
+        frozen = FrozenWorldModel(RSSMSequence())
+        observations = np.random.randint(0, 255, size=(70, 96, 96, 3), dtype=np.uint8)
+        actions = np.random.randn(70, 3).astype(np.float32)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = save_latent_actor_compare_video(
+                world_model=frozen,
+                observations_uint8=observations,
+                actions=actions,
+                output_path=Path(temp_dir) / "compare.mp4",
+                device="cpu",
+                context_length=20,
+                horizon=30,
+                fps=8.0,
+            )
+            self.assertTrue(path.is_file())
+
     def test_manifest_contains_summary(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             episode_paths = [Path(temp_dir) / "train" / "episode_000001.npz"]
@@ -363,6 +380,10 @@ class WorldModelTests(unittest.TestCase):
         self.assertEqual(control["eval_episodes"], 3)
         self.assertEqual(control["window_stride"], 4)
         self.assertTrue(control["pin_memory"])
+        self.assertTrue(control["record_eval_video"])
+        self.assertTrue(control["record_compare_video"])
+        self.assertEqual(control["compare_context_length"], 20)
+        self.assertEqual(control["compare_horizon"], 50)
 
 
 if __name__ == "__main__":

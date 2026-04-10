@@ -153,6 +153,8 @@ def main() -> None:
 
         eval_metrics: dict[str, float] | None = None
         if (epoch + 1) % int(control_cfg.get("eval_every", 1)) == 0 or (epoch + 1) == epochs:
+            real_video_path = artifacts_dir / f"eval_epoch_{epoch + 1:03d}_real.mp4"
+            compare_video_path = artifacts_dir / f"eval_epoch_{epoch + 1:03d}_compare.mp4"
             eval_metrics = evaluate_latent_actor(
                 world_model=world_model,
                 actor=actor,
@@ -161,6 +163,14 @@ def main() -> None:
                 episodes=int(control_cfg.get("eval_episodes", 3)),
                 max_steps=int(control_cfg.get("eval_max_steps", 1000)),
                 seed=int(control_cfg.get("eval_seed", 123)),
+                record_video=bool(control_cfg.get("record_eval_video", True)),
+                video_path=real_video_path,
+                record_compare_video=bool(control_cfg.get("record_compare_video", True)),
+                compare_video_path=compare_video_path,
+                video_fps=float(control_cfg.get("eval_video_fps", 10.0)),
+                compare_context_length=int(control_cfg.get("compare_context_length", context_length)),
+                compare_horizon=int(control_cfg.get("compare_horizon", 50)),
+                overlay=bool(control_cfg.get("eval_overlay", True)),
             )
             print(f"Actor evaluation: {eval_metrics}", flush=True)
 
