@@ -1,0 +1,134 @@
+# H100 training configuration for Prime Intellect cluster
+#
+# Key differences from world_model_config.yaml:
+#   batch_size: 128   (was 16) — H100 80GB can hold 8× more data per step
+#   num_workers: 16   (was 4)  — more CPU cores on cluster nodes
+#   sequence_length: 100       — longer context for better corner learning
+#   mixed_precision: bf16      — H100 native format, faster than fp16 on A100+
+#   prefetch_factor: 4         — deeper prefetch pipeline for high-throughput I/O
+
+base_config_path: config/multi_car_config.yaml
+
+paths:
+  replay_dir: ./results/world_model/replay
+  artifacts_dir: ./results/world_model/artifacts
+  checkpoints_dir: ./models/world_model
+
+collector:
+  automatic:
+    seed: 42
+    render: false
+    record_video: false
+    video_fps: 30.0
+    splits:
+      train_frames: 500
+      val_frames: 100
+    directions:
+      - CCW
+      - CW
+    regimes:
+      slow:
+        throttle_scale: 0.50
+        steering_scale: 0.85
+        brake_scale: 1.00
+        transition_steps: 4
+        config_overrides:
+          safety_governor:
+            enabled: true
+            speed_cap_ratio: 0.30
+      medium:
+        throttle_scale: 0.80
+        steering_scale: 1.00
+        brake_scale: 1.00
+        transition_steps: 4
+        config_overrides:
+          safety_governor:
+            enabled: true
+            speed_cap_ratio: 0.50
+      high:
+        throttle_scale: 1.00
+        steering_scale: 1.00
+        brake_scale: 1.00
+        transition_steps: 3
+        config_overrides:
+          safety_governor:
+            enabled: false
+
+autoencoder:
+  batch_size: 128
+  epochs: 500
+  learning_rate: 0.001
+
+rssm:
+  action_dim: 3
+  hidden_dim: 768       # scaled from 512 — more memory capacity for longer sequences
+  stochastic_dim: 64    # scaled from 32 — richer latent for uncertainty representation
+  embedding_dim: 512
+  min_std: 0.1
+  max_std: 2.0
+
+offline_training:
+  sequence_length: 100  # was 50 — longer context teaches model to be accurate further ahead
+  batch_size: 128       # was 16 — 8× larger on H100 80GB
+  learning_rate: 0.0003
+  free_nats: 1.0        # overridden by --free-nats-start/target/warmup flags if KL annealing is used
+  kl_scale: 1.0
+  reward_scale: 1.0
+  hallucination_context: 50
+  hallucination_horizon: 150  # extended from 100 — test coherence at longer horizons
+  hallucination_video_fps: 8.0
+  window_stride: 4
+  num_workers: 16       # was 4 — more workers for high-throughput I/O
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 4    # was 2 — deeper pipeline
+  use_amp: true         # bf16 is handled via the --distributed/torchrun environment
+  curated_eval_clips:
+    - name: sharp_turn
+      clip_type: sharp_turn
+      episode_path: ./results/world_model/replay/manual_wide_line_20260404_145350/episode_000002.npz
+      start_index: 80
+      context_length: 50
+      horizon: 100
+    - name: gentle_turn
+      clip_type: gentle_turn
+      episode_path: ./results/world_model/replay/manual_wide_line_20260404_145350/episode_000001.npz
+      start_index: 1060
+      context_length: 50
+      horizon: 100
+    - name: recovery
+      clip_type: recovery
+      episode_path: ./results/world_model/replay/manual_wide_line_20260404_145350/episode_000001.npz
+      start_index: 1750
+      context_length: 50
+      horizon: 100
+
+control_training:
+  epochs: 10
+  context_length: 20
+  imagination_horizon: 12
+  batch_size: 32
+  actor_learning_rate: 0.0003
+  critic_learning_rate: 0.0003
+  discount: 0.99
+  action_l2_scale: 0.0001
+  actor_hidden_dim: 256
+  critic_hidden_dim: 256
+  eval_every: 1
+  eval_episodes: 3
+  eval_max_steps: 1000
+  eval_seed: 123
+  record_eval_video: true
+  record_compare_video: true
+  eval_video_fps: 10.0
+  compare_context_length: 20
+  compare_horizon: 50
+  eval_overlay: true
+  world_model_checkpoint: ./models/world_model/rssm_sequence.pt
+  checkpoints_dir: ./models/world_model_control
+  artifacts_dir: ./results/world_model/control
+  window_stride: 4
+  num_workers: 16
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 4

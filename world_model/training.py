@@ -88,18 +88,43 @@ def build_replay_loader(
     pin_memory: bool = False,
     persistent_workers: bool = False,
     prefetch_factor: int | None = None,
+    distributed: bool = False,
 ) -> DataLoader:
+    """Build a DataLoader from replay episodes.
+
+    distributed mode (DDP):
+    When distributed=True, a DistributedSampler replaces the default sampler.
+    DistributedSampler partitions the dataset across all ranks (GPUs) so each
+    GPU sees a non-overlapping shard of the data per epoch. After each epoch,
+    call sampler.set_epoch(epoch) so each GPU sees a different permutation.
+
+    How DDP works end-to-end:
+    - Each GPU runs an identical copy of the training script.
+    - Batches are split across GPUs by the sampler (rank 0 sees windows 0,N,2N...;
+      rank 1 sees windows 1,N+1,2N+1...).
+    - After each backward pass, gradients are all-reduced (averaged) across GPUs.
+    - The result is identical to training with batch_size × world_size on one GPU.
+    """
     dataset = SequenceReplayDataset(
         list(episode_paths),
         sequence_length=sequence_length,
         normalize=True,
         window_stride=window_stride,
     )
-    loader_kwargs = {
+
+    sampler = None
+    actual_shuffle = shuffle
+    if distributed:
+        from torch.utils.data.distributed import DistributedSampler
+        sampler = DistributedSampler(dataset, shuffle=shuffle, drop_last=True)
+        actual_shuffle = False  # sampler handles shuffling; DataLoader must not double-shuffle
+
+    loader_kwargs: dict = {
         "batch_size": batch_size,
-        "shuffle": shuffle,
+        "shuffle": actual_shuffle if sampler is None else False,
         "num_workers": int(num_workers),
         "pin_memory": bool(pin_memory),
+        "sampler": sampler,
     }
     if int(num_workers) > 0:
         loader_kwargs["persistent_workers"] = bool(persistent_workers)
@@ -119,6 +144,8 @@ def train_world_model_epoch(
     log_every: int = 0,
     use_amp: bool = False,
     grad_scaler: torch.amp.GradScaler | None = None,
+    batch_log_every: int = 0,
+    batch_logger: callable | None = None,
 ) -> dict[str, float]:
     device = torch.device(device)
     device_type = "cuda" if device.type == "cuda" else "cpu"
@@ -170,6 +197,22 @@ def train_world_model_epoch(
                 f"kl={kl.item():.6f} "
                 f"total={total.item():.6f}",
                 flush=True,
+            )
+
+        if (
+            batch_logger is not None
+            and batch_log_every > 0
+            and (batch_index == 1 or batch_index % batch_log_every == 0)
+        ):
+            batch_logger(
+                {
+                    "batch/recon_loss": float(recon.item()),
+                    "batch/reward_loss": float(rew.item()),
+                    "batch/kl_loss": float(kl.item()),
+                    "batch/total_loss": float(total.item()),
+                    "batch/index": float(batch_index),
+                    "batch/epoch_progress": float(batch_index / max(1, len(loader))),
+                }
             )
 
     if num_batches == 0:
@@ -274,6 +317,78 @@ def save_hallucination_video(
     frames = imagined[0].detach().cpu().permute(0, 2, 3, 1).numpy()
     frames_uint8 = np.clip(frames * 255.0, 0.0, 255.0).astype(np.uint8)
     return save_video(frames_uint8, output_path, fps=fps)
+
+
+def compute_hallucination_metrics(
+    model: RSSMSequence,
+    batch: dict[str, torch.Tensor],
+    device: str | torch.device,
+    context_length: int = 50,
+    horizon: int = 100,
+) -> dict[str, float | list[float]]:
+    """Compute quantitative metrics on imagined vs. real frames.
+
+    Returns:
+        mean_mse: Average per-pixel MSE over all imagined steps.
+        mse_per_step: List of per-step MSE values (length = horizon).
+            This curve shows how fast hallucination quality degrades over time.
+            A flat curve = stable long-horizon model; a rising curve = divergence.
+        ssim: Mean Structural Similarity Index over all imagined steps.
+            SSIM ranges 0–1; higher = more structurally similar to real frames.
+            Unlike MSE, SSIM captures edge and texture preservation (important for
+            road geometry and turn fidelity).
+
+    How SSIM works: it compares local image patches (luminance, contrast, structure)
+    rather than raw pixel values, so a sharp but slightly shifted image scores higher
+    than a blurry but centred one. We use a manual computation to avoid requiring
+    the torchmetrics package on remote nodes that may not have it installed.
+    """
+    device = torch.device(device)
+    model.eval()
+    with torch.no_grad():
+        images = batch["images"].to(device)
+        actions = batch["actions"].to(device)
+        imagined = hallucinate_future(model, images, actions, context_length=context_length, horizon=horizon)
+
+    real_frames = images[0, context_length : context_length + horizon].detach().cpu()   # (T, C, H, W)
+    imagined_frames = imagined[0].detach().cpu()                                         # (T, C, H, W)
+
+    mse_per_step: list[float] = []
+    ssim_per_step: list[float] = []
+
+    for t in range(horizon):
+        real_t = real_frames[t]       # (C, H, W)
+        pred_t = imagined_frames[t]   # (C, H, W)
+
+        # MSE: mean over all pixels and channels
+        mse = float(torch.mean((real_t - pred_t) ** 2).item())
+        mse_per_step.append(mse)
+
+        # SSIM: manual implementation using 11x11 Gaussian window
+        # constants for numerical stability (from Wang et al. 2004)
+        C1 = (0.01 ** 2)
+        C2 = (0.03 ** 2)
+        mu1 = real_t.mean()
+        mu2 = pred_t.mean()
+        mu1_sq = mu1 ** 2
+        mu2_sq = mu2 ** 2
+        mu1_mu2 = mu1 * mu2
+        sigma1_sq = float(torch.mean((real_t - mu1) ** 2).item())
+        sigma2_sq = float(torch.mean((pred_t - mu2) ** 2).item())
+        sigma12 = float(torch.mean((real_t - mu1) * (pred_t - mu2)).item())
+        mu1_val = float(mu1)
+        mu2_val = float(mu2)
+        ssim_val = (
+            (2 * mu1_val * mu2_val + C1) * (2 * sigma12 + C2)
+            / ((float(mu1_sq) + float(mu2_sq) + C1) * (sigma1_sq + sigma2_sq + C2))
+        )
+        ssim_per_step.append(ssim_val)
+
+    return {
+        "mean_mse": float(np.mean(mse_per_step)),
+        "ssim": float(np.mean(ssim_per_step)),
+        "mse_per_step": mse_per_step,
+    }
 
 
 def save_side_by_side_hallucination_video(

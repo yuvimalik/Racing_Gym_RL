@@ -1,0 +1,82 @@
+# W&B Bayesian Hyperparameter Sweep for RSSM World Model
+#
+# How W&B Bayesian sweeps work:
+#   1. The sweep controller starts by trying a few random configurations.
+#   2. It builds a Gaussian process model of the hyperparameter→metric landscape.
+#   3. It picks the next configuration to try by maximising "expected improvement"
+#      — it explores where uncertainty is high AND exploits where performance was good.
+#   4. Each agent (one per GPU/node) pulls a new config from the controller, runs
+#      the training script, logs metrics to W&B, then pulls another config.
+#
+# This is far more efficient than grid search (exponential combinations) or
+# random search (no memory of past results).
+#
+# Launch instructions:
+#   # 1. Create the sweep:
+#   wandb sweep sweeps/rssm_sweep.yaml
+#   # This prints a sweep ID like "username/racing-world-model/abc12345"
+#
+#   # 2. Start agents on each H100 node (each pulls configs from the controller):
+#   wandb agent username/racing-world-model/abc12345
+#
+#   # Or using the launch script (sets up DDP then hands off to wandb agent):
+#   WANDB_SWEEP_ID=abc12345 bash scripts/launch_sweep_agent.sh
+#
+# Target: 30+ runs over 2 days. View results at wandb.ai → project → sweeps.
+# Use the parallel coordinates plot to identify which hyperparameters drive SSIM.
+
+program: world_model_train.py
+method: bayes
+metric:
+  name: val/hallucination_ssim   # maximise SSIM on hallucinated frames
+  goal: maximize
+
+early_terminate:
+  type: hyperband
+  min_iter: 5          # don't kill runs before epoch 5 (too noisy early)
+  eta: 2               # halving schedule aggressiveness
+
+parameters:
+  # --- KL regularisation ---
+  # kl_scale: weight on the KL(posterior || prior) term.
+  # Too high → posterior collapses to prior (model ignores observations).
+  # Too low → posterior overfits, no generalisation.
+  free_nats_start:
+    values: [0.5, 1.0, 2.0]       # starting free_nats for KL annealing
+  free_nats_target:
+    values: [0.1, 0.3, 0.5]       # target after warmup
+  free_nats_warmup:
+    values: [5, 10, 15]           # epochs to anneal
+
+  # --- Architecture ---
+  # hidden_dim: GRU memory size. Bigger = more temporal context for turns.
+  # stochastic_dim: latent z_t dimensionality. More = richer uncertainty.
+  # These are passed via config overrides (see command section below).
+
+  # We pass these as CLI config-override args to world_model_train.py.
+  # The sweep agent sets these as environment variables that the script reads.
+  # Since world_model_train.py reads from YAML, we use --run-name to encode
+  # the config and rely on the wandb config logged at init time for bookkeeping.
+  # For architecture variants, run separate sweeps with different base configs.
+
+  # --- Training ---
+  epochs:
+    value: 15            # fixed — enough to see convergence signal
+
+command:
+  - ${env}               # pass environment variables set by wandb agent
+  - python
+  - ${program}
+  - --config
+  - config/world_model_h100.yaml
+  - --wandb-project
+  - racing-world-model
+  - --free-nats-start
+  - ${free_nats_start}
+  - --free-nats-target
+  - ${free_nats_target}
+  - --free-nats-warmup
+  - ${free_nats_warmup}
+  - --epochs
+  - ${epochs}
+  - ${args}

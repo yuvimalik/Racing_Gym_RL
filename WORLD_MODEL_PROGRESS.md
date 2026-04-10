@@ -1,246 +1,252 @@
 # World Model Progress
 
+## Sprint Framing
+
+### Macro Question
+
+Can a learned world model provide a more holistic representation of racing than direct PPO control, by capturing track geometry, dynamics, and rollout structure in a reusable latent state rather than only optimizing immediate driving behavior?
+
+### Micro Question
+
+Does increasing replay diversity and training horizon improve the world model's ability to preserve track geometry through turns over longer imagined rollouts, with the architecture held fixed?
+
+### Fixed-Architecture Rule
+
+For the final sprint:
+- keep the RSSM architecture fixed
+- do not change encoder, decoder, latent heads, or control architecture
+- treat data diversity and temporal training horizon as the two active levers
+- do not spend time on latent-control headline results until the `E1 -> E3` ladder is complete
+
 ## Current State
 
-The repository now has a working offline Recurrent State Space Model pipeline for the racing simulator.
+The repository now has a working offline Recurrent State Space Model pipeline for the racing simulator, plus the core infrastructure needed to scale the final sprint.
 
 Implemented:
-- autoencoder sanity check for the vision stack
-- replay collection for manual and automatic world-model data
-- replay manifest preparation for train/validation splits
+- PPO replay collection for world-model data
+- replay manifest preparation and loading
 - RSSM training with:
   - encoder
   - GRU sequence model
   - prior and posterior latent heads
   - reward predictor
   - decoder
+- LayerNorm after GRU steps for long-horizon stability
+- W&B logging, KL annealing flags, and distributed training hooks
+- Prime Intellect / H100 training configs and launcher
 - checkpoint saving and hallucination video generation
-- local GPU optimizations for the RTX 4070 Laptop GPU
+- side-by-side demo video generation
+- latent-space visualization
 - frozen-world-model latent actor-critic baseline
-- real-environment actor evaluation from RSSM latent state
 
-## What Is Working
-
-Current hallucination quality is meaningful:
+Current qualitative status:
 - straight-line rollouts are broadly coherent
 - the ego car is consistently preserved
 - grass and road corridor separation is usually preserved
-- the bottom HUD-like structure is often reconstructed
-- turns are partially learned and usually move in the correct broad direction
+- turns are partially learned but still degrade too early
+- long-horizon road-shape persistence is the main open weakness
 
-This means the model is no longer failing at basic world representation. The current weakness is turn consistency and long-horizon road-shape persistence.
+## Dataset Ledger
 
-## Recent Improvements
+### D1: PPO 300k, CCW + CW
 
-Recent training/runtime improvements:
-- unique run-specific output directories for checkpoints and hallucinations
-- epoch-by-epoch checkpoint saving
-- epoch-by-epoch hallucination saving
-- CUDA AMP enabled
-- pinned-memory and worker-based DataLoader path
-- non-blocking CUDA transfers
-- batch size increased to `16`
-- replay `window_stride` increased to `4`
-- curated multi-clip hallucination evaluation
-- frozen RSSM wrapper for latent control
-- latent actor and critic training entry point: `world_model_train_control.py`
+- dataset_id: `D1_ppo300k_ccw_cw`
+- source checkpoint: `models/ppo_racecar_300000_steps.zip`
+- collection command:
 
-These changes reduced iteration cost while giving the RSSM longer temporal context for corners.
-
-## Key Code Files
-
-Core world-model architecture:
-- `world_model/models.py`
-  - RSSM state dataclasses
-  - encoder / decoder
-  - deterministic GRU transition model
-  - stochastic prior and posterior heads
-  - reward predictor
-  - `RSSMCell` and `RSSMSequence`
-
-Offline world-model training:
-- `world_model/training.py`
-  - replay loader construction
-  - RSSM training epoch
-  - hallucination rollout and video saving
-  - curated side-by-side validation clips
-- `world_model_train.py`
-  - top-level offline RSSM training entry point
-  - run directories, checkpointing, timing, hallucination artifacts
-
-Replay collection and dataset preparation:
-- `world_model/collector.py`
-  - automatic replay collection
-  - environment interaction and episode serialization helpers
-- `world_model_collect_manual.py`
-  - manual keyboard collection entry point
-- `world_model_collect_replay.py`
-  - automatic collection entry point
-- `world_model_prepare_dataset.py`
-  - manifest preparation for train/validation splits
-- `world_model/replay.py`
-  - `EpisodeReplay`
-  - `ReplayWriter`
-  - `SequenceReplayDataset`
-
-Latent-control stack:
-- `world_model/control.py`
-  - frozen RSSM wrapper
-  - latent-state flattening
-  - actor and critic heads
-  - imagined latent rollout helper
-- `world_model/control_training.py`
-  - imagined actor-critic training epoch
-  - discounted bootstrapped return targets
-  - real-environment actor evaluation
-- `world_model_train_control.py`
-  - top-level latent-control training entry point
-  - checkpointing and evaluation metric saving
-
-Configuration and tests:
-- `config/world_model_config.yaml`
-  - RSSM architecture
-  - offline training
-  - curated evaluation clips
-  - latent-control hyperparameters
-- `tests/test_world_model.py`
-  - RSSM shape tests
-  - replay and video smoke tests
-  - frozen-control interface and gradient-path tests
-
-## Architecture Breakdown
-
-### 1. Offline World Model
-
-The world model is an RSSM with two latent parts:
-- deterministic state `h_t`
-- stochastic state `z_t`
-
-The per-step training path is:
-
-```text
-previous latent state + previous action
-    -> SequenceModel (GRU)
-    -> deterministic state h_t
-    -> DynamicsModel
-    -> prior p(z_t | h_t)
-
-current image x_t
-    -> Encoder
-    -> image embedding e_t
-
-h_t + e_t
-    -> PosteriorModel
-    -> posterior q(z_t | h_t, x_t)
-    -> sample z_t
-
-[h_t, z_t]
-    -> RewardPredictor -> immediate reward
-    -> Decoder -> reconstructed image
+```bash
+python world_model_collect_replay.py \
+  --policy_checkpoint models/ppo_racecar_300000_steps.zip \
+  --train_frames 5000 --val_frames 1000 --directions CCW CW
 ```
 
-The training losses are:
-- reconstruction loss on decoded images
-- reward prediction loss
-- KL loss between posterior and prior with free bits
+- status: collected
+- purpose: first PPO-driven diverse replay baseline for the sprint
+- expected manifests:
+  - `results/world_model/replay/ppo_ppo_racecar_300000_steps_ccw_train_manifest.json`
+  - `results/world_model/replay/ppo_ppo_racecar_300000_steps_cw_train_manifest.json`
+  - `results/world_model/replay/ppo_ppo_racecar_300000_steps_ccw_val_manifest.json`
+  - `results/world_model/replay/ppo_ppo_racecar_300000_steps_cw_val_manifest.json`
+- quality notes:
+  - confirm both directions are present
+  - inspect summary stats with `scripts/manage_world_model_dataset.py summarize ...`
+  - visually inspect several episodes for turns, recoveries, and non-repetitive trajectories
 
-### 2. Hallucination / Validation Path
+### D2: Complementary PPO / torch policy dataset
 
-Curated validation clips are split into:
-- context frames: real observations used to infer latent state
-- future frames: imagined rollout horizon
+- dataset_id: `D2_complementary_policy`
+- preferred source checkpoint: `models/v2_progress/best_model_torch.pt`
+- fallback 1: `models/ppo_racecar_500000_steps.zip`
+- fallback 2: `models/ppo_racecar_400000_steps.zip`
+- status: pending collection
+- purpose: add cleaner or behaviorally different driving traces so the replay mix is not dominated by one policy regime
+- target scale:
+  - train: enough to bring the merged train set into the `12k -> 18k` frame range
+  - val: enough to bring the merged val set into the `2k -> 3k` frame range
 
-The hallucination path is:
+### D3: Merged diverse sprint dataset
 
-```text
-real context frames
-    -> observe_step(...)
-    -> posterior-updated latent state
+- dataset_id: `D3_diverse`
+- definition: `D1 + D2`
+- status: pending merge and validation
+- purpose: shared training dataset for `E2` and `E3`
+- manifests to create:
+  - `results/world_model/replay/d3_diverse_train_manifest.json`
+  - `results/world_model/replay/d3_diverse_val_manifest.json`
 
-then no more images
-    -> imagine_step(...)
-    -> prior-only latent rollout
-    -> decoded imagined future frames
+### Dataset Validation Checklist
+
+Before training on any dataset:
+- confirm manifests load cleanly
+- confirm both `CCW` and `CW` are represented
+- inspect summary stats:
+  - mean episode reward
+  - mean progress
+  - offtrack rate
+  - average episode length
+- visually inspect several episodes for:
+  - turns
+  - recoveries
+  - non-repetitive trajectories
+
+Useful command:
+
+```bash
+python scripts/manage_world_model_dataset.py summarize <manifest paths...>
 ```
 
-Current side-by-side evaluation compares:
-- real future on the left
-- imagined future on the right
+## Experiment Ladder
 
-### 3. Frozen-World-Model Latent Control
+### E1: Baseline Narrow
 
-The control phase freezes RSSM weights and treats the world model as a differentiable simulator.
+- run_name: `E1_baseline_narrow`
+- config: `config/world_model_h100_e1_baseline.yaml`
+- dataset: current baseline-style narrow manifest pair
+- sequence length: `50`
+- epochs: `20`
+- status: pending
+- purpose: anchor the pre-diversity result
+- decision criterion:
+  - establish turn-fidelity baseline on the curated clips
 
-The control loop is:
+### E2: Diverse Data
 
-```text
-real replay context
-    -> frozen RSSM posterior update
-    -> initial latent state
+- run_name: `E2_diverse_data`
+- config: `config/world_model_h100_e2_diverse.yaml`
+- dataset: `D3_diverse`
+- sequence length: `50`
+- epochs: `20`
+- status: pending
+- purpose: isolate the effect of replay diversity
+- decision criterion:
+  - improved turn clips and slower degradation relative to `E1`
 
-flatten [h_t, z_t]
-    -> Actor -> action
-    -> frozen RSSM imagine_step
-    -> next latent state + predicted immediate reward
+### E3: Diverse Data Plus Horizon
 
-flatten [h_t, z_t]
-    -> Critic -> value estimate
+- run_name: `E3_diverse_plus_horizon`
+- config: `config/world_model_h100_e3_diverse_horizon.yaml`
+- dataset: `D3_diverse`
+- sequence length: `100`
+- epochs: `20`
+- status: pending
+- purpose: isolate the effect of longer temporal training after data expansion
+- decision criterion:
+  - materially longer stable rollout depth than `E2`
+
+### Experiment Rules
+
+- `E1 -> E2` isolates replay diversity
+- `E2 -> E3` isolates temporal horizon
+- `E1 -> E3` is the headline comparison
+- do not run the sweep before `E1`, `E2`, and `E3` are complete
+- do not use latent-control transfer as the headline for this sprint
+
+### Training Commands
+
+Baseline narrow:
+
+```bash
+bash scripts/launch_h100.sh \
+  --config config/world_model_h100_e1_baseline.yaml \
+  --run-name E1_baseline_narrow \
+  --epochs 20
 ```
 
-Important separation:
-- world model predicts observation dynamics and immediate reward
-- actor chooses actions in latent space
-- critic predicts long-horizon return from latent state
+Diverse data:
 
-### 4. Real-Environment Actor Evaluation
-
-The actor is not only trained in imagination. It is also evaluated online in the actual simulator:
-
-```text
-reset env
-    -> observe real image with frozen RSSM
-    -> actor chooses action from latent state
-    -> env.step(action)
-    -> observe next real image
-    -> repeat
+```bash
+bash scripts/launch_h100.sh \
+  --config config/world_model_h100_e2_diverse.yaml \
+  --train-manifest results/world_model/replay/d3_diverse_train_manifest.json \
+  --val-manifest results/world_model/replay/d3_diverse_val_manifest.json \
+  --run-name E2_diverse_data \
+  --epochs 20
 ```
 
-Reported metrics:
-- mean reward
-- mean progress
-- off-track rate
+Diverse data plus horizon:
 
-## Current Baseline Interpretation
+```bash
+bash scripts/launch_h100.sh \
+  --config config/world_model_h100_e3_diverse_horizon.yaml \
+  --train-manifest results/world_model/replay/d3_diverse_train_manifest.json \
+  --val-manifest results/world_model/replay/d3_diverse_val_manifest.json \
+  --run-name E3_diverse_plus_horizon \
+  --epochs 20
+```
 
-The world model is now good enough to be judged on targeted failure modes rather than on whether it works at all.
+## Evaluation Bundle
 
-Strong points:
-- stable ego-car rendering
-- stable broad road geometry
-- coherent short-horizon scene evolution
+Run the same evaluation bundle after each experiment:
 
-Weak points:
-- corner geometry is still patchy in some clips
-- turn consistency degrades deeper into imagined rollout
-- visual sharpness remains low, especially at longer horizons
+- hallucination SSIM
+- hallucination MSE
+- per-step rollout degradation curve
+- curated clip metrics for:
+  - `sharp_turn`
+  - `gentle_turn`
+  - `recovery`
 
-## Tangible Next Steps
+Interpretation rule:
+- the sprint only counts as successful if the best run shows materially improved turn geometry and longer stable rollout depth on the same curated clips
+- lower training loss alone does not count as success
 
-1. Train the first frozen-world-model latent actor-critic baseline.
-2. Measure real-environment transfer with:
-   - mean reward
-   - mean progress
-   - off-track rate
-3. Keep the curated hallucination clips as a regression gate on the frozen RSSM.
-4. If latent control improves in imagination but transfers poorly, revisit world-model fidelity in the failing turn regimes.
-5. If transfer is acceptable, expand the latent-control loop before revisiting RSSM capacity.
+## Presentation Assets
 
-## What Success Looks Like Next
+Required primary assets:
+- baseline vs best side-by-side rollout video
+- rollout-quality-vs-step figure
+- latent visualization figure
 
-The next meaningful improvement should be:
-- more consistent road curvature in turns
-- less abrupt change of turn direction
-- longer persistence of road edges after context ends
-- more stable geometry across multiple validation clips
+Final chosen artifacts:
+- comparison video: pending
+- rollout curve: pending
+- latent figure: pending
 
-At this stage, success is not photorealism. Success is a more reliable and geometrically consistent rollout.
+## Concrete Next Steps
+
+1. Register `D1` summaries in this file after validating the collected manifests.
+2. Collect `D2` from `models/v2_progress/best_model_torch.pt` if loading works cleanly, else fall back to `ppo_racecar_500000_steps.zip`.
+3. Merge `D1` and `D2` into `D3_diverse` with `scripts/manage_world_model_dataset.py merge`.
+4. Validate `D3_diverse` with the dataset summary tool and visual inspection.
+5. Launch `E1`.
+6. Launch `E2`.
+7. Launch `E3`.
+8. Record metrics and artifact choices here after each run.
+
+## Implementation Notes
+
+Important repo state:
+- `PerceptualLoss` exists in `world_model/losses.py`, but it is not yet wired into the active training loop in `world_model/training.py`
+- do not base the sprint narrative on perceptual-loss results until that integration is complete and tested
+- `world_model_train.py` now supports explicit `--train-manifest` and `--val-manifest` overrides for sprint datasets
+- `scripts/manage_world_model_dataset.py` is the canonical utility for dataset summarization and merged manifest creation
+
+## Success Definition
+
+The final sprint succeeds if:
+- `D1`, `D2`, and `D3_diverse` are real, validated datasets
+- the `E1 -> E3` run ladder is completed
+- the best run clearly improves fixed-architecture world-model fidelity through:
+  - more diverse replay data
+  - longer temporal training
+- the presentation can show one clean causal story rather than multiple scattered claims
