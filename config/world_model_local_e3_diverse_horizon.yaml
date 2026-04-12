@@ -48,6 +48,13 @@ offline_training:
   free_nats: 1.0
   kl_scale: 1.0
   reward_scale: 1.0
+  telemetry_loss_scale: 0.25
+  telemetry_weights:
+    speed: 1.0
+    progress_delta: 1.0
+    steer: 0.5
+    corner_angle: 0.5
+    offtrack: 2.0
   hallucination_context: 50
   hallucination_horizon: 150
   hallucination_video_fps: 8.0

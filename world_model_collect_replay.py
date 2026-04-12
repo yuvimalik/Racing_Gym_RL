@@ -46,6 +46,8 @@ def _run_automatic(config: dict, args: argparse.Namespace) -> None:
                     },
                 }
                 split = f"{regime_name}_{direction.lower()}_{split_name}"
+                if args.split_prefix:
+                    split = f"{args.split_prefix}_{split}"
                 result = collect_automatic_maneuver_dataset(
                     base_config_path=config["base_config_path"],
                     output_dir=output_dir,
@@ -93,6 +95,8 @@ def _run_ppo_policy(config: dict, args: argparse.Namespace) -> None:
                 continue
 
             split = f"ppo_{Path(args.policy_checkpoint).stem}_{direction.lower()}_{split_name}"
+            if args.split_prefix:
+                split = f"{args.split_prefix}_{split}"
             overrides = {
                 "environment": {
                     "direction": direction,
@@ -189,6 +193,11 @@ def main() -> None:
         default="cpu",
         help="Device for policy inference: 'cpu' or 'cuda'. "
              "CPU is usually fine since collection is env-bound, not compute-bound.",
+    )
+    parser.add_argument(
+        "--split-prefix",
+        default=None,
+        help="Optional prefix for output split and manifest names, e.g. d4pilot or d4main.",
     )
     args = parser.parse_args()
 

@@ -71,6 +71,20 @@ def reward_loss(predicted_reward: torch.Tensor, target_reward: torch.Tensor) -> 
     return F.mse_loss(predicted_reward, target_reward)
 
 
+def masked_mse_loss(prediction: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    squared_error = (prediction - target) ** 2
+    weighted_error = squared_error * mask
+    normalizer = torch.clamp(mask.sum(), min=1.0)
+    return weighted_error.sum() / normalizer
+
+
+def masked_bce_with_logits_loss(logits: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    raw_loss = F.binary_cross_entropy_with_logits(logits, target, reduction="none")
+    weighted_loss = raw_loss * mask
+    normalizer = torch.clamp(mask.sum(), min=1.0)
+    return weighted_loss.sum() / normalizer
+
+
 def free_bits_kl(
     posterior_mean: torch.Tensor,
     posterior_std: torch.Tensor,

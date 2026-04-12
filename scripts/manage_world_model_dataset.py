@@ -41,8 +41,22 @@ def _episode_summary(episode_paths: list[Path]) -> dict[str, object]:
         metadata = dict(episode.metadata)
         frame_counts.append(int(episode.observations_uint8.shape[0]))
         reward_means.append(float(np.sum(episode.rewards)))
-        progress_means.append(float(metadata.get("final_progress", metadata.get("progress", 0.0))))
-        offtrack_flags.append(int(bool(metadata.get("offtrack_seen", metadata.get("offtrack", False)))))
+        telemetry_valid = np.asarray(episode.telemetry_valid, dtype=np.float32)
+        if telemetry_valid.size > 0 and float(np.max(telemetry_valid)) > 0.0:
+            valid_mask = telemetry_valid > 0.5
+            progress_series = np.asarray(episode.progress, dtype=np.float32)
+            offtrack_series = np.asarray(episode.offtrack, dtype=np.float32)
+            if progress_series.shape[0] == valid_mask.shape[0] and np.any(valid_mask):
+                progress_means.append(float(progress_series[valid_mask][-1]))
+            else:
+                progress_means.append(float(progress_series[-1]) if progress_series.size else 0.0)
+            if offtrack_series.shape[0] == valid_mask.shape[0] and np.any(valid_mask):
+                offtrack_flags.append(int(float(np.max(offtrack_series[valid_mask])) > 0.5))
+            else:
+                offtrack_flags.append(int(float(np.max(offtrack_series)) > 0.5) if offtrack_series.size else 0)
+        else:
+            progress_means.append(float(metadata.get("final_progress", metadata.get("progress", 0.0))))
+            offtrack_flags.append(int(bool(metadata.get("offtrack_seen", metadata.get("offtrack", False)))))
         directions[str(metadata.get("direction", "UNKNOWN")).upper()] += 1
         sources[str(metadata.get("collection_source", "unknown"))] += 1
 

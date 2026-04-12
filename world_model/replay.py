@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -20,7 +20,15 @@ class EpisodeReplay:
     action_mean_raw: np.ndarray
     action_noisy_raw: np.ndarray
     noise: np.ndarray
-    metadata: dict[str, Any]
+    progress: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.float32))
+    progress_delta: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.float32))
+    speed: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.float32))
+    steer: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.float32))
+    corner_angle: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.float32))
+    offtrack: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.float32))
+    track_index: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.int32))
+    telemetry_valid: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.bool_))
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 class ReplayWriter:
@@ -33,6 +41,13 @@ class ReplayWriter:
 
     def save_episode(self, episode: EpisodeReplay, episode_id: int) -> Path:
         path = self.split_dir / f"episode_{episode_id:06d}.npz"
+        num_steps = int(episode.observations_uint8.shape[0])
+
+        def _ensure_length(array: np.ndarray, dtype: np.dtype, default_value: float | int) -> np.ndarray:
+            if int(array.shape[0]) == num_steps:
+                return array.astype(dtype)
+            return np.full(num_steps, default_value, dtype=dtype)
+
         np.savez_compressed(
             path,
             observations_uint8=episode.observations_uint8.astype(np.uint8),
@@ -43,6 +58,14 @@ class ReplayWriter:
             action_mean_raw=episode.action_mean_raw.astype(np.float32),
             action_noisy_raw=episode.action_noisy_raw.astype(np.float32),
             noise=episode.noise.astype(np.float32),
+            progress=_ensure_length(episode.progress, np.float32, 0.0),
+            progress_delta=_ensure_length(episode.progress_delta, np.float32, 0.0),
+            speed=_ensure_length(episode.speed, np.float32, 0.0),
+            steer=_ensure_length(episode.steer, np.float32, 0.0),
+            corner_angle=_ensure_length(episode.corner_angle, np.float32, 0.0),
+            offtrack=_ensure_length(episode.offtrack, np.float32, 0.0),
+            track_index=_ensure_length(episode.track_index, np.int32, -1),
+            telemetry_valid=_ensure_length(episode.telemetry_valid, np.bool_, 0),
             metadata_json=np.asarray(json.dumps(episode.metadata), dtype=np.unicode_),
         )
         return path
@@ -50,6 +73,13 @@ class ReplayWriter:
     @staticmethod
     def load_episode(path: str | Path) -> EpisodeReplay:
         with np.load(Path(path), allow_pickle=False) as data:
+            num_steps = int(data["observations_uint8"].shape[0])
+
+            def _read_or_default(name: str, dtype: np.dtype, default_value: float | int) -> np.ndarray:
+                if name in data:
+                    return data[name].astype(dtype)
+                return np.full(num_steps, default_value, dtype=dtype)
+
             return EpisodeReplay(
                 observations_uint8=data["observations_uint8"],
                 actions=data["actions"],
@@ -59,6 +89,14 @@ class ReplayWriter:
                 action_mean_raw=data["action_mean_raw"],
                 action_noisy_raw=data["action_noisy_raw"],
                 noise=data["noise"],
+                progress=_read_or_default("progress", np.float32, 0.0),
+                progress_delta=_read_or_default("progress_delta", np.float32, 0.0),
+                speed=_read_or_default("speed", np.float32, 0.0),
+                steer=_read_or_default("steer", np.float32, 0.0),
+                corner_angle=_read_or_default("corner_angle", np.float32, 0.0),
+                offtrack=_read_or_default("offtrack", np.float32, 0.0),
+                track_index=_read_or_default("track_index", np.int32, -1),
+                telemetry_valid=_read_or_default("telemetry_valid", np.bool_, 0),
                 metadata=json.loads(str(data["metadata_json"])),
             )
 
@@ -101,6 +139,14 @@ class SequenceReplayDataset(Dataset):
         actions = torch.from_numpy(episode.actions[start_index:end_index]).float()
         rewards = torch.from_numpy(episode.rewards[start_index:end_index]).float().unsqueeze(-1)
         dones = torch.from_numpy(episode.dones[start_index:end_index].astype(np.float32))
+        progress = torch.from_numpy(episode.progress[start_index:end_index]).float().unsqueeze(-1)
+        progress_delta = torch.from_numpy(episode.progress_delta[start_index:end_index]).float().unsqueeze(-1)
+        speed = torch.from_numpy(episode.speed[start_index:end_index]).float().unsqueeze(-1)
+        steer = torch.from_numpy(episode.steer[start_index:end_index]).float().unsqueeze(-1)
+        corner_angle = torch.from_numpy(episode.corner_angle[start_index:end_index]).float().unsqueeze(-1)
+        offtrack = torch.from_numpy(episode.offtrack[start_index:end_index]).float().unsqueeze(-1)
+        track_index = torch.from_numpy(episode.track_index[start_index:end_index].astype(np.int64))
+        telemetry_valid = torch.from_numpy(episode.telemetry_valid[start_index:end_index].astype(np.float32)).unsqueeze(-1)
         is_first = torch.zeros(self.sequence_length, dtype=torch.bool)
         if start_index == 0:
             is_first[0] = True
@@ -110,5 +156,13 @@ class SequenceReplayDataset(Dataset):
             "actions": actions,
             "rewards": rewards,
             "dones": dones,
+            "progress": progress,
+            "progress_delta": progress_delta,
+            "speed": speed,
+            "steer": steer,
+            "corner_angle": corner_angle,
+            "offtrack": offtrack,
+            "track_index": track_index,
+            "telemetry_valid": telemetry_valid,
             "is_first": is_first,
         }

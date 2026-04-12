@@ -9,7 +9,13 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from world_model.losses import free_bits_kl, reconstruction_loss, reward_loss
+from world_model.losses import (
+    free_bits_kl,
+    masked_bce_with_logits_loss,
+    masked_mse_loss,
+    reconstruction_loss,
+    reward_loss,
+)
 from world_model.models import Decoder, Encoder, RSSMSequence
 from world_model.replay import ReplayWriter, SequenceReplayDataset
 
@@ -146,12 +152,26 @@ def train_world_model_epoch(
     grad_scaler: torch.amp.GradScaler | None = None,
     batch_log_every: int = 0,
     batch_logger: callable | None = None,
+    telemetry_loss_scale: float = 0.0,
+    telemetry_weights: dict[str, float] | None = None,
 ) -> dict[str, float]:
     device = torch.device(device)
     device_type = "cuda" if device.type == "cuda" else "cpu"
     non_blocking = device.type == "cuda"
     model.train()
-    totals = {"recon_loss": 0.0, "reward_loss": 0.0, "kl_loss": 0.0, "total_loss": 0.0}
+    telemetry_weights = telemetry_weights or {}
+    totals = {
+        "recon_loss": 0.0,
+        "reward_loss": 0.0,
+        "kl_loss": 0.0,
+        "telemetry_loss": 0.0,
+        "speed_loss": 0.0,
+        "progress_delta_loss": 0.0,
+        "steer_loss": 0.0,
+        "corner_angle_loss": 0.0,
+        "offtrack_loss": 0.0,
+        "total_loss": 0.0,
+    }
     num_batches = 0
 
     for batch_index, batch in enumerate(loader, start=1):
@@ -159,6 +179,12 @@ def train_world_model_epoch(
         actions = batch["actions"].to(device, non_blocking=non_blocking)
         rewards = batch["rewards"].to(device, non_blocking=non_blocking)
         is_first = batch["is_first"].to(device, non_blocking=non_blocking)
+        progress_delta = batch["progress_delta"].to(device, non_blocking=non_blocking)
+        speed = batch["speed"].to(device, non_blocking=non_blocking)
+        steer = batch["steer"].to(device, non_blocking=non_blocking)
+        corner_angle = batch["corner_angle"].to(device, non_blocking=non_blocking)
+        offtrack = batch["offtrack"].to(device, non_blocking=non_blocking)
+        telemetry_valid = batch["telemetry_valid"].to(device, non_blocking=non_blocking)
 
         optimizer.zero_grad(set_to_none=True)
         with torch.autocast(device_type=device_type, dtype=torch.float16, enabled=bool(use_amp and device.type == "cuda")):
@@ -172,7 +198,28 @@ def train_world_model_epoch(
                 prior_std=output.prior_std,
                 free_nats=free_nats,
             )
-            total = recon + (reward_scale * rew) + (kl_scale * kl)
+            if float(telemetry_loss_scale) > 0.0 and float(telemetry_valid.sum().item()) > 0.0:
+                speed_loss = masked_mse_loss(output.telemetry["speed"], speed, telemetry_valid)
+                progress_delta_loss = masked_mse_loss(output.telemetry["progress_delta"], progress_delta, telemetry_valid)
+                steer_loss = masked_mse_loss(output.telemetry["steer"], steer, telemetry_valid)
+                corner_angle_loss = masked_mse_loss(output.telemetry["corner_angle"], corner_angle, telemetry_valid)
+                offtrack_loss = masked_bce_with_logits_loss(output.telemetry["offtrack_logits"], offtrack, telemetry_valid)
+                telemetry_loss = (
+                    float(telemetry_weights.get("speed", 1.0)) * speed_loss
+                    + float(telemetry_weights.get("progress_delta", 1.0)) * progress_delta_loss
+                    + float(telemetry_weights.get("steer", 1.0)) * steer_loss
+                    + float(telemetry_weights.get("corner_angle", 1.0)) * corner_angle_loss
+                    + float(telemetry_weights.get("offtrack", 1.0)) * offtrack_loss
+                )
+            else:
+                zero = recon.new_tensor(0.0)
+                speed_loss = zero
+                progress_delta_loss = zero
+                steer_loss = zero
+                corner_angle_loss = zero
+                offtrack_loss = zero
+                telemetry_loss = zero
+            total = recon + (reward_scale * rew) + (kl_scale * kl) + (float(telemetry_loss_scale) * telemetry_loss)
 
         if grad_scaler is not None and bool(use_amp and device.type == "cuda"):
             grad_scaler.scale(total).backward()
@@ -185,6 +232,12 @@ def train_world_model_epoch(
         totals["recon_loss"] += float(recon.item())
         totals["reward_loss"] += float(rew.item())
         totals["kl_loss"] += float(kl.item())
+        totals["telemetry_loss"] += float(telemetry_loss.item())
+        totals["speed_loss"] += float(speed_loss.item())
+        totals["progress_delta_loss"] += float(progress_delta_loss.item())
+        totals["steer_loss"] += float(steer_loss.item())
+        totals["corner_angle_loss"] += float(corner_angle_loss.item())
+        totals["offtrack_loss"] += float(offtrack_loss.item())
         totals["total_loss"] += float(total.item())
         num_batches += 1
 
@@ -195,6 +248,7 @@ def train_world_model_epoch(
                 f"recon={recon.item():.6f} "
                 f"reward={rew.item():.6f} "
                 f"kl={kl.item():.6f} "
+                f"telemetry={telemetry_loss.item():.6f} "
                 f"total={total.item():.6f}",
                 flush=True,
             )
@@ -209,6 +263,12 @@ def train_world_model_epoch(
                     "batch/recon_loss": float(recon.item()),
                     "batch/reward_loss": float(rew.item()),
                     "batch/kl_loss": float(kl.item()),
+                    "batch/telemetry_loss": float(telemetry_loss.item()),
+                    "batch/speed_loss": float(speed_loss.item()),
+                    "batch/progress_delta_loss": float(progress_delta_loss.item()),
+                    "batch/steer_loss": float(steer_loss.item()),
+                    "batch/corner_angle_loss": float(corner_angle_loss.item()),
+                    "batch/offtrack_loss": float(offtrack_loss.item()),
                     "batch/total_loss": float(total.item()),
                     "batch/index": float(batch_index),
                     "batch/epoch_progress": float(batch_index / max(1, len(loader))),

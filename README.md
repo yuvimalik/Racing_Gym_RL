@@ -160,6 +160,7 @@ Current scope:
 - Recurrent State Space Model (RSSM)
 - frozen-world-model latent actor-critic baseline
 - replay-based imagined rollout training plus real-environment actor evaluation
+- telemetry-supervised continuation path for physics-aware latent modeling
 
 Implemented pieces:
 - vision encoder and decoder
@@ -173,6 +174,7 @@ Implemented pieces:
 - latent actor and critic MLP heads
 - imagined latent-rollout actor-critic training script
 - real-environment actor evaluation on top of the frozen RSSM
+- reward and physics-faithfulness evaluation on held-out replay
 
 Useful entry points:
 ```bash
@@ -180,6 +182,8 @@ python world_model_autoencoder.py --config config/world_model_config.yaml
 python world_model_prepare_dataset.py --config config/world_model_config.yaml
 python world_model_train.py --config config/world_model_config.yaml --epochs 10
 python world_model_train_control.py --config config/world_model_config.yaml --epochs 10
+python scripts/evaluate_reward_faithfulness.py --config config/world_model_config.yaml --manifest results/world_model/replay/d4_pilot_val_manifest.json --world-model-checkpoint models/world_model/rssm_sequence.pt
+python world_model_collect_replay.py --config config/world_model_config.yaml --split-prefix d4pilot
 ```
 
 Current qualitative status:
@@ -187,10 +191,14 @@ Current qualitative status:
 - car, grass, road corridor, and bottom HUD-like structure are usually preserved
 - corner consistency is the main current weakness
 - latent-control training now assumes the RSSM is frozen and uses it as a differentiable simulator
+- `E3` improved geometry persistence over `E2`, but the dominant remaining failure mode is world/ego inconsistency
+- the actor-critic diagnostic showed that imagined short-horizon optimization can look healthy while still failing to transfer in the real environment
+- the next phase focuses on telemetry-supervised physics modeling rather than blindly scaling the same objective
 
 Current training defaults for the local RTX 4070 Laptop GPU:
 - world-model training uses replay windowing, CUDA AMP, and worker-based loading
 - latent-control training uses a short real context plus imagined rollouts from the frozen RSSM
+- telemetry-supervised world-model training adds auxiliary heads for speed, progress delta, steer, corner angle, and offtrack probability
 
 Artifacts:
 - checkpoints: `models/world_model/<run_name>/`
@@ -200,6 +208,7 @@ Artifacts:
 - latent-control checkpoints: `models/world_model_control/<run_name>/`
 - latest latent-control checkpoint: `models/world_model_control/latent_actor_critic.pt`
 - latent-control metrics: `results/world_model/control/<run_name>/`
+- physics-faithfulness summaries: `results/world_model/control/*.json`
 
 See `WORLD_MODEL_PROGRESS.md` for a concise progress log and next-step roadmap.
 

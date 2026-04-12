@@ -50,6 +50,11 @@ class WorldModelTests(unittest.TestCase):
         self.assertEqual(tuple(output.stochastic.shape), (2, 5, 32))
         self.assertEqual(tuple(output.reward.shape), (2, 5, 1))
         self.assertEqual(tuple(output.reconstruction.shape), (2, 5, 3, 96, 96))
+        self.assertEqual(tuple(output.telemetry["speed"].shape), (2, 5, 1))
+        self.assertEqual(tuple(output.telemetry["progress_delta"].shape), (2, 5, 1))
+        self.assertEqual(tuple(output.telemetry["steer"].shape), (2, 5, 1))
+        self.assertEqual(tuple(output.telemetry["corner_angle"].shape), (2, 5, 1))
+        self.assertEqual(tuple(output.telemetry["offtrack_logits"].shape), (2, 5, 1))
 
     def test_replay_writer_round_trip(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -69,6 +74,8 @@ class WorldModelTests(unittest.TestCase):
             loaded = ReplayWriter.load_episode(saved)
             self.assertEqual(loaded.metadata["episode_id"], 7)
             self.assertEqual(tuple(loaded.observations_uint8.shape), (12, 96, 96, 3))
+            self.assertEqual(tuple(loaded.progress.shape), (12,))
+            self.assertEqual(tuple(loaded.telemetry_valid.shape), (12,))
 
     def test_sequence_dataset_windows_do_not_cross_episodes(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -94,6 +101,8 @@ class WorldModelTests(unittest.TestCase):
             sample = dataset[0]
             self.assertEqual(tuple(sample["images"].shape), (50, 3, 96, 96))
             self.assertEqual(tuple(sample["actions"].shape), (50, 3))
+            self.assertEqual(tuple(sample["speed"].shape), (50, 1))
+            self.assertEqual(tuple(sample["offtrack"].shape), (50, 1))
             self.assertTrue(bool(sample["is_first"][0].item()))
 
     def test_sequence_dataset_window_stride_reduces_index_count(self):
@@ -378,6 +387,9 @@ class WorldModelTests(unittest.TestCase):
         self.assertEqual(control["imagination_horizon"], 12)
         self.assertEqual(control["batch_size"], 32)
         self.assertEqual(control["eval_episodes"], 3)
+        offline = config["offline_training"]
+        self.assertEqual(float(offline["telemetry_loss_scale"]), 0.25)
+        self.assertEqual(float(offline["telemetry_weights"]["offtrack"]), 2.0)
         self.assertEqual(control["window_stride"], 4)
         self.assertTrue(control["pin_memory"])
         self.assertTrue(control["record_eval_video"])

@@ -29,6 +29,7 @@ class RSSMStepOutput:
     posterior: Optional[LatentStats]
     reward: torch.Tensor
     reconstruction: torch.Tensor
+    telemetry: dict[str, torch.Tensor]
 
 
 @dataclass
@@ -41,6 +42,7 @@ class RSSMSequenceOutput:
     posterior_std: torch.Tensor
     reward: torch.Tensor
     reconstruction: torch.Tensor
+    telemetry: dict[str, torch.Tensor]
 
 
 class Encoder(nn.Module):
@@ -184,6 +186,33 @@ class RewardPredictor(nn.Module):
         return self.network(torch.cat([deterministic, stochastic], dim=-1))
 
 
+class TelemetryPredictor(nn.Module):
+    def __init__(self, hidden_dim: int = 512, stochastic_dim: int = 32):
+        super().__init__()
+        input_dim = hidden_dim + stochastic_dim
+        self.trunk = nn.Sequential(
+            nn.Linear(input_dim, 512),
+            nn.SiLU(),
+            nn.Linear(512, 256),
+            nn.SiLU(),
+        )
+        self.speed_head = nn.Linear(256, 1)
+        self.progress_delta_head = nn.Linear(256, 1)
+        self.steer_head = nn.Linear(256, 1)
+        self.corner_angle_head = nn.Linear(256, 1)
+        self.offtrack_head = nn.Linear(256, 1)
+
+    def forward(self, deterministic: torch.Tensor, stochastic: torch.Tensor) -> dict[str, torch.Tensor]:
+        hidden = self.trunk(torch.cat([deterministic, stochastic], dim=-1))
+        return {
+            "speed": self.speed_head(hidden),
+            "progress_delta": self.progress_delta_head(hidden),
+            "steer": self.steer_head(hidden),
+            "corner_angle": self.corner_angle_head(hidden),
+            "offtrack_logits": self.offtrack_head(hidden),
+        }
+
+
 class RSSMCell(nn.Module):
     """Single-step observe and imagine logic."""
 
@@ -212,6 +241,7 @@ class RSSMCell(nn.Module):
             stochastic_dim=stochastic_dim,
         )
         self.reward_predictor = RewardPredictor(hidden_dim=hidden_dim, stochastic_dim=stochastic_dim)
+        self.telemetry_predictor = TelemetryPredictor(hidden_dim=hidden_dim, stochastic_dim=stochastic_dim)
         self.decoder = Decoder(input_dim=hidden_dim + stochastic_dim)
 
     def initial_state(self, batch_size: int, device: torch.device | str) -> RSSMState:
@@ -235,6 +265,7 @@ class RSSMCell(nn.Module):
         posterior = self._build_stats(*self.posterior_model(deterministic, embedding))
         stochastic = posterior.dist.rsample()
         reward = self.reward_predictor(deterministic, stochastic)
+        telemetry = self.telemetry_predictor(deterministic, stochastic)
         reconstruction = self._decode_latent(deterministic, stochastic)
         return RSSMStepOutput(
             state=RSSMState(deterministic=deterministic, stochastic=stochastic),
@@ -242,6 +273,7 @@ class RSSMCell(nn.Module):
             posterior=posterior,
             reward=reward,
             reconstruction=reconstruction,
+            telemetry=telemetry,
         )
 
     def imagine_step(self, prev_state: RSSMState, prev_action: torch.Tensor) -> RSSMStepOutput:
@@ -249,6 +281,7 @@ class RSSMCell(nn.Module):
         prior = self._build_stats(*self.dynamics_model(deterministic))
         stochastic = prior.dist.rsample()
         reward = self.reward_predictor(deterministic, stochastic)
+        telemetry = self.telemetry_predictor(deterministic, stochastic)
         reconstruction = self._decode_latent(deterministic, stochastic)
         return RSSMStepOutput(
             state=RSSMState(deterministic=deterministic, stochastic=stochastic),
@@ -256,6 +289,7 @@ class RSSMCell(nn.Module):
             posterior=None,
             reward=reward,
             reconstruction=reconstruction,
+            telemetry=telemetry,
         )
 
     def forward(self, prev_state: RSSMState, prev_action: torch.Tensor, image_t: torch.Tensor) -> RSSMStepOutput:
@@ -312,6 +346,13 @@ class RSSMSequence(nn.Module):
         post_stds = []
         rewards = []
         reconstructions = []
+        telemetry_steps = {
+            "speed": [],
+            "progress_delta": [],
+            "steer": [],
+            "corner_angle": [],
+            "offtrack_logits": [],
+        }
 
         for time_index in range(time_steps):
             if is_first is not None:
@@ -336,6 +377,8 @@ class RSSMSequence(nn.Module):
             post_stds.append(step.posterior.std)
             rewards.append(step.reward)
             reconstructions.append(step.reconstruction)
+            for key in telemetry_steps:
+                telemetry_steps[key].append(step.telemetry[key])
 
         return RSSMSequenceOutput(
             deterministic=torch.stack(deterministic_steps, dim=1),
@@ -346,4 +389,5 @@ class RSSMSequence(nn.Module):
             posterior_std=torch.stack(post_stds, dim=1),
             reward=torch.stack(rewards, dim=1),
             reconstruction=torch.stack(reconstructions, dim=1),
+            telemetry={key: torch.stack(values, dim=1) for key, values in telemetry_steps.items()},
         )

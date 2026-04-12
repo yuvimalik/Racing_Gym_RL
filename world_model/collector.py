@@ -13,6 +13,20 @@ from train import create_env, load_config
 from world_model.replay import EpisodeReplay, ReplayWriter
 
 
+def _extract_step_telemetry(info: dict[str, Any], action: np.ndarray, prev_progress: float) -> dict[str, float | int]:
+    progress = float(info.get("progress", prev_progress))
+    return {
+        "progress": progress,
+        "progress_delta": float(progress - prev_progress),
+        "speed": float(info.get("telemetry/speed", 0.0)),
+        "steer": float(info.get("telemetry/steer", float(action[0]) if action.size > 0 else 0.0)),
+        "corner_angle": float(info.get("telemetry/corner_angle", 0.0)),
+        "offtrack": float(int(info.get("events/offtrack", 0) > 0)),
+        "track_index": int(info.get("_track_index", -1)),
+        "telemetry_valid": 1.0,
+    }
+
+
 def _load_torch_policy(checkpoint_path: str | Path, policy_variant: str, obs_shape: tuple, action_dim: int, device: str = "cpu"):
     """Load a custom PyTorch PPO policy from a .pt checkpoint.
 
@@ -137,9 +151,20 @@ def collect_ppo_policy_dataset(
             rewards = []
             dones = []
             truncated = []
+            telemetry = {
+                "progress": [],
+                "progress_delta": [],
+                "speed": [],
+                "steer": [],
+                "corner_angle": [],
+                "offtrack": [],
+                "track_index": [],
+                "telemetry_valid": [],
+            }
             episode_reward = 0.0
             offtrack_seen = False
             info: dict = {}
+            prev_progress = 0.0
 
             while not done and frames_collected < target_frames:
                 if use_sb3:
@@ -162,6 +187,10 @@ def collect_ppo_policy_dataset(
                 rewards.append(float(reward))
                 dones.append(bool(done))
                 truncated.append(bool(info.get("TimeLimit.truncated", False)))
+                step_telemetry = _extract_step_telemetry(info, env_action, prev_progress)
+                prev_progress = float(step_telemetry["progress"])
+                for key, value in step_telemetry.items():
+                    telemetry[key].append(value)
                 episode_reward += float(reward)
                 if int(info.get("events/offtrack", 0)) > 0:
                     offtrack_seen = True
@@ -216,6 +245,7 @@ def collect_ppo_policy_dataset(
                     rewards=rewards,
                     dones=dones,
                     truncated=truncated,
+                    telemetry=telemetry,
                     metadata=metadata,
                 )
             )
@@ -431,6 +461,7 @@ def _finalize_episode(
     rewards: list[float],
     dones: list[bool],
     truncated: list[bool],
+    telemetry: dict[str, list[float | int]],
     metadata: dict[str, Any],
 ) -> Path:
     action_array = np.asarray(actions, dtype=np.float32)
@@ -444,6 +475,14 @@ def _finalize_episode(
         action_mean_raw=action_array.copy(),
         action_noisy_raw=action_array.copy(),
         noise=zero_noise,
+        progress=np.asarray(telemetry["progress"], dtype=np.float32),
+        progress_delta=np.asarray(telemetry["progress_delta"], dtype=np.float32),
+        speed=np.asarray(telemetry["speed"], dtype=np.float32),
+        steer=np.asarray(telemetry["steer"], dtype=np.float32),
+        corner_angle=np.asarray(telemetry["corner_angle"], dtype=np.float32),
+        offtrack=np.asarray(telemetry["offtrack"], dtype=np.float32),
+        track_index=np.asarray(telemetry["track_index"], dtype=np.int32),
+        telemetry_valid=np.asarray(telemetry["telemetry_valid"], dtype=np.bool_),
         metadata=metadata,
     )
     return writer.save_episode(episode=episode, episode_id=episode_id)
@@ -505,8 +544,19 @@ def collect_automatic_maneuver_dataset(
             rewards = []
             dones = []
             truncated = []
+            telemetry = {
+                "progress": [],
+                "progress_delta": [],
+                "speed": [],
+                "steer": [],
+                "corner_angle": [],
+                "offtrack": [],
+                "track_index": [],
+                "telemetry_valid": [],
+            }
             episode_reward = 0.0
             offtrack_seen = False
+            prev_progress = 0.0
 
             for action in maneuver.actions:
                 if done or frames_collected >= target_frames:
@@ -520,6 +570,10 @@ def collect_automatic_maneuver_dataset(
                 rewards.append(float(reward))
                 dones.append(bool(done))
                 truncated.append(bool(info.get("TimeLimit.truncated", False)))
+                step_telemetry = _extract_step_telemetry(info, env_action, prev_progress)
+                prev_progress = float(step_telemetry["progress"])
+                for key, value in step_telemetry.items():
+                    telemetry[key].append(value)
                 episode_reward += float(reward)
                 if int(info.get("events/offtrack", 0)) > 0:
                     offtrack_seen = True
@@ -570,6 +624,7 @@ def collect_automatic_maneuver_dataset(
                     rewards=rewards,
                     dones=dones,
                     truncated=truncated,
+                    telemetry=telemetry,
                     metadata=metadata,
                 )
             )
@@ -727,8 +782,19 @@ def collect_manual_keyboard_dataset(
             rewards = []
             dones = []
             truncated = []
+            telemetry = {
+                "progress": [],
+                "progress_delta": [],
+                "speed": [],
+                "steer": [],
+                "corner_angle": [],
+                "offtrack": [],
+                "track_index": [],
+                "telemetry_valid": [],
+            }
             episode_reward = 0.0
             offtrack_seen = False
+            prev_progress = 0.0
 
             while not done and frames_collected < target_frames and not quit_requested:
                 env_action = _clip_action(np.asarray([state.steer, state.throttle, state.brake], dtype=np.float32), action_low, action_high)
@@ -740,6 +806,10 @@ def collect_manual_keyboard_dataset(
                 rewards.append(float(reward))
                 dones.append(bool(done))
                 truncated.append(bool(info.get("TimeLimit.truncated", False)))
+                step_telemetry = _extract_step_telemetry(info, env_action, prev_progress)
+                prev_progress = float(step_telemetry["progress"])
+                for key, value in step_telemetry.items():
+                    telemetry[key].append(value)
                 episode_reward += float(reward)
                 if int(info.get("events/offtrack", 0)) > 0:
                     offtrack_seen = True
@@ -807,6 +877,7 @@ def collect_manual_keyboard_dataset(
                     rewards=rewards,
                     dones=dones,
                     truncated=truncated,
+                    telemetry=telemetry,
                     metadata=metadata,
                 )
             )

@@ -30,6 +30,13 @@ def main() -> None:
     parser.add_argument("--config", default="config/world_model_config.yaml")
     parser.add_argument("--train-manifest", default=None, help="Optional explicit train manifest path.")
     parser.add_argument("--val-manifest", default=None, help="Optional explicit val manifest path.")
+    parser.add_argument(
+        "--init-checkpoint",
+        default=None,
+        help="Optional checkpoint to initialize the RSSM from before training. "
+             "Loads model weights with strict=False so new telemetry heads can be added "
+             "on top of older checkpoints such as E3.",
+    )
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--log-every", type=int, default=100)
     parser.add_argument("--batch-log-every", type=int, default=100)
@@ -197,6 +204,18 @@ def main() -> None:
 
     model = RSSMSequence(**config["rssm"]).to(device)
 
+    if args.init_checkpoint is not None:
+        checkpoint_path = Path(args.init_checkpoint)
+        if not checkpoint_path.is_absolute():
+            checkpoint_path = Path.cwd() / checkpoint_path
+        checkpoint_payload = torch.load(checkpoint_path, map_location=device)
+        missing, unexpected = model.load_state_dict(checkpoint_payload["model_state_dict"], strict=False)
+        print(f"Initialized model from checkpoint: {checkpoint_path}")
+        if missing:
+            print(f"Missing checkpoint keys: {sorted(missing)}")
+        if unexpected:
+            print(f"Unexpected checkpoint keys: {sorted(unexpected)}")
+
     # DDP wrapping: each GPU trains an identical model, gradients are averaged across GPUs.
     # During inference (hallucination, metrics), we unwrap to the underlying module.
     if use_distributed:
@@ -282,6 +301,8 @@ def main() -> None:
             grad_scaler=grad_scaler,
             batch_log_every=int(args.batch_log_every),
             batch_logger=batch_logger,
+            telemetry_loss_scale=float(offline_cfg.get("telemetry_loss_scale", 0.0)),
+            telemetry_weights=dict(offline_cfg.get("telemetry_weights", {})),
         )
         epoch_duration = time.perf_counter() - epoch_start
         epoch_durations.append(epoch_duration)
@@ -316,6 +337,12 @@ def main() -> None:
                 "train/recon_loss": metrics["recon_loss"],
                 "train/reward_loss": metrics["reward_loss"],
                 "train/kl_loss": metrics["kl_loss"],
+                "train/telemetry_loss": metrics["telemetry_loss"],
+                "train/speed_loss": metrics["speed_loss"],
+                "train/progress_delta_loss": metrics["progress_delta_loss"],
+                "train/steer_loss": metrics["steer_loss"],
+                "train/corner_angle_loss": metrics["corner_angle_loss"],
+                "train/offtrack_loss": metrics["offtrack_loss"],
                 "train/total_loss": metrics["total_loss"],
                 "train/free_nats": free_nats_epoch,
                 "perf/epoch_time_s": epoch_duration,
