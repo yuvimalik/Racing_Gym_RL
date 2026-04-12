@@ -1917,8 +1917,6 @@ class RewardShapingWrapper(gym.Wrapper):
             "off_track_step_penalty": self.off_track_step_penalty,
             "corner_overspeed_penalty_scale": self.corner_overspeed_penalty_scale,
         }
-        if self.curriculum_enabled:
-            self._apply_curriculum_stage(self.curriculum_stage)
 
         marl_cfg = reward_config.get("multi_agent", {}) or {}
         self.multi_agent_enabled = bool(marl_cfg.get("enabled", True))
@@ -1955,6 +1953,53 @@ class RewardShapingWrapper(gym.Wrapper):
         )
         self.contact_terminal_penalty = float(marl_cfg.get("contact_terminal_penalty", 0.0))
         self.shared_collision_penalty = float(marl_cfg.get("shared_collision_penalty", 0.0))
+        self.front_gap_hard_distance = float(marl_cfg.get("front_gap_hard_distance", 2.5))
+        self.front_gap_soft_distance = float(
+            marl_cfg.get("front_gap_soft_distance", max(self.front_gap_hard_distance + 1.0, 5.0))
+        )
+        self.front_speed_penalty_scale = float(marl_cfg.get("front_speed_penalty_scale", 0.0))
+        self.front_throttle_penalty_scale = float(marl_cfg.get("front_throttle_penalty_scale", 0.0))
+        self.open_space_distance = float(
+            marl_cfg.get("open_space_distance", max(self.front_gap_soft_distance + 1.0, 7.0))
+        )
+        self.open_space_accel_scale = float(marl_cfg.get("open_space_accel_scale", 0.0))
+        self.side_gap_threshold = float(marl_cfg.get("side_gap_threshold", 2.8))
+        self.side_longitudinal_window = float(marl_cfg.get("side_longitudinal_window", 3.0))
+        self.side_clearance_penalty_scale = float(marl_cfg.get("side_clearance_penalty_scale", 0.0))
+        self.side_closing_penalty_scale = float(marl_cfg.get("side_closing_penalty_scale", 0.0))
+        self.relative_velocity_gate_front_strength = float(marl_cfg.get("relative_velocity_gate_front_strength", 0.85))
+        self.relative_velocity_gate_side_strength = float(marl_cfg.get("relative_velocity_gate_side_strength", 0.6))
+        self.relative_velocity_positive_requires_open_front = bool(
+            marl_cfg.get("relative_velocity_positive_requires_open_front", True)
+        )
+        self.collision_overlap_margin = float(marl_cfg.get("collision_overlap_margin", 0.35))
+        self.proximity_soft_penalty_scale = float(marl_cfg.get("proximity_soft_penalty_scale", 0.0))
+        self.proximity_soft_tangential_scale = float(marl_cfg.get("proximity_soft_tangential_scale", 0.0))
+        self.overtake_min_pairwise_distance = float(marl_cfg.get("overtake_min_pairwise_distance", 0.0))
+        self.overtake_spacing_soft_margin = float(marl_cfg.get("overtake_spacing_soft_margin", 2.0))
+        self.rank_unsafe_dampen_strength = float(marl_cfg.get("rank_unsafe_dampen_strength", 0.0))
+        self.contact_forward_dampening_scale = float(marl_cfg.get("contact_forward_dampening_scale", 0.0))
+        self.pre_hook_contact_steps = int(max(1, marl_cfg.get("pre_hook_contact_steps", 2)))
+        self.pre_hook_rel_speed_threshold = float(marl_cfg.get("pre_hook_rel_speed_threshold", 2.5))
+        self.pre_hook_penalty = float(marl_cfg.get("pre_hook_penalty", -3.0))
+        self.stick_penalty_per_step = float(marl_cfg.get("stick_penalty_per_step", 0.0))
+        self.stick_penalty_max_steps = int(max(1, marl_cfg.get("stick_penalty_max_steps", 10)))
+        self.collision_rub_penalty = float(marl_cfg.get("collision_rub_penalty", 0.0))
+        self.overlap_step_penalty = float(marl_cfg.get("overlap_step_penalty", 0.0))
+        self.overlap_step_penalty_max_steps = int(max(1, marl_cfg.get("overlap_step_penalty_max_steps", 20)))
+        self.overtake_requires_clean_contact = bool(marl_cfg.get("overtake_requires_clean_contact", False))
+        self.overtake_contact_dampen = float(np.clip(float(marl_cfg.get("overtake_contact_dampen", 1.0)), 0.0, 1.0))
+        self.rank_contact_dampen = float(np.clip(float(marl_cfg.get("rank_contact_dampen", 0.0)), 0.0, 1.0))
+
+        self._marl_stage2_defaults = {
+            "overtake_bonus": self.overtake_bonus,
+            "proximity_soft_penalty_scale": self.proximity_soft_penalty_scale,
+            "contact_terminate_steps": int(self.contact_terminate_steps),
+            "collision_rub_penalty": self.collision_rub_penalty,
+            "overlap_step_penalty": self.overlap_step_penalty,
+        }
+        if self.curriculum_enabled:
+            self._apply_curriculum_stage(self.curriculum_stage)
 
         self._training_mode = True
         self._track_xy = None
@@ -2088,6 +2133,16 @@ class RewardShapingWrapper(gym.Wrapper):
             self.corner_overspeed_penalty_scale = float(
                 self.curriculum.get("stage1_corner_overspeed_penalty_scale", 0.3)
             )
+            if "stage1_overtake_bonus" in self.curriculum:
+                self.overtake_bonus = float(self.curriculum["stage1_overtake_bonus"])
+            if "stage1_proximity_soft_penalty_scale" in self.curriculum:
+                self.proximity_soft_penalty_scale = float(self.curriculum["stage1_proximity_soft_penalty_scale"])
+            if "stage1_contact_terminate_steps" in self.curriculum:
+                self.contact_terminate_steps = int(max(0, int(self.curriculum["stage1_contact_terminate_steps"])))
+            if "stage1_collision_rub_penalty" in self.curriculum:
+                self.collision_rub_penalty = float(self.curriculum["stage1_collision_rub_penalty"])
+            if "stage1_overlap_step_penalty" in self.curriculum:
+                self.overlap_step_penalty = float(self.curriculum["stage1_overlap_step_penalty"])
         else:
             self.time_penalty = float(self._stage2_defaults["time_penalty"])
             self.idle_penalty = float(self._stage2_defaults["idle_penalty"])
@@ -2097,6 +2152,11 @@ class RewardShapingWrapper(gym.Wrapper):
             self.corner_overspeed_penalty_scale = float(
                 self._stage2_defaults["corner_overspeed_penalty_scale"]
             )
+            self.overtake_bonus = float(self._marl_stage2_defaults["overtake_bonus"])
+            self.proximity_soft_penalty_scale = float(self._marl_stage2_defaults["proximity_soft_penalty_scale"])
+            self.contact_terminate_steps = int(self._marl_stage2_defaults["contact_terminate_steps"])
+            self.collision_rub_penalty = float(self._marl_stage2_defaults["collision_rub_penalty"])
+            self.overlap_step_penalty = float(self._marl_stage2_defaults["overlap_step_penalty"])
         self.curriculum_stage = stage
 
     def set_curriculum_stage(self, stage: int):
@@ -2236,14 +2296,24 @@ class RewardShapingWrapper(gym.Wrapper):
                 corner_angles[idx] = float(corner_angle)
         return positions, velocity_vecs, speeds, yaw_rates, track_dirs, is_sharp_turn, corner_angles
 
-    def _compute_rank_reward(self, race_progress):
+    def _compute_rank_reward(self, race_progress, front_pressure=None, side_pressure=None):
         if self._num_agents <= 1 or self.rank_reward_scale == 0.0:
             return np.zeros(self._num_agents, dtype=np.float32), np.ones(self._num_agents, dtype=np.int32)
         order = np.argsort(-race_progress, kind="stable")
         ranks = np.empty(self._num_agents, dtype=np.int32)
         ranks[order] = np.arange(1, self._num_agents + 1, dtype=np.int32)
         rank_score = (self._num_agents - ranks).astype(np.float32) / float(max(1, self._num_agents - 1))
-        return self.rank_reward_scale * rank_score, ranks
+        comp = (self.rank_reward_scale * rank_score).astype(np.float32)
+        if self.rank_unsafe_dampen_strength > 0.0 and front_pressure is not None:
+            fp = np.clip(front_pressure, 0.0, 1.0).astype(np.float32)
+            sp = (
+                np.clip(side_pressure, 0.0, 1.0).astype(np.float32)
+                if side_pressure is not None
+                else np.zeros(self._num_agents, dtype=np.float32)
+            )
+            unsafe = np.maximum(fp, sp)
+            comp *= (1.0 - self.rank_unsafe_dampen_strength * unsafe).astype(np.float32)
+        return comp, ranks
 
     def _compute_relative_velocity_reward(self, positions, speeds):
         reward = np.zeros(self._num_agents, dtype=np.float32)
@@ -2265,7 +2335,7 @@ class RewardShapingWrapper(gym.Wrapper):
             reward = reward * (nearest_dist <= self.nearest_opponent_max_distance).astype(np.float32)
         return reward.astype(np.float32), nearest_idx, nearest_dist
 
-    def _compute_overtake_bonus(self, race_progress):
+    def _compute_overtake_bonus(self, race_progress, positions):
         bonus = np.zeros(self._num_agents, dtype=np.float32)
         counts = np.zeros(self._num_agents, dtype=np.int32)
         if self._num_agents <= 1 or self.overtake_bonus == 0.0 or np.isnan(self._prev_race_progress).any():
@@ -2275,13 +2345,76 @@ class RewardShapingWrapper(gym.Wrapper):
             for j in range(i + 1, self._num_agents):
                 prev_diff = float(self._prev_race_progress[i] - self._prev_race_progress[j])
                 curr_diff = float(race_progress[i] - race_progress[j])
+                dist = float(np.linalg.norm(positions[i] - positions[j]))
+                spacing_factor = 1.0
+                if self.overtake_min_pairwise_distance > 0.0:
+                    spacing_factor = float(
+                        np.clip(
+                            (dist - self.overtake_min_pairwise_distance)
+                            / max(1e-6, self.overtake_spacing_soft_margin),
+                            0.0,
+                            1.0,
+                        )
+                    )
+                overt = self.overtake_bonus * spacing_factor
                 if prev_diff <= self.overtake_margin and curr_diff > self.overtake_margin:
-                    bonus[i] += self.overtake_bonus
+                    bonus[i] += overt
                     counts[i] += 1
                 elif prev_diff >= -self.overtake_margin and curr_diff < -self.overtake_margin:
-                    bonus[j] += self.overtake_bonus
+                    bonus[j] += overt
                     counts[j] += 1
         return bonus, counts
+
+    def _compute_interaction_proximity(self, positions, velocity_vecs, speeds, track_dirs):
+        front_gap = np.full(self._num_agents, np.inf, dtype=np.float32)
+        side_gap = np.full(self._num_agents, np.inf, dtype=np.float32)
+        front_closing_speed = np.zeros(self._num_agents, dtype=np.float32)
+        side_closing_speed = np.zeros(self._num_agents, dtype=np.float32)
+        if self._num_agents <= 1:
+            return front_gap, side_gap, front_closing_speed, side_closing_speed
+
+        forward_dirs = np.zeros((self._num_agents, 2), dtype=np.float32)
+        for idx in range(self._num_agents):
+            track_dir, track_norm = self._normalize(track_dirs[idx])
+            vel_dir, vel_norm = self._normalize(velocity_vecs[idx])
+            if track_norm > 1e-6:
+                forward_dirs[idx] = track_dir
+            elif vel_norm > 1e-6:
+                forward_dirs[idx] = vel_dir
+            else:
+                forward_dirs[idx] = np.array([1.0, 0.0], dtype=np.float32)
+
+        for i in range(self._num_agents):
+            forward = forward_dirs[i]
+            right = np.array([-forward[1], forward[0]], dtype=np.float32)
+            for j in range(self._num_agents):
+                if i == j:
+                    continue
+                delta = positions[j] - positions[i]
+                distance = float(np.linalg.norm(delta))
+                if distance <= 1e-6:
+                    continue
+                rel_vel = velocity_vecs[i] - velocity_vecs[j]
+                longitudinal = float(np.dot(delta, forward))
+                lateral_abs = abs(float(np.dot(delta, right)))
+                unit_delta = delta / distance
+                closing_speed = max(0.0, float(np.dot(rel_vel, unit_delta)))
+                lateral_closing = abs(float(np.dot(rel_vel, right)))
+
+                if longitudinal > 0.0 and distance < front_gap[i]:
+                    front_gap[i] = distance
+                    front_closing_speed[i] = closing_speed
+
+                if abs(longitudinal) <= self.side_longitudinal_window and lateral_abs < side_gap[i]:
+                    side_gap[i] = lateral_abs
+                    side_closing_speed[i] = lateral_closing
+
+            if not np.isfinite(front_gap[i]):
+                front_gap[i] = float(self.open_space_distance + max(5.0, speeds[i]))
+            if not np.isfinite(side_gap[i]):
+                side_gap[i] = float(self.side_gap_threshold + 5.0)
+
+        return front_gap, side_gap, front_closing_speed, side_closing_speed
 
     def _tiered_collision_penalty(self, relative_speed):
         if relative_speed >= self.collision_high_speed_threshold:
@@ -2301,6 +2434,8 @@ class RewardShapingWrapper(gym.Wrapper):
         collision_contact_steps = np.zeros(self._num_agents, dtype=np.int32)
         hook_counts = np.zeros(self._num_agents, dtype=np.int32)
         contact_termination = np.zeros(self._num_agents, dtype=np.bool_)
+        overlap_tax_acc = np.zeros(self._num_agents, dtype=np.float32)
+        rub_impact_acc = np.zeros(self._num_agents, dtype=np.float32)
         if self._num_agents <= 1 or not self.multi_agent_enabled:
             self._active_collision_pairs = {}
             return (
@@ -2312,6 +2447,8 @@ class RewardShapingWrapper(gym.Wrapper):
                 collision_contact_steps,
                 hook_counts,
                 contact_termination,
+                overlap_tax_acc,
+                rub_impact_acc,
             )
 
         current_pairs = {}
@@ -2330,11 +2467,25 @@ class RewardShapingWrapper(gym.Wrapper):
                     closing_speed = max(0.0, float(np.dot(rel_vel, unit_delta)))
                 else:
                     closing_speed = rel_speed
+                overlap_eff_distance = self.collision_overlap_distance + self.collision_overlap_margin
+                is_overlap_eff = distance <= overlap_eff_distance
                 collision_proxy = (
-                    distance <= self.collision_overlap_distance
+                    is_overlap_eff
                     or closing_speed >= self.collision_min_closing_speed
                 )
                 if not collision_proxy:
+                    if self.proximity_soft_penalty_scale != 0.0 or self.proximity_soft_tangential_scale != 0.0:
+                        band = max(0.0, (self.collision_distance_threshold - distance) / max(1e-6, self.collision_distance_threshold))
+                        soft = 0.0
+                        if self.proximity_soft_penalty_scale != 0.0:
+                            soft += self.proximity_soft_penalty_scale * band
+                        if self.proximity_soft_tangential_scale != 0.0 and rel_speed > 1e-6:
+                            tangential_sq = max(0.0, rel_speed * rel_speed - closing_speed * closing_speed)
+                            tangential = float(np.sqrt(tangential_sq))
+                            soft += self.proximity_soft_tangential_scale * tangential * band
+                        if soft != 0.0:
+                            penalties[i] -= soft
+                            penalties[j] -= soft
                     continue
 
                 pair = (i, j)
@@ -2342,7 +2493,7 @@ class RewardShapingWrapper(gym.Wrapper):
                 contact_steps = prev_contact_steps + 1
                 current_pairs[pair] = contact_steps
                 impact_speed = max(rel_speed, closing_speed)
-                is_overlap = distance <= self.collision_overlap_distance
+                is_overlap = is_overlap_eff
                 hook_contact = (
                     contact_steps >= self.hook_contact_steps
                     and rel_speed <= self.hook_contact_speed_threshold
@@ -2351,13 +2502,33 @@ class RewardShapingWrapper(gym.Wrapper):
 
                 penalty = 0.0
                 if prev_contact_steps == 0:
-                    penalty += self._tiered_collision_penalty(impact_speed)
+                    tier_pen = self._tiered_collision_penalty(impact_speed)
+                    if tier_pen != 0.0:
+                        penalty += tier_pen
+                    elif self.collision_rub_penalty != 0.0:
+                        penalty += self.collision_rub_penalty
+                        rub_impact_acc[i] += self.collision_rub_penalty
+                        rub_impact_acc[j] += self.collision_rub_penalty
                 if is_overlap:
                     penalty += self.contact_penalty
                     contact_counts[i] += 1
                     contact_counts[j] += 1
+                    if self.overlap_step_penalty != 0.0:
+                        capped = min(int(contact_steps), int(self.overlap_step_penalty_max_steps))
+                        o_tax = self.overlap_step_penalty * float(capped)
+                        penalty += o_tax
+                        overlap_tax_acc[i] += o_tax
+                        overlap_tax_acc[j] += o_tax
                     if contact_steps >= self.sustained_contact_steps:
                         penalty += self.sustained_contact_penalty
+                    if (
+                        contact_steps >= self.pre_hook_contact_steps
+                        and rel_speed <= self.pre_hook_rel_speed_threshold
+                    ):
+                        penalty += self.pre_hook_penalty
+                    if self.stick_penalty_per_step != 0.0:
+                        capped = min(int(contact_steps), int(self.stick_penalty_max_steps))
+                        penalty += self.stick_penalty_per_step * float(capped)
                     if hook_contact:
                         penalty += self.hook_contact_penalty
                         hook_counts[i] += 1
@@ -2397,6 +2568,8 @@ class RewardShapingWrapper(gym.Wrapper):
             collision_contact_steps,
             hook_counts,
             contact_termination,
+            overlap_tax_acc,
+            rub_impact_acc,
         )
 
     def step(self, action):
@@ -2458,11 +2631,44 @@ class RewardShapingWrapper(gym.Wrapper):
         collision_contact_steps = np.zeros(self._num_agents, dtype=np.int32)
         hook_counts = np.zeros(self._num_agents, dtype=np.int32)
         contact_termination = np.zeros(self._num_agents, dtype=np.bool_)
+        front_gap = np.full(self._num_agents, np.inf, dtype=np.float32)
+        side_gap = np.full(self._num_agents, np.inf, dtype=np.float32)
+        front_closing_speed = np.zeros(self._num_agents, dtype=np.float32)
+        side_closing_speed = np.zeros(self._num_agents, dtype=np.float32)
+        comp_front_speed_control = np.zeros(self._num_agents, dtype=np.float32)
+        comp_side_clearance = np.zeros(self._num_agents, dtype=np.float32)
+        comp_open_space_accel = np.zeros(self._num_agents, dtype=np.float32)
+        overlap_tax_component = np.zeros(self._num_agents, dtype=np.float32)
+        rub_impact_component = np.zeros(self._num_agents, dtype=np.float32)
+        comp_overtake_raw = np.zeros(self._num_agents, dtype=np.float32)
+        overtake_clean_gate = np.ones(self._num_agents, dtype=np.float32)
 
+        front_pressure = np.zeros(self._num_agents, dtype=np.float32)
+        side_pressure = np.zeros(self._num_agents, dtype=np.float32)
         if self.multi_agent_enabled and self._num_agents > 1:
-            comp_rank, ranks = self._compute_rank_reward(race_progress)
-            comp_relative_velocity, nearest_idx, nearest_dist = self._compute_relative_velocity_reward(positions, speeds)
-            comp_overtake, overtake_counts = self._compute_overtake_bonus(race_progress)
+            (
+                front_gap,
+                side_gap,
+                front_closing_speed,
+                side_closing_speed,
+            ) = self._compute_interaction_proximity(
+                positions,
+                velocity_vecs,
+                speeds,
+                track_dirs,
+            )
+            front_den = max(1e-6, self.front_gap_soft_distance - self.front_gap_hard_distance)
+            front_pressure = np.clip(
+                (self.front_gap_soft_distance - front_gap) / front_den,
+                0.0,
+                1.0,
+            ).astype(np.float32)
+            side_den = max(1e-6, self.side_gap_threshold)
+            side_pressure = np.clip(
+                (self.side_gap_threshold - side_gap) / side_den,
+                0.0,
+                1.0,
+            ).astype(np.float32)
             (
                 comp_collision,
                 comp_shared_collision,
@@ -2472,12 +2678,40 @@ class RewardShapingWrapper(gym.Wrapper):
                 collision_contact_steps,
                 hook_counts,
                 contact_termination,
+                overlap_tax_component,
+                rub_impact_component,
             ) = self._compute_collision_penalties(
                 positions,
                 velocity_vecs,
             )
+            comp_rank, ranks = self._compute_rank_reward(race_progress, front_pressure, side_pressure)
+            if self.rank_contact_dampen > 0.0:
+                dirty_rank = (contact_counts > 0).astype(np.float32)
+                comp_rank = comp_rank * (1.0 - self.rank_contact_dampen * dirty_rank)
+            comp_relative_velocity, nearest_idx, nearest_dist = self._compute_relative_velocity_reward(positions, speeds)
+            gf = float(np.clip(self.relative_velocity_gate_front_strength, 0.0, 1.0))
+            gs = float(np.clip(self.relative_velocity_gate_side_strength, 0.0, 1.0))
+            rel_gate = (1.0 - gf * front_pressure) * (1.0 - gs * side_pressure)
+            rel_gate = np.clip(rel_gate, 0.0, 1.0).astype(np.float32)
+            if self.relative_velocity_positive_requires_open_front:
+                pos_part = np.maximum(comp_relative_velocity, 0.0)
+                neg_part = np.minimum(comp_relative_velocity, 0.0)
+                open_ok = (front_gap >= self.open_space_distance).astype(np.float32)
+                comp_relative_velocity = pos_part * rel_gate * open_ok + neg_part * rel_gate
+            else:
+                comp_relative_velocity = comp_relative_velocity * rel_gate
+            comp_overtake, overtake_counts = self._compute_overtake_bonus(race_progress, positions)
+            comp_overtake_raw = comp_overtake.astype(np.float32, copy=True)
+            if self.overtake_requires_clean_contact:
+                dirty_ot = (contact_counts > 0) | (hook_counts > 0)
+                overtake_clean_gate = np.where(dirty_ot, self.overtake_contact_dampen, 1.0).astype(np.float32)
+                comp_overtake = comp_overtake * overtake_clean_gate
 
         comp_forward = self.forward_progress_scale * progress_delta
+        if self.multi_agent_enabled and self._num_agents > 1 and self.contact_forward_dampening_scale > 0.0:
+            has_contact = (contact_counts > 0).astype(np.float32)
+            damp = 1.0 - self.contact_forward_dampening_scale * has_contact
+            comp_forward = comp_forward * np.clip(damp, 0.0, 1.0).astype(np.float32)
         comp_alignment = np.zeros(self._num_agents, dtype=np.float32)
         if self.track_alignment_scale != 0.0:
             comp_alignment = self.track_alignment_scale * np.sum(velocity_vecs * track_dirs, axis=1)
@@ -2532,6 +2766,24 @@ class RewardShapingWrapper(gym.Wrapper):
             launch_mask = (self._episode_steps <= self.launch_boost_steps) & (speeds < self.launch_speed_target)
             comp_launch = self.launch_bonus_scale * throttle_values * launch_mask.astype(np.float32)
         comp_yaw = -self.yaw_rate_penalty * yaw_rates
+        if self.multi_agent_enabled and self._num_agents > 1:
+            comp_front_speed_control = (
+                -self.front_speed_penalty_scale * front_pressure * speeds
+                -self.front_throttle_penalty_scale * front_pressure * throttle_values
+            ).astype(np.float32)
+            comp_side_clearance = (
+                -self.side_clearance_penalty_scale * side_pressure
+                -self.side_closing_penalty_scale * side_pressure * side_closing_speed
+            ).astype(np.float32)
+
+            if self.open_space_accel_scale != 0.0:
+                open_space_mask = (front_gap >= self.open_space_distance).astype(np.float32)
+                comp_open_space_accel = (
+                    self.open_space_accel_scale
+                    * open_space_mask
+                    * throttle_values
+                    * (1.0 - np.minimum(1.0, np.abs(steer_values)))
+                ).astype(np.float32)
 
         shaped_reward = (
             comp_forward
@@ -2553,6 +2805,9 @@ class RewardShapingWrapper(gym.Wrapper):
             + comp_rank
             + comp_relative_velocity
             + comp_overtake
+            + comp_front_speed_control
+            + comp_side_clearance
+            + comp_open_space_accel
         ).astype(np.float32)
 
         base_reward = self._coerce_float_array(reward, self._num_agents, default=0.0)
@@ -2606,6 +2861,10 @@ class RewardShapingWrapper(gym.Wrapper):
             agent_info["telemetry/speed"] = float(speeds[idx])
             agent_info["telemetry/collision_contact_steps"] = int(collision_contact_steps[idx])
             agent_info["telemetry/collision_relative_speed"] = float(collision_relative_speed[idx])
+            agent_info["telemetry/front_gap"] = float(front_gap[idx])
+            agent_info["telemetry/side_gap"] = float(side_gap[idx])
+            agent_info["telemetry/front_closing_speed"] = float(front_closing_speed[idx])
+            agent_info["telemetry/side_closing_speed"] = float(side_closing_speed[idx])
             if not self._training_mode:
                 agent_info["events/no_progress"] = int(is_no_progress[idx])
                 agent_info["events/overtake"] = int(overtake_counts[idx])
@@ -2635,10 +2894,17 @@ class RewardShapingWrapper(gym.Wrapper):
                 agent_info["rewards/launch"] = float(comp_launch[idx])
                 agent_info["rewards/yaw"] = float(comp_yaw[idx])
                 agent_info["rewards/collision"] = float(comp_collision[idx])
+                agent_info["rewards/overlap_step_tax"] = float(overlap_tax_component[idx])
+                agent_info["rewards/collision_rub"] = float(rub_impact_component[idx])
                 agent_info["rewards/shared_collision"] = float(comp_shared_collision[idx])
                 agent_info["rewards/rank"] = float(comp_rank[idx])
                 agent_info["rewards/relative_velocity"] = float(comp_relative_velocity[idx])
                 agent_info["rewards/overtake"] = float(comp_overtake[idx])
+                agent_info["rewards/overtake_raw"] = float(comp_overtake_raw[idx])
+                agent_info["rewards/overtake_clean_gate"] = float(overtake_clean_gate[idx])
+                agent_info["rewards/front_speed_control"] = float(comp_front_speed_control[idx])
+                agent_info["rewards/side_clearance"] = float(comp_side_clearance[idx])
+                agent_info["rewards/open_space_accel"] = float(comp_open_space_accel[idx])
                 agent_info["rewards/total"] = float(total_reward[idx])
                 agent_info["lap_count"] = int(self._lap_count[idx])
 
@@ -2658,6 +2924,11 @@ class SafetyGovernorWrapper(gym.Wrapper):
         self.speed_cap_ratio = float(governor_config.get('speed_cap_ratio', 0.5))
         self.speed_cap_top_speed = float(governor_config.get('speed_cap_top_speed', 30.0))
         self.speed_cap_brake = float(governor_config.get('speed_cap_brake', 0.2))
+        self.proximity_enabled = bool(governor_config.get('proximity_enabled', False))
+        self.proximity_distance_threshold = float(governor_config.get('proximity_distance_threshold', 5.0))
+        self.proximity_min_ratio = float(governor_config.get('proximity_min_speed_cap_ratio', 0.2))
+        self.proximity_brake_boost = float(governor_config.get('proximity_brake_boost', 0.2))
+        self.proximity_closing_speed_scale = float(governor_config.get('proximity_closing_speed_scale', 0.1))
 
     def step(self, action):
         if self.enabled and action is not None:
@@ -2674,10 +2945,51 @@ class SafetyGovernorWrapper(gym.Wrapper):
                     for idx, car in enumerate(base_env.cars[:action_matrix.shape[0]]):
                         vel = car.hull.linearVelocity
                         speed = float(np.linalg.norm([vel[0], vel[1]]))
-                        if speed <= speed_cap or action_matrix.shape[1] < 3:
+                        local_speed_cap = speed_cap
+                        local_brake = self.speed_cap_brake
+                        if self.proximity_enabled and len(base_env.cars) > 1:
+                            ego_pos = np.array([car.hull.position[0], car.hull.position[1]], dtype=np.float32)
+                            ego_vel = np.array([vel[0], vel[1]], dtype=np.float32)
+                            nearest_dist = np.inf
+                            nearest_closing = 0.0
+                            for j, other in enumerate(base_env.cars):
+                                if j == idx:
+                                    continue
+                                other_pos = np.array([other.hull.position[0], other.hull.position[1]], dtype=np.float32)
+                                delta = other_pos - ego_pos
+                                dist = float(np.linalg.norm(delta))
+                                if dist <= 1e-6 or dist >= nearest_dist:
+                                    continue
+                                other_vel = np.array(
+                                    [other.hull.linearVelocity[0], other.hull.linearVelocity[1]],
+                                    dtype=np.float32,
+                                )
+                                unit_delta = delta / dist
+                                closing_speed = max(0.0, float(np.dot(ego_vel - other_vel, unit_delta)))
+                                nearest_dist = dist
+                                nearest_closing = closing_speed
+                            if nearest_dist < self.proximity_distance_threshold:
+                                pressure = np.clip(
+                                    (self.proximity_distance_threshold - nearest_dist)
+                                    / max(1e-6, self.proximity_distance_threshold),
+                                    0.0,
+                                    1.0,
+                                )
+                                pressure = np.clip(
+                                    pressure + self.proximity_closing_speed_scale * nearest_closing,
+                                    0.0,
+                                    1.0,
+                                )
+                                ratio = self.speed_cap_ratio - (self.speed_cap_ratio - self.proximity_min_ratio) * pressure
+                                local_speed_cap = max(0.0, ratio) * self.speed_cap_top_speed
+                                local_brake = max(
+                                    self.speed_cap_brake,
+                                    self.speed_cap_brake + pressure * self.proximity_brake_boost,
+                                )
+                        if speed <= local_speed_cap or action_matrix.shape[1] < 3:
                             continue
                         action_matrix[idx, 1] = 0.0
-                        action_matrix[idx, 2] = max(float(action_matrix[idx, 2]), self.speed_cap_brake)
+                        action_matrix[idx, 2] = max(float(action_matrix[idx, 2]), local_brake)
                     action = action_matrix.reshape(orig_shape)
         return self.env.step(action)
 

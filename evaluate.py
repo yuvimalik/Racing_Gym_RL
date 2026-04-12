@@ -454,9 +454,15 @@ def evaluate_torch_model(model_path, config, n_episodes=10, record_video=True, s
     episode_contact_termination = []
     episode_max_contact_steps = []
     episode_mean_speed = []
+    episode_speed_std = []
     episode_mean_throttle = []
     episode_mean_brake = []
     episode_mean_overtakes = []
+    episode_mean_front_gap = []
+    episode_min_front_gap = []
+    episode_mean_side_gap = []
+    episode_min_side_gap = []
+    episode_mean_front_closing_speed = []
     results_dir = Path(config["paths"]["results_dir"])
     results_dir.mkdir(parents=True, exist_ok=True)
     video_writer = None
@@ -487,6 +493,9 @@ def evaluate_torch_model(model_path, config, n_episodes=10, record_video=True, s
         throttle_values = []
         brake_values = []
         overtake_count = 0
+        front_gap_values = []
+        side_gap_values = []
+        front_closing_values = []
         while not done_to_bool(done):
             obs_policy = obs_to_policy_batch(obs, obs_layout)
             obs_t = torch.as_tensor(obs_policy, dtype=torch.float32, device=device) / 255.0
@@ -521,6 +530,15 @@ def evaluate_torch_model(model_path, config, n_episodes=10, record_video=True, s
                 speed_values.append(float(agent_info.get("telemetry/speed", 0.0)))
                 max_contact_steps = max(max_contact_steps, int(agent_info.get("telemetry/collision_contact_steps", 0)))
                 overtake_count += int(agent_info.get("events/overtake", 0))
+                front_gap = float(agent_info.get("telemetry/front_gap", -1.0))
+                if front_gap >= 0.0 and np.isfinite(front_gap):
+                    front_gap_values.append(front_gap)
+                side_gap = float(agent_info.get("telemetry/side_gap", -1.0))
+                if side_gap >= 0.0 and np.isfinite(side_gap):
+                    side_gap_values.append(side_gap)
+                front_closing_speed = float(agent_info.get("telemetry/front_closing_speed", -1.0))
+                if front_closing_speed >= 0.0 and np.isfinite(front_closing_speed):
+                    front_closing_values.append(front_closing_speed)
                 if "telemetry/rank" in agent_info:
                     rank_values.append(float(agent_info.get("telemetry/rank", 0.0)))
             if start_time is None and info0.get("time") is not None:
@@ -558,9 +576,15 @@ def evaluate_torch_model(model_path, config, n_episodes=10, record_video=True, s
         episode_contact_termination.append(int(contact_termination_seen))
         episode_max_contact_steps.append(int(max_contact_steps))
         episode_mean_speed.append(float(np.mean(speed_values)) if speed_values else 0.0)
+        episode_speed_std.append(float(np.std(speed_values)) if len(speed_values) > 1 else 0.0)
         episode_mean_throttle.append(float(np.mean(throttle_values)) if throttle_values else 0.0)
         episode_mean_brake.append(float(np.mean(brake_values)) if brake_values else 0.0)
         episode_mean_overtakes.append(int(overtake_count))
+        episode_mean_front_gap.append(float(np.mean(front_gap_values)) if front_gap_values else 0.0)
+        episode_min_front_gap.append(float(np.min(front_gap_values)) if front_gap_values else 0.0)
+        episode_mean_side_gap.append(float(np.mean(side_gap_values)) if side_gap_values else 0.0)
+        episode_min_side_gap.append(float(np.min(side_gap_values)) if side_gap_values else 0.0)
+        episode_mean_front_closing_speed.append(float(np.mean(front_closing_values)) if front_closing_values else 0.0)
         print(
             f"Episode {episode + 1}/{n_episodes}: Reward={episode_reward:.2f}, "
             f"Length={episode_length}, Progress={progress:.2%}, Time={episode_time:.2f}s, "
@@ -594,9 +618,15 @@ def evaluate_torch_model(model_path, config, n_episodes=10, record_video=True, s
         "contact_termination_rate": float(np.mean(episode_contact_termination)),
         "mean_max_contact_steps": float(np.mean(episode_max_contact_steps)),
         "mean_speed": float(np.mean(episode_mean_speed)),
+        "mean_speed_std": float(np.mean(episode_speed_std)),
         "mean_throttle": float(np.mean(episode_mean_throttle)),
         "mean_brake": float(np.mean(episode_mean_brake)),
         "mean_overtakes": float(np.mean(episode_mean_overtakes)),
+        "mean_front_gap": float(np.mean(episode_mean_front_gap)),
+        "min_front_gap": float(np.mean(episode_min_front_gap)),
+        "mean_side_gap": float(np.mean(episode_mean_side_gap)),
+        "min_side_gap": float(np.mean(episode_min_side_gap)),
+        "mean_front_closing_speed": float(np.mean(episode_mean_front_closing_speed)),
         "episode_rewards": episode_rewards,
         "episode_lengths": episode_lengths,
         "episode_progress": episode_progress,
@@ -610,9 +640,15 @@ def evaluate_torch_model(model_path, config, n_episodes=10, record_video=True, s
         "episode_contact_termination": episode_contact_termination,
         "episode_max_contact_steps": episode_max_contact_steps,
         "episode_mean_speed": episode_mean_speed,
+        "episode_speed_std": episode_speed_std,
         "episode_mean_throttle": episode_mean_throttle,
         "episode_mean_brake": episode_mean_brake,
         "episode_mean_overtakes": episode_mean_overtakes,
+        "episode_mean_front_gap": episode_mean_front_gap,
+        "episode_min_front_gap": episode_min_front_gap,
+        "episode_mean_side_gap": episode_mean_side_gap,
+        "episode_min_side_gap": episode_min_side_gap,
+        "episode_mean_front_closing_speed": episode_mean_front_closing_speed,
     }
     return stats, str(video_path) if video_path else None
 
@@ -784,12 +820,24 @@ def print_stats(stats):
         print(f"Mean Max Contact Steps: {stats['mean_max_contact_steps']:.2f}")
     if 'mean_speed' in stats:
         print(f"Mean Speed: {stats['mean_speed']:.2f}")
+    if 'mean_speed_std' in stats:
+        print(f"Mean Speed Std: {stats['mean_speed_std']:.2f}")
     if 'mean_throttle' in stats:
         print(f"Mean Throttle: {stats['mean_throttle']:.2f}")
     if 'mean_brake' in stats:
         print(f"Mean Brake: {stats['mean_brake']:.2f}")
     if 'mean_overtakes' in stats:
         print(f"Mean Overtakes: {stats['mean_overtakes']:.2f}")
+    if 'mean_front_gap' in stats:
+        print(f"Mean Front Gap: {stats['mean_front_gap']:.2f}")
+    if 'min_front_gap' in stats:
+        print(f"Min Front Gap (mean across episodes): {stats['min_front_gap']:.2f}")
+    if 'mean_side_gap' in stats:
+        print(f"Mean Side Gap: {stats['mean_side_gap']:.2f}")
+    if 'min_side_gap' in stats:
+        print(f"Min Side Gap (mean across episodes): {stats['min_side_gap']:.2f}")
+    if 'mean_front_closing_speed' in stats:
+        print(f"Mean Front Closing Speed: {stats['mean_front_closing_speed']:.2f}")
     print("="*50)
 
 
@@ -828,13 +876,25 @@ def save_stats(stats, output_path):
         'episode_contact_termination': [int(v) for v in stats.get('episode_contact_termination', [])],
         'episode_max_contact_steps': [int(v) for v in stats.get('episode_max_contact_steps', [])],
         'mean_speed': float(stats.get('mean_speed', 0.0)),
+        'mean_speed_std': float(stats.get('mean_speed_std', 0.0)),
         'mean_throttle': float(stats.get('mean_throttle', 0.0)),
         'mean_brake': float(stats.get('mean_brake', 0.0)),
         'mean_overtakes': float(stats.get('mean_overtakes', 0.0)),
+        'mean_front_gap': float(stats.get('mean_front_gap', 0.0)),
+        'min_front_gap': float(stats.get('min_front_gap', 0.0)),
+        'mean_side_gap': float(stats.get('mean_side_gap', 0.0)),
+        'min_side_gap': float(stats.get('min_side_gap', 0.0)),
+        'mean_front_closing_speed': float(stats.get('mean_front_closing_speed', 0.0)),
         'episode_mean_speed': [float(v) for v in stats.get('episode_mean_speed', [])],
+        'episode_speed_std': [float(v) for v in stats.get('episode_speed_std', [])],
         'episode_mean_throttle': [float(v) for v in stats.get('episode_mean_throttle', [])],
         'episode_mean_brake': [float(v) for v in stats.get('episode_mean_brake', [])],
         'episode_mean_overtakes': [int(v) for v in stats.get('episode_mean_overtakes', [])],
+        'episode_mean_front_gap': [float(v) for v in stats.get('episode_mean_front_gap', [])],
+        'episode_min_front_gap': [float(v) for v in stats.get('episode_min_front_gap', [])],
+        'episode_mean_side_gap': [float(v) for v in stats.get('episode_mean_side_gap', [])],
+        'episode_min_side_gap': [float(v) for v in stats.get('episode_min_side_gap', [])],
+        'episode_mean_front_closing_speed': [float(v) for v in stats.get('episode_mean_front_closing_speed', [])],
         'model_path': stats.get('model_path'),
         'config_path': stats.get('config_path'),
         'seed': int(stats.get('seed', 0)),

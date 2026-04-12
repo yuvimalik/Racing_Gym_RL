@@ -5,6 +5,9 @@
 # `config/multi_car_config_recursive_cap100_long_offtrack.yaml`.
 # The goal is to make both cars stay on track before aggressive competition
 # shaping matters.
+#
+# Staged training (manual): Phase A safety-heavy 200k–500k steps then Phase B
+# resume with competitive weights — see comments in multi_car_marl_3car_1m_from_my_run.yaml.
 
 environment:
   env_id: MultiCarRacing-v0
@@ -80,8 +83,8 @@ reward_shaping:
   enabled: true
   use_custom_reward: true
 
-  # Keep real track progress as the main signal.
-  forward_progress_scale: 600.0
+  # Main signal; slightly reduced so contact shaping can compete.
+  forward_progress_scale: 580.0
   track_alignment_scale: 0.0
   straight_speed_scale: 0.0
 
@@ -119,37 +122,64 @@ reward_shaping:
 
   multi_agent:
     enabled: true
-
-    # Keep competition present, but not strong enough to justify blocking.
     rank_reward_scale: 0.05
     relative_velocity_scale: 0.01
     relative_velocity_cap: 6.0
     nearest_opponent_max_distance: 12.0
-    overtake_bonus: 0.1
+    overtake_bonus: 0.08
     overtake_margin: 0.002
-
-    # Allow only a tiny brush. Sustained or severe contact should end both cars.
+    front_gap_hard_distance: 2.6
+    front_gap_soft_distance: 5.8
+    front_speed_penalty_scale: 0.12
+    front_throttle_penalty_scale: 0.22
+    open_space_distance: 7.5
+    open_space_accel_scale: 0.06
+    side_gap_threshold: 3.2
+    side_longitudinal_window: 3.0
+    side_clearance_penalty_scale: 0.55
+    side_closing_penalty_scale: 0.12
+    relative_velocity_gate_front_strength: 0.85
+    relative_velocity_gate_side_strength: 0.6
+    relative_velocity_positive_requires_open_front: true
+    collision_overlap_margin: 0.35
+    proximity_soft_penalty_scale: 0.42
+    proximity_soft_tangential_scale: 0.09
+    overtake_min_pairwise_distance: 3.0
+    overtake_spacing_soft_margin: 2.5
+    rank_unsafe_dampen_strength: 0.65
+    contact_forward_dampening_scale: 0.72
+    pre_hook_contact_steps: 2
+    pre_hook_rel_speed_threshold: 2.5
+    pre_hook_penalty: -5.5
+    stick_penalty_per_step: -0.45
+    stick_penalty_max_steps: 12
     collision_distance_threshold: 3.5
     collision_overlap_distance: 2.2
     collision_min_closing_speed: 0.75
     collision_low_speed_threshold: 1.5
     collision_medium_speed_threshold: 4.0
     collision_high_speed_threshold: 7.0
-    collision_low_penalty: -2.0
-    collision_medium_penalty: -6.0
-    collision_high_penalty: -12.0
-    contact_penalty: -1.0
+    collision_low_penalty: -3.5
+    collision_medium_penalty: -10.0
+    collision_high_penalty: -22.0
+    contact_penalty: -2.5
     sustained_contact_steps: 2
-    sustained_contact_penalty: -2.5
-    hook_contact_steps: 4
+    sustained_contact_penalty: -7.0
+    hook_contact_steps: 3
     hook_contact_speed_threshold: 1.75
-    hook_contact_penalty: -10.0
+    hook_contact_penalty: -20.0
     contact_termination_mode: both
-    contact_terminate_steps: 3
+    contact_terminate_steps: 1
     terminate_on_hook_contact: true
-    severe_contact_speed_threshold: 5.0
+    severe_contact_speed_threshold: 4.2
     contact_terminal_penalty: -75.0
     shared_collision_penalty: 0.0
+    collision_rub_penalty: -1.2
+    overlap_step_penalty: -0.35
+    overlap_step_penalty_max_steps: 12
+    overtake_requires_clean_contact: true
+    overtake_contact_dampen: 0.0
+    rank_contact_dampen: 0.35
 
   curriculum:
     enabled: false
