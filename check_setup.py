@@ -31,7 +31,7 @@ def check_imports():
     
     if missing:
         print(f"\nMissing packages: {', '.join(missing)}")
-        print("Install with: pip install -r requirements.txt")
+        print("Install with: pip install -r requirements.txt && pip install -r requirements_sb3.txt --no-deps")
         return False
     else:
         print("\nAll dependencies installed!")

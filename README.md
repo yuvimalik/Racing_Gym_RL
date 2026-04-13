@@ -25,7 +25,8 @@ Current torch training ground truth:
 ```
 Racing_Gym_RL/
 ├── README.md                      # This file
-├── requirements.txt               # Python dependencies
+├── requirements.txt               # Python dependencies (gym 0.17, env stack)
+├── requirements_sb3.txt           # Stable-Baselines3 (install with --no-deps after requirements.txt)
 ├── train.py                       # Main training script
 ├── evaluate.py                    # Model evaluation script
 ├── distributed_train.py           # CUDA-only distributed torch entry point
@@ -55,9 +56,10 @@ python -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 ```
 
-3. Install dependencies:
+3. Install dependencies (two steps so `pip` can keep **gym==0.17.3** for `multi_car_racing` while still installing Stable-Baselines3):
 ```bash
 pip install -r requirements.txt
+pip install -r requirements_sb3.txt --no-deps
 ```
 
 4. Install `multi_car_racing` (no-deps to avoid shapely/box2d build issues):
@@ -127,6 +129,8 @@ Run a short MARL smoke test before any long run:
 ```bash
 python train.py --config config/multi_car_marl_smoke_config.yaml --seed 42
 ```
+
+Cloud GPU (e.g. Prime Intellect): long-run, budget (~$10–20 window when calibrated), and smoke configs plus Docker/runbook are in [docs/PRIME_INTELLECT_GPU.md](docs/PRIME_INTELLECT_GPU.md) (`config/prime_marl_2car_long.yaml`, `config/prime_marl_2car_budget.yaml`, `config/prime_marl_2car_smoke.yaml`).
 
 Resume a torch checkpoint:
 ```bash

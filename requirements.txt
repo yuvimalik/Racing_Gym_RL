@@ -1,17 +1,22 @@
 # Core dependencies
 # Core dependencies for multi_car_racing
-numpy>=1.22.0,<1.23.0
+# numpy<1.23 breaks pip on Py3.11: matplotlib 3.9+ and many wheels require numpy>=1.23.
+# gym==0.17.3 only requires numpy>=1.10.4; stay below 2.x for older native wheels (box2d/shapely).
+numpy>=1.23.5,<2.0.0
 gym==0.17.3
-stable-baselines3[extra]==1.8.0
+# stable-baselines3 is in requirements_sb3.txt — install with --no-deps after this file
+# (SB3 1.8.0 declares gym==0.21; pip cannot satisfy that and gym==0.17.3 in one resolve.)
+pandas>=1.3.0
 
 # multi_car_racing dependencies (install package separately with --no-deps)
+# gym 0.17.3 requires pyglet<=1.5.0; do not raise above 1.5.0 or pip fails (Python 3.11+ resolver).
 shapely==1.8.5.post1
 box2d-py==2.3.8
-pyglet==1.5.27
+pyglet>=1.4.0,<=1.5.0
 
-# Visualization and logging
-matplotlib>=3.7.0
-opencv-python>=4.8.0
+# Visualization and logging (tight matplotlib floor avoids resolver backtracking)
+matplotlib>=3.7.5,<3.11
+opencv-python>=4.8.0,<4.13
 tensorboard>=2.13.0
 
 # Configuration
