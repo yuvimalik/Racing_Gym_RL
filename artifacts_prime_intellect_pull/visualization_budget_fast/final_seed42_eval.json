@@ -1,0 +1,190 @@
+{
+  "mean_reward": 493.14619855433705,
+  "std_reward": 4.235996708008121,
+  "min_reward": 485.8370341360569,
+  "max_reward": 497.957735395059,
+  "mean_length": 1738.0,
+  "std_length": 60.20298995897131,
+  "mean_progress": 0.9943096160888671,
+  "std_progress": 0.0007350510395251003,
+  "mean_time": 0.0,
+  "std_time": 0.0,
+  "offtrack_rate": 0.0,
+  "mean_steer_variance": 0.07263918623329971,
+  "mean_rank": 1.5,
+  "collision_rate": 0.0,
+  "contact_rate": 0.0,
+  "hook_contact_rate": 0.0,
+  "contact_termination_rate": 0.0,
+  "mean_max_contact_steps": 0.0,
+  "episode_rewards": [
+    485.8370341360569,
+    492.9886650778353,
+    496.66396313533187,
+    492.28359502740204,
+    497.957735395059
+  ],
+  "episode_lengths": [
+    1780,
+    1760,
+    1669,
+    1815,
+    1666
+  ],
+  "episode_progress": [
+    0.9934426248073578,
+    0.9934210479259491,
+    0.9947368502616882,
+    0.9951923191547394,
+    0.9947552382946014
+  ],
+  "episode_times": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+  ],
+  "episode_offtrack": [
+    0,
+    0,
+    0,
+    0,
+    0
+  ],
+  "episode_steer_variance": [
+    0.07727543672344378,
+    0.07539715320939165,
+    0.06525454425255209,
+    0.07173084697227984,
+    0.07353795000883118
+  ],
+  "episode_mean_rank": [
+    1.5,
+    1.5,
+    1.5,
+    1.5,
+    1.5
+  ],
+  "episode_collision": [
+    0,
+    0,
+    0,
+    0,
+    0
+  ],
+  "episode_contact": [
+    0,
+    0,
+    0,
+    0,
+    0
+  ],
+  "episode_hook_contact": [
+    0,
+    0,
+    0,
+    0,
+    0
+  ],
+  "episode_contact_termination": [
+    0,
+    0,
+    0,
+    0,
+    0
+  ],
+  "episode_max_contact_steps": [
+    0,
+    0,
+    0,
+    0,
+    0
+  ],
+  "mean_speed": 28.70662510658976,
+  "mean_speed_std": 2.2764317975787938,
+  "mean_throttle": 0.9501724112638469,
+  "mean_brake": 0.00012750934258141125,
+  "mean_overtakes": 24.2,
+  "mean_front_gap": 22.528037861765327,
+  "min_front_gap": 5.593985748291016,
+  "mean_side_gap": 8.020364571546542,
+  "min_side_gap": 5.135644626617432,
+  "mean_front_closing_speed": 0.21387530992682277,
+  "episode_mean_speed": [
+    28.693632762619618,
+    28.723346226594664,
+    28.709573625732567,
+    28.72468777070689,
+    28.681885147295077
+  ],
+  "episode_speed_std": [
+    2.252623826938643,
+    2.265062124653223,
+    2.3142815216319947,
+    2.2354573690195685,
+    2.314734145650539
+  ],
+  "episode_mean_throttle": [
+    0.9506617628289072,
+    0.9495599690147422,
+    0.9499453196916986,
+    0.9501692485875006,
+    0.9505257561963861
+  ],
+  "episode_mean_brake": [
+    0.00012151007906774456,
+    0.0001418520611795512,
+    0.00012305822645282231,
+    0.00011706730715171037,
+    0.00013405903905522781
+  ],
+  "episode_mean_overtakes": [
+    25,
+    40,
+    16,
+    22,
+    18
+  ],
+  "episode_mean_front_gap": [
+    22.303813793552056,
+    23.02593647471883,
+    22.357536363344554,
+    22.361429026107157,
+    22.591473651104042
+  ],
+  "episode_min_front_gap": [
+    5.289859771728516,
+    5.374082088470459,
+    5.897548675537109,
+    5.71665096282959,
+    5.691787242889404
+  ],
+  "episode_mean_side_gap": [
+    7.992542711670479,
+    7.971505170383237,
+    8.063070073250598,
+    8.036224585393901,
+    8.038480317034498
+  ],
+  "episode_min_side_gap": [
+    5.029661178588867,
+    5.097618579864502,
+    5.2190961837768555,
+    5.134787559509277,
+    5.197059631347656
+  ],
+  "episode_mean_front_closing_speed": [
+    0.24003035637044984,
+    0.21786905027706652,
+    0.13587477958240501,
+    0.17470142234584593,
+    0.30090094105834664
+  ],
+  "model_path": "/Users/epablo/Documents/UPenn/SophmoreSpring26/STAT4830/WedApr1_Work/Racing_Gym_RL/artifacts_prime_intellect_pull/prime_marl_2car_budget_fast/models/final_model_torch.pt",
+  "config_path": "/Users/epablo/Documents/UPenn/SophmoreSpring26/STAT4830/WedApr1_Work/Racing_Gym_RL/config/prime_marl_2car_budget_fast.yaml",
+  "seed": 42,
+  "episodes": 5,
+  "video_path": "artifacts_prime_intellect_pull/visualization_budget_fast/final_seed42_eval.mp4",
+  "evaluated_at": "2026-04-13T13:09:42.617026"
+}
