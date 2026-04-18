@@ -21,6 +21,10 @@ Budget run (config/prime_marl_2car_budget.yaml):
 
   rsync -avz -e ssh USER@PRIME_HOST:~/Racing_Gym_RL/artifacts/prime_marl_2car_budget/ ~/prime_racing_backup_budget/
 
+~16h A100 run (config/prime_marl_2car_budget_fast.yaml, launcher scripts/prime_launch_16h_nohup.sh):
+
+  rsync -avz -e ssh USER@PRIME_HOST:~/Racing_Gym_RL/artifacts/prime_marl_2car_budget_fast/ ~/prime_racing_backup_budget_fast/
+
 Before deleting the instance: confirm copies, then stop the machine in the Prime dashboard and note usage cost on the billing / home page.
 
 TXT
