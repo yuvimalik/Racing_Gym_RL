@@ -27,6 +27,8 @@ Do these in the Prime web app before or while SSH is open (you cannot complete b
 | [`config/prime_marl_2car_long.yaml`](../config/prime_marl_2car_long.yaml) | Long production run: **32M** stream timesteps, `eval_freq` 100k, `save_freq` 200k, `fail_fast` off, same reward as `multi_car_marl_config.yaml`. |
 | [`config/prime_marl_2car_budget.yaml`](../config/prime_marl_2car_budget.yaml) | **8M** stream timesteps with eval/save scaled like the long run; default for **~$10–20** runs after you calibrate (see §1 and example sequence below). |
 | [`config/prime_marl_2car_budget_fast.yaml`](../config/prime_marl_2car_budget_fast.yaml) | Same **8M** stream goal as budget, with **fewer evals/saves**, `batch_size: 2048`, `n_epochs: 2`; artifacts under `./artifacts/prime_marl_2car_budget_fast/`. Launcher: [`scripts/prime_train_budget_fast.sh`](../scripts/prime_train_budget_fast.sh). |
+| [`config/prime_marl_10car_preflight.yaml`](../config/prime_marl_10car_preflight.yaml) | **10-car preflight**: 1M stream timesteps to validate stability/throughput before full 10-car launch. |
+| [`config/prime_marl_10car_16m.yaml`](../config/prime_marl_10car_16m.yaml) | **10-car long run**: 16M stream timesteps (`num_agents: 10`) intended for policy-only warm start. |
 | [`config/prime_marl_2car_smoke.yaml`](../config/prime_marl_2car_smoke.yaml) | **~12k** stream steps + one mid-run eval; sanity check before spending credits. |
 | [`config/prime_marl_2car_budget_fast_smoke.yaml`](../config/prime_marl_2car_budget_fast_smoke.yaml) | Short smoke using the **fast** PPO/eval settings; artifacts under `./artifacts/prime_marl_budget_fast_smoke/`. |
 
@@ -68,6 +70,10 @@ After `git clone` and `cd` into the repo on your GPU instance, you can run these
 | [`scripts/prime_train_long.sh`](../scripts/prime_train_long.sh) | Same headless default, runs [`config/prime_marl_2car_long.yaml`](../config/prime_marl_2car_long.yaml); pass extra CLI args through (e.g. `--resume ... --timesteps_add N`). |
 | [`scripts/prime_train_budget.sh`](../scripts/prime_train_budget.sh) | Same headless default, runs [`config/prime_marl_2car_budget.yaml`](../config/prime_marl_2car_budget.yaml); pass extra CLI args through. |
 | [`scripts/prime_train_budget_fast.sh`](../scripts/prime_train_budget_fast.sh) | Same as budget script but runs [`config/prime_marl_2car_budget_fast.yaml`](../config/prime_marl_2car_budget_fast.yaml). |
+| [`scripts/prime_train_10car_preflight.sh`](../scripts/prime_train_10car_preflight.sh) | Runs [`config/prime_marl_10car_preflight.yaml`](../config/prime_marl_10car_preflight.yaml) for 10-car preflight validation. |
+| [`scripts/prime_train_10car_16m_policy_resume.sh`](../scripts/prime_train_10car_16m_policy_resume.sh) | Runs [`config/prime_marl_10car_16m.yaml`](../config/prime_marl_10car_16m.yaml) with `--resume_mode policy_only`; set `PRIME_10CAR_RESUME_CHECKPOINT`. |
+| [`scripts/prime_launch_10car_16m_nohup.sh`](../scripts/prime_launch_10car_16m_nohup.sh) | Background (`nohup`) launcher for the 10-car 16M policy-only resume run; logs to `artifacts/prime_marl_10car_16m/nohup_train.log`. |
+| [`scripts/prime_eval_10car_16m.sh`](../scripts/prime_eval_10car_16m.sh) | Post-run evaluator for 10-car checkpoints (defaults to `--no-video`; set `PRIME_10CAR_EVAL_WITH_VIDEO=1` for MP4). |
 | [`scripts/prime_launch_16h_nohup.sh`](../scripts/prime_launch_16h_nohup.sh) | Background **~16h** slot: `nohup` + [`scripts/prime_train_budget_fast.sh`](../scripts/prime_train_budget_fast.sh), log under `artifacts/prime_marl_2car_budget_fast/nohup_train.log` (override with `PRIME_16H_LOG`). |
 | [`scripts/prime_resume_budget_fast.sh`](../scripts/prime_resume_budget_fast.sh) | Resume from a `.pt` checkpoint and add stream steps: set `PRIME_RESUME_CHECKPOINT` and `PRIME_TIMESTEPS_ADD` (see §2.1). |
 | [`scripts/prime_run_competitive_calibration.sh`](../scripts/prime_run_competitive_calibration.sh) | Runs the staged competitiveness sweep (pace/overtake/combined) with short calibration configs and fixed-seed eval JSON/MP4 outputs. |
@@ -83,6 +89,9 @@ bash scripts/prime_install_deps.sh
 bash scripts/prime_train_smoke.sh
 # Calibrate (optional): time a short run, then edit total_timesteps in prime_marl_2car_budget.yaml if needed.
 bash scripts/prime_train_budget.sh
+# 10-car preflight + 16M (policy-only warm start):
+# PRIME_10CAR_RESUME_CHECKPOINT=/path/to/best_model_torch.pt bash scripts/prime_train_10car_preflight.sh
+# PRIME_10CAR_RESUME_CHECKPOINT=/path/to/best_model_torch.pt bash scripts/prime_launch_10car_16m_nohup.sh
 # ~16h A100 2-car budget_fast (background): bash scripts/prime_launch_16h_nohup.sh
 # Or full long run:
 # bash scripts/prime_train_long.sh

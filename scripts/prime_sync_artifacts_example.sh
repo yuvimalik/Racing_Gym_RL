@@ -21,6 +21,14 @@ Budget run (config/prime_marl_2car_budget.yaml):
 
   rsync -avz -e ssh USER@PRIME_HOST:~/Racing_Gym_RL/artifacts/prime_marl_2car_budget/ ~/prime_racing_backup_budget/
 
+10-car preflight (config/prime_marl_10car_preflight.yaml):
+
+  rsync -avz -e ssh USER@PRIME_HOST:~/Racing_Gym_RL/artifacts/prime_marl_10car_preflight/ ~/prime_racing_backup_10car_preflight/
+
+10-car long run (config/prime_marl_10car_16m.yaml):
+
+  rsync -avz -e ssh USER@PRIME_HOST:~/Racing_Gym_RL/artifacts/prime_marl_10car_16m/ ~/prime_racing_backup_10car_16m/
+
 ~16h A100 run (config/prime_marl_2car_budget_fast.yaml, launcher scripts/prime_launch_16h_nohup.sh):
 
   rsync -avz -e ssh USER@PRIME_HOST:~/Racing_Gym_RL/artifacts/prime_marl_2car_budget_fast/ ~/prime_racing_backup_budget_fast/
