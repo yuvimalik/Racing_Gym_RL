@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Launch 10-car 16M policy-only resume run under nohup.
+# Launch 10-car policy-only resume run (10M target) under nohup.
 set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"

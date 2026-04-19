@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 10-car MARL 16M run with policy-only warm start.
+# 10-car MARL run (10M target) with policy-only warm start.
 # Usage:
 #   PRIME_10CAR_RESUME_CHECKPOINT=/path/to/best_model_torch.pt bash scripts/prime_train_10car_16m_policy_resume.sh
 set -euo pipefail

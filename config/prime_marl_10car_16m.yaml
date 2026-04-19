@@ -1,8 +1,8 @@
-# Prime Intellect — 10-car MARL long run (16M stream timesteps).
+# Prime Intellect — 10-car MARL long run (10M stream timesteps).
 #
 # Intended launch style: policy-only warm start from best available checkpoint.
 # Timesteps are agent-stream steps; with num_agents=10 and num_envs=1:
-#   16_000_000 stream steps ~= 1_600_000 env-level steps.
+#   10_000_000 stream steps ~= 1_000_000 env-level steps.
 
 environment:
   env_id: MultiCarRacing-v0
@@ -38,7 +38,7 @@ training:
   trainer_backend: torch
   marl_paradigm: shared_policy_ippo
   torch_policy_variant: autoresearch_run_008
-  total_timesteps: 16000000
+  total_timesteps: 10000000
   eval_freq: 200000
   eval_subprocess: true
   n_eval_episodes: 1
