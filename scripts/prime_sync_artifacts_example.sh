@@ -29,6 +29,11 @@ Budget run (config/prime_marl_2car_budget.yaml):
 
   rsync -avz -e ssh USER@PRIME_HOST:~/Racing_Gym_RL/artifacts/prime_marl_10car_16m/ ~/prime_racing_backup_10car_16m/
 
+10-car 5-loop videos only (tiled + broadcast exports):
+
+  rsync -avz -e ssh USER@PRIME_HOST:~/Racing_Gym_RL/artifacts/prime_marl_10car_16m/results/5loop_videos/*.mp4 ~/prime_racing_backup_10car_5loop_videos/
+  rsync -avz -e ssh USER@PRIME_HOST:~/Racing_Gym_RL/artifacts/prime_marl_10car_16m/results/5loop_videos/*.json ~/prime_racing_backup_10car_5loop_videos/
+
 ~16h A100 run (config/prime_marl_2car_budget_fast.yaml, launcher scripts/prime_launch_16h_nohup.sh):
 
   rsync -avz -e ssh USER@PRIME_HOST:~/Racing_Gym_RL/artifacts/prime_marl_2car_budget_fast/ ~/prime_racing_backup_budget_fast/

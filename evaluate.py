@@ -129,8 +129,8 @@ def action_batch_to_env(action_batch, n_envs, n_agents):
     return action_batch.reshape(n_envs, n_agents, -1)
 
 
-def compose_render_frame(frame):
-    """Convert single-agent or stacked multi-agent render output into one RGB frame."""
+def compose_render_frame(frame, camera_mode="tiled", reference_car=0):
+    """Convert render output into one RGB frame for tiled or broadcast camera modes."""
     if frame is None:
         return None
     frame_arr = np.asarray(frame)
@@ -138,7 +138,10 @@ def compose_render_frame(frame):
         return frame_arr
     if frame_arr.ndim == 4:
         # MultiCarRacing returns one frame per car: (num_agents, H, W, C).
-        # Tile them side-by-side so OpenCV receives a standard HWC image.
+        # Tiled mode keeps all cars visible; broadcast mode follows one car.
+        if str(camera_mode).strip().lower() == "broadcast":
+            idx = int(np.clip(int(reference_car), 0, frame_arr.shape[0] - 1))
+            return frame_arr[idx]
         return np.concatenate(list(frame_arr), axis=1)
     raise ValueError(f"Unsupported render frame shape: {frame_arr.shape}")
 
@@ -391,8 +394,19 @@ def create_env(config, render_mode='rgb_array', seed=None, training_mode=False):
     return env
 
 
-def evaluate_torch_model(model_path, config, n_episodes=10, record_video=True, seed=42,
-                         show_window=False, video_path=None):
+def evaluate_torch_model(
+    model_path,
+    config,
+    n_episodes=10,
+    record_video=True,
+    seed=42,
+    show_window=False,
+    video_path=None,
+    target_loops=None,
+    max_steps=50000,
+    camera_mode="tiled",
+    reference_car=0,
+):
     """Evaluate a Torch .pt checkpoint with optional video and optional live window."""
     if CnnActorCritic is None:
         raise RuntimeError("Cannot load Torch model: train.py CnnActorCritic not available")
@@ -471,11 +485,32 @@ def evaluate_torch_model(model_path, config, n_episodes=10, record_video=True, s
     else:
         video_path = None
 
-    print(
-        f"Evaluating Torch model for {n_episodes} episodes "
-        f"({'video' if record_video else 'no video'}, {'live window' if show_window else 'headless window'})..."
-    )
-    for episode in range(n_episodes):
+    target_loops = int(target_loops) if target_loops is not None else None
+    max_steps = int(max_steps) if max_steps is not None else None
+    camera_mode = str(camera_mode).strip().lower()
+    if camera_mode not in {"tiled", "broadcast"}:
+        raise ValueError(f"Unknown camera mode: {camera_mode}")
+    if target_loops is not None and target_loops <= 0:
+        raise ValueError("--target-loops must be a positive integer when provided.")
+    if max_steps is not None and max_steps <= 0:
+        raise ValueError("--max-steps must be a positive integer when provided.")
+    if target_loops is not None:
+        rollout_count = 1
+        print(
+            f"Evaluating Torch model in continuous rollout mode until lap_count>={target_loops} "
+            f"(camera={camera_mode}, ref_car={reference_car}, max_steps={max_steps})..."
+        )
+    else:
+        rollout_count = int(n_episodes)
+        print(
+            f"Evaluating Torch model for {rollout_count} episodes "
+            f"({'video' if record_video else 'no video'}, {'live window' if show_window else 'headless window'}, "
+            f"camera={camera_mode}, ref_car={reference_car})..."
+        )
+
+    achieved_loops = 0
+    stop_reason = "episodes_complete"
+    for episode in range(rollout_count):
         obs = base_env.reset()
         done = False
         episode_reward = 0.0
@@ -496,7 +531,11 @@ def evaluate_torch_model(model_path, config, n_episodes=10, record_video=True, s
         front_gap_values = []
         side_gap_values = []
         front_closing_values = []
-        while not done_to_bool(done):
+        inferred_laps_from_progress = 0
+        inferred_lap_latched = False
+        prev_ref_progress = None
+        step_count = 0
+        while True:
             obs_policy = obs_to_policy_batch(obs, obs_layout)
             obs_t = torch.as_tensor(obs_policy, dtype=torch.float32, device=device) / 255.0
             with torch.no_grad():
@@ -511,6 +550,7 @@ def evaluate_torch_model(model_path, config, n_episodes=10, record_video=True, s
             obs, reward, done, info = base_env.step(env_action)
             episode_reward += reward_to_scalar(reward)
             episode_length += 1
+            step_count += 1
             flat_actions = np.asarray(env_action).reshape(-1, action_dim)
             steer_values.extend(flat_actions[:, 0].astype(np.float32).tolist())
             if action_dim >= 2:
@@ -543,9 +583,34 @@ def evaluate_torch_model(model_path, config, n_episodes=10, record_video=True, s
                     rank_values.append(float(agent_info.get("telemetry/rank", 0.0)))
             if start_time is None and info0.get("time") is not None:
                 start_time = info0["time"]
+            if target_loops is not None:
+                lap_counts = [
+                    int(agent_info.get("lap_count", 0))
+                    for agent_info in agent_infos
+                    if isinstance(agent_info, dict)
+                ]
+                if lap_counts:
+                    achieved_loops = max(achieved_loops, max(lap_counts))
+                ref_info = (
+                    agent_infos[int(np.clip(int(reference_car), 0, max(len(agent_infos) - 1, 0)))]
+                    if len(agent_infos) > 0 and isinstance(agent_infos[0], dict)
+                    else info0
+                )
+                ref_progress = ref_info.get("progress") if isinstance(ref_info, dict) else None
+                if ref_progress is not None:
+                    ref_progress = float(ref_progress)
+                    if prev_ref_progress is not None and ref_progress < (prev_ref_progress - 0.5):
+                        inferred_laps_from_progress += 1
+                    if ref_progress >= 0.999 and not inferred_lap_latched:
+                        inferred_laps_from_progress += 1
+                        inferred_lap_latched = True
+                    if ref_progress < 0.2:
+                        inferred_lap_latched = False
+                    prev_ref_progress = ref_progress
+                achieved_loops = max(achieved_loops, inferred_laps_from_progress)
             frame = base_env.render(mode="rgb_array")
             if frame is not None:
-                frame = compose_render_frame(frame)
+                frame = compose_render_frame(frame, camera_mode=camera_mode, reference_car=reference_car)
                 if record_video:
                     if video_writer is None:
                         h, w = frame.shape[:2]
@@ -555,6 +620,17 @@ def evaluate_torch_model(model_path, config, n_episodes=10, record_video=True, s
                     frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
                     cv2.imshow("Racecar Gym (Torch policy)", frame_bgr)
                     cv2.waitKey(1)
+            if done_to_bool(done):
+                stop_reason = "env_done"
+                break
+            if target_loops is not None and achieved_loops >= target_loops:
+                stop_reason = f"target_loops_{target_loops}"
+                print(f"Reached target loops: {achieved_loops}/{target_loops} at step {step_count}")
+                break
+            if target_loops is not None and max_steps is not None and step_count >= max_steps:
+                stop_reason = f"max_steps_{max_steps}"
+                print(f"Reached max_steps={max_steps} before target loops (achieved_loops={achieved_loops})")
+                break
         progress_values = [
             float(agent_info.get("progress", 0.0))
             for agent_info in (info if isinstance(info, (list, tuple)) else [info])
@@ -586,12 +662,14 @@ def evaluate_torch_model(model_path, config, n_episodes=10, record_video=True, s
         episode_min_side_gap.append(float(np.min(side_gap_values)) if side_gap_values else 0.0)
         episode_mean_front_closing_speed.append(float(np.mean(front_closing_values)) if front_closing_values else 0.0)
         print(
-            f"Episode {episode + 1}/{n_episodes}: Reward={episode_reward:.2f}, "
+            f"Episode {episode + 1}/{rollout_count}: Reward={episode_reward:.2f}, "
             f"Length={episode_length}, Progress={progress:.2%}, Time={episode_time:.2f}s, "
             f"MeanRank={np.mean(rank_values) if rank_values else 1.0:.2f}, "
             f"Collision={int(collision_seen)}, Hook={int(hook_contact_seen)}, "
             f"ContactTerminate={int(contact_termination_seen)}"
         )
+        if target_loops is not None:
+            break
     if video_writer is not None:
         video_writer.release()
         print(f"Video saved to {video_path}")
@@ -649,6 +727,12 @@ def evaluate_torch_model(model_path, config, n_episodes=10, record_video=True, s
         "episode_mean_side_gap": episode_mean_side_gap,
         "episode_min_side_gap": episode_min_side_gap,
         "episode_mean_front_closing_speed": episode_mean_front_closing_speed,
+        "target_loops": int(target_loops) if target_loops is not None else None,
+        "achieved_loops": int(achieved_loops),
+        "camera_mode": camera_mode,
+        "reference_car": int(reference_car),
+        "max_steps": int(max_steps) if max_steps is not None else None,
+        "stop_reason": stop_reason,
     }
     return stats, str(video_path) if video_path else None
 
@@ -838,6 +922,12 @@ def print_stats(stats):
         print(f"Min Side Gap (mean across episodes): {stats['min_side_gap']:.2f}")
     if 'mean_front_closing_speed' in stats:
         print(f"Mean Front Closing Speed: {stats['mean_front_closing_speed']:.2f}")
+    if stats.get('target_loops') is not None:
+        print(f"Loop Target: {int(stats['target_loops'])} | Achieved: {int(stats.get('achieved_loops', 0))}")
+    if stats.get('camera_mode') is not None:
+        print(f"Camera Mode: {stats.get('camera_mode')} | Reference Car: {int(stats.get('reference_car', 0))}")
+    if stats.get('stop_reason') is not None:
+        print(f"Stop Reason: {stats.get('stop_reason')}")
     print("="*50)
 
 
@@ -895,6 +985,12 @@ def save_stats(stats, output_path):
         'episode_mean_side_gap': [float(v) for v in stats.get('episode_mean_side_gap', [])],
         'episode_min_side_gap': [float(v) for v in stats.get('episode_min_side_gap', [])],
         'episode_mean_front_closing_speed': [float(v) for v in stats.get('episode_mean_front_closing_speed', [])],
+        'target_loops': (int(stats['target_loops']) if stats.get('target_loops') is not None else None),
+        'achieved_loops': int(stats.get('achieved_loops', 0)),
+        'camera_mode': stats.get('camera_mode'),
+        'reference_car': int(stats.get('reference_car', 0)),
+        'max_steps': (int(stats['max_steps']) if stats.get('max_steps') is not None else None),
+        'stop_reason': stats.get('stop_reason'),
         'model_path': stats.get('model_path'),
         'config_path': stats.get('config_path'),
         'seed': int(stats.get('seed', 0)),
@@ -957,6 +1053,31 @@ def main():
         action='store_true',
         help='Display the OpenCV live window during evaluation'
     )
+    parser.add_argument(
+        '--target-loops',
+        type=int,
+        default=None,
+        help='Optional loop target for a single continuous rollout (Torch evaluation only).'
+    )
+    parser.add_argument(
+        '--camera-mode',
+        type=str,
+        default='tiled',
+        choices=['tiled', 'broadcast'],
+        help='Video camera mode: tiled (all cars) or broadcast (single reference car).'
+    )
+    parser.add_argument(
+        '--reference-car',
+        type=int,
+        default=0,
+        help='Reference car index for broadcast camera mode (Torch evaluation only).'
+    )
+    parser.add_argument(
+        '--max-steps',
+        type=int,
+        default=50000,
+        help='Safety cap on rollout steps for target-loops mode (Torch evaluation only).'
+    )
     
     args = parser.parse_args()
     
@@ -974,6 +1095,10 @@ def main():
             seed=args.seed,
             show_window=args.show_window,
             video_path=args.output_video,
+            target_loops=args.target_loops,
+            max_steps=args.max_steps,
+            camera_mode=args.camera_mode,
+            reference_car=args.reference_car,
         )
     else:
         stats, video_path = evaluate_model(
