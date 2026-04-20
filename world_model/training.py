@@ -10,9 +10,12 @@ import torch
 from torch.utils.data import DataLoader
 
 from world_model.losses import (
+    fixed_scale_normalized_masked_mse_loss,
+    PerceptualLoss,
     free_bits_kl,
     masked_bce_with_logits_loss,
     masked_mse_loss,
+    normalized_masked_mse_loss,
     reconstruction_loss,
     reward_loss,
 )
@@ -154,6 +157,12 @@ def train_world_model_epoch(
     batch_logger: callable | None = None,
     telemetry_loss_scale: float = 0.0,
     telemetry_weights: dict[str, float] | None = None,
+    perceptual_loss_module: PerceptualLoss | None = None,
+    perceptual_loss_scale: float = 0.0,
+    progress_loss_type: str = "mse",
+    progress_loss_scale: float | None = None,
+    ego_motion_loss_scale: float = 0.0,
+    ego_motion_targets: Iterable[str] | None = None,
 ) -> dict[str, float]:
     device = torch.device(device)
     device_type = "cuda" if device.type == "cuda" else "cpu"
@@ -162,9 +171,14 @@ def train_world_model_epoch(
     telemetry_weights = telemetry_weights or {}
     totals = {
         "recon_loss": 0.0,
+        "perceptual_loss": 0.0,
         "reward_loss": 0.0,
         "kl_loss": 0.0,
         "telemetry_loss": 0.0,
+        "ego_motion_loss": 0.0,
+        "ego_motion_speed_loss": 0.0,
+        "ego_motion_steer_loss": 0.0,
+        "ego_motion_progress_delta_loss": 0.0,
         "speed_loss": 0.0,
         "progress_delta_loss": 0.0,
         "steer_loss": 0.0,
@@ -173,6 +187,7 @@ def train_world_model_epoch(
         "total_loss": 0.0,
     }
     num_batches = 0
+    enabled_ego_motion_targets = {str(target) for target in (ego_motion_targets or ("speed", "steer", "progress_delta"))}
 
     for batch_index, batch in enumerate(loader, start=1):
         images = batch["images"].to(device, non_blocking=non_blocking)
@@ -190,6 +205,12 @@ def train_world_model_epoch(
         with torch.autocast(device_type=device_type, dtype=torch.float16, enabled=bool(use_amp and device.type == "cuda")):
             output = model(images=images, actions=actions, is_first=is_first)
             recon = reconstruction_loss(output.reconstruction, images)
+            if perceptual_loss_module is not None and float(perceptual_loss_scale) > 0.0:
+                recon_flat = output.reconstruction.reshape(-1, *output.reconstruction.shape[-3:])
+                images_flat = images.reshape(-1, *images.shape[-3:])
+                perceptual = perceptual_loss_module(recon_flat, images_flat)
+            else:
+                perceptual = recon.new_tensor(0.0)
             rew = reward_loss(output.reward, rewards)
             kl = free_bits_kl(
                 posterior_mean=output.posterior_mean,
@@ -200,7 +221,22 @@ def train_world_model_epoch(
             )
             if float(telemetry_loss_scale) > 0.0 and float(telemetry_valid.sum().item()) > 0.0:
                 speed_loss = masked_mse_loss(output.telemetry["speed"], speed, telemetry_valid)
-                progress_delta_loss = masked_mse_loss(output.telemetry["progress_delta"], progress_delta, telemetry_valid)
+                progress_loss_type_normalized = str(progress_loss_type).lower()
+                if progress_loss_type_normalized == "normalized_mse":
+                    progress_delta_loss = normalized_masked_mse_loss(
+                        output.telemetry["progress_delta"],
+                        progress_delta,
+                        telemetry_valid,
+                    )
+                elif progress_loss_type_normalized == "fixed_scale_normalized_mse":
+                    progress_delta_loss = fixed_scale_normalized_masked_mse_loss(
+                        output.telemetry["progress_delta"],
+                        progress_delta,
+                        telemetry_valid,
+                        scale=float(progress_loss_scale or 1e-4),
+                    )
+                else:
+                    progress_delta_loss = masked_mse_loss(output.telemetry["progress_delta"], progress_delta, telemetry_valid)
                 steer_loss = masked_mse_loss(output.telemetry["steer"], steer, telemetry_valid)
                 corner_angle_loss = masked_mse_loss(output.telemetry["corner_angle"], corner_angle, telemetry_valid)
                 offtrack_loss = masked_bce_with_logits_loss(output.telemetry["offtrack_logits"], offtrack, telemetry_valid)
@@ -219,7 +255,35 @@ def train_world_model_epoch(
                 corner_angle_loss = zero
                 offtrack_loss = zero
                 telemetry_loss = zero
-            total = recon + (reward_scale * rew) + (kl_scale * kl) + (float(telemetry_loss_scale) * telemetry_loss)
+            if float(ego_motion_loss_scale) > 0.0 and float(telemetry_valid.sum().item()) > 0.0:
+                zero = recon.new_tensor(0.0)
+                ego_motion_speed_loss = (
+                    masked_mse_loss(output.ego_motion["speed"], speed, telemetry_valid)
+                    if "speed" in enabled_ego_motion_targets else zero
+                )
+                ego_motion_steer_loss = (
+                    masked_mse_loss(output.ego_motion["steer"], steer, telemetry_valid)
+                    if "steer" in enabled_ego_motion_targets else zero
+                )
+                ego_motion_progress_delta_loss = (
+                    masked_mse_loss(output.ego_motion["progress_delta"], progress_delta, telemetry_valid)
+                    if "progress_delta" in enabled_ego_motion_targets else zero
+                )
+                ego_motion_loss = ego_motion_speed_loss + ego_motion_steer_loss + ego_motion_progress_delta_loss
+            else:
+                zero = recon.new_tensor(0.0)
+                ego_motion_speed_loss = zero
+                ego_motion_steer_loss = zero
+                ego_motion_progress_delta_loss = zero
+                ego_motion_loss = zero
+            total = (
+                recon
+                + (float(perceptual_loss_scale) * perceptual)
+                + (reward_scale * rew)
+                + (kl_scale * kl)
+                + (float(telemetry_loss_scale) * telemetry_loss)
+                + (float(ego_motion_loss_scale) * ego_motion_loss)
+            )
 
         if grad_scaler is not None and bool(use_amp and device.type == "cuda"):
             grad_scaler.scale(total).backward()
@@ -230,9 +294,14 @@ def train_world_model_epoch(
             optimizer.step()
 
         totals["recon_loss"] += float(recon.item())
+        totals["perceptual_loss"] += float(perceptual.item())
         totals["reward_loss"] += float(rew.item())
         totals["kl_loss"] += float(kl.item())
         totals["telemetry_loss"] += float(telemetry_loss.item())
+        totals["ego_motion_loss"] += float(ego_motion_loss.item())
+        totals["ego_motion_speed_loss"] += float(ego_motion_speed_loss.item())
+        totals["ego_motion_steer_loss"] += float(ego_motion_steer_loss.item())
+        totals["ego_motion_progress_delta_loss"] += float(ego_motion_progress_delta_loss.item())
         totals["speed_loss"] += float(speed_loss.item())
         totals["progress_delta_loss"] += float(progress_delta_loss.item())
         totals["steer_loss"] += float(steer_loss.item())
@@ -248,7 +317,9 @@ def train_world_model_epoch(
                 f"recon={recon.item():.6f} "
                 f"reward={rew.item():.6f} "
                 f"kl={kl.item():.6f} "
+                f"perceptual={perceptual.item():.6f} "
                 f"telemetry={telemetry_loss.item():.6f} "
+                f"ego_motion={ego_motion_loss.item():.6f} "
                 f"total={total.item():.6f}",
                 flush=True,
             )
@@ -261,9 +332,14 @@ def train_world_model_epoch(
             batch_logger(
                 {
                     "batch/recon_loss": float(recon.item()),
+                    "batch/perceptual_loss": float(perceptual.item()),
                     "batch/reward_loss": float(rew.item()),
                     "batch/kl_loss": float(kl.item()),
                     "batch/telemetry_loss": float(telemetry_loss.item()),
+                    "batch/ego_motion_loss": float(ego_motion_loss.item()),
+                    "batch/ego_motion_speed_loss": float(ego_motion_speed_loss.item()),
+                    "batch/ego_motion_steer_loss": float(ego_motion_steer_loss.item()),
+                    "batch/ego_motion_progress_delta_loss": float(ego_motion_progress_delta_loss.item()),
                     "batch/speed_loss": float(speed_loss.item()),
                     "batch/progress_delta_loss": float(progress_delta_loss.item()),
                     "batch/steer_loss": float(steer_loss.item()),

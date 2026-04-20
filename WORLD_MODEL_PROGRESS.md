@@ -1,6 +1,176 @@
 # World Model Progress
 
+## Active Frontier
+
+### Official Reframe: Pose Evolution Bottleneck
+
+The active question is no longer whether more data, more horizon, or another objective-only tweak will solve turning.
+
+The active question is:
+
+- **Macro question:** can explicit pose evolution improve sharp-turn future dynamics while preserving the clean `P5` decoder prior?
+- **Primary experiment question:** can a pose-conditioned branch make the curated `sharp_turn` clip actually turn, rather than just remain geometrically stable?
+
+The older diversity / horizon ladder remains important as completed context, but it is no longer the active frontier.
+
+### Current Architecture Ceiling
+
+- best stable checkpoint under pixel-MSE + telemetry supervision:
+  - `models/world_model/P5_d4_main_telemetry_a100_bs128_e15/rssm_sequence_epoch_015.pt`
+- what `P5` represents:
+  - best overall tradeoff between visual stability and short-horizon physics faithfulness
+  - strongest current baseline to beat for any follow-up intervention
+
+### Current Bottleneck
+
+- objective-only tuning result:
+  - exhausted for now
+- current failure read:
+  - general hallucinations are best at `P5`
+  - `2C` may be geometrically steadier, but still does not produce meaningful turning
+  - sharp-turn-specific future dynamics remain weak across all tested interventions
+- discarded structural sub-hypotheses:
+  - explicit ego-motion head alone was non-transformative
+  - stochastic capacity increase to `64` degraded both sharp-turn and general hallucination quality
+  - lightweight latent factorization improved stability at best, but not turn behavior
+- active structural hypothesis:
+  - the model needs an explicit pose / viewpoint evolution mechanism, not just better latent organization
+
+### Active Intervention
+
+- active mainline:
+  - **Structural Intervention 2D**
+- immediate implementation targets:
+  - keep a stable world-content latent
+  - predict a compact pose / viewpoint delta each step
+  - decode from world state plus pose representation
+  - use `P5` only as a partial transplant where defensible
+  - evaluate only the curated `sharp_turn` clip
+  - treat further latent scaling as secondary unless pose-conditioned decoding is clean but weak
+
+## Objective Ablation Outcome
+
+### I1B-1: Perceptual-Only
+
+- outcome:
+  - neutral-to-worse on the `sharp_turn` clip
+  - no credible positive signal that perceptual loss alone fixes the failure mode
+
+### I1B-2: Safer Progress-Only
+
+- outcome:
+  - general hallucinations remained decent
+  - sharp-turn-specific future dynamics remained weak
+  - objective-only progress supervision did not unlock the failure mode
+
+### I1B-3: Combined Objective
+
+- outcome:
+  - failed due to unstable `progress_delta` scaling
+  - not a valid positive test of the combined objective
+
+### Current conclusion
+
+- objective-only tuning did not materially improve sharp-turn modeling
+- the unresolved issue is:
+  - hard-turn ego/world evolution
+  - not generic hallucination quality
+- the next branch is structural, not another longer run on the same objective family
+
+## Structural Intervention Ladder
+
+### 2A: Ego-Motion Head + Decoder Conditioning
+
+- goal:
+  - make ego motion explicit in the latent-to-image path
+- structure:
+  - predict `speed`, `steer`, and `progress_delta` from the deterministic state
+  - condition the decoder on those predicted values
+- evaluation:
+  - `P5` baseline
+  - `sharp_turn` only
+
+### 2B: Latent Capacity Expansion
+
+- trigger:
+  - only if `2A` is weak, neutral, or destabilizing
+- structure:
+  - increase `stochastic_dim` from `32 -> 64`
+  - optionally retain the ego-motion pathway if `2A` is non-destructive
+- note:
+  - this is not a clean warm-start-compatible tweak and should be treated as a new branch
+
+### 2C: Factorized World-State vs Ego-Motion Latents
+
+- trigger:
+  - `2A` was non-transformative and `2B` was a negative result
+- structure:
+  - split latent decoding inputs into:
+    - a world-content latent branch
+    - an ego-motion latent branch
+  - supervise the ego-motion branch directly on `speed`, `steer`, and `progress_delta`
+  - keep the decoder aware of both branches explicitly
+- note:
+  - this is the first intervention that directly targets ego/world disentanglement rather than adding capacity or another side head
+
+### 2D: Pose-Conditioned World Model
+
+- trigger:
+  - `2C` was at best geometrically steadier but still did not produce real turning
+- structure:
+  - maintain a world-content latent
+  - predict an explicit pose / viewpoint delta each step
+  - decode from world state plus pose representation
+- note:
+  - this is the first branch that tries to model turn evolution as a state transform rather than as latent content alone
+
+## Reclassification Of Recent Results
+
+- `P5`:
+  - baseline to beat
+- `D6`:
+  - over-injection failure
+- `D6b`, `P6b`, `P8`:
+  - diagnostic evidence that curated data alone does not solve future-turn modeling
+- `I1B_p5_perc_progress_local_e5`:
+  - combined-objective formulation failure
+  - not yet a valid negative result on perceptual loss
+- `I1B1_p5_perceptual_only`:
+  - objective-only ablation with no meaningful sharp-turn improvement
+- `I1B2_p5_progress_only`:
+  - objective-only ablation with decent general hallucination but weak sharp-turn future dynamics
+- `S2A_p5_ego_motion_local`:
+  - structural intervention with explicit ego-motion head
+  - non-transformative relative to prior runs
+- `S2B_p5_stoch64_local`:
+  - latent-capacity expansion branch
+  - negative result with weaker sharp-turn and weaker general hallucination quality
+- `S2C_p5_factorized_local`:
+  - factorized world-vs-motion branch
+  - geometrically steadier at best, but still no meaningful turning
+- current implication:
+  - another fixed-objective hero run is not the right next experiment
+  - another capacity-only or auxiliary-head-only run is also not justified
+  - the next branch should explicitly model pose / viewpoint evolution
+
+## Why `progress_delta` Can Blow Up
+
+- `D4_main` scale:
+  - mean abs around `0.00040`
+  - median abs `0.0`
+  - p90 abs around `0.00217`
+- why this matters:
+  - many windows are effectively zero
+  - per-batch normalization makes scale unstable
+  - high weighting amplifies rare nonzero errors and noisy batches
+  - the model can optimize a numerically dominant but poorly conditioned surrogate
+- likely result:
+  - telemetry loss dominates
+  - geometry worsens even while total loss falls
+
 ## Sprint Framing
+
+Historical context only: the sections below document the completed fixed-architecture diversity / horizon ladder and the experiments that led to `P5`. They are no longer the active mainline.
 
 ### Macro Question
 
@@ -352,13 +522,17 @@ The final sprint succeeds if:
   - `E3` is likely the best current frozen world model
   - the dominant remaining issue is world/ego consistency, not generic blur alone
   - the latent actor-critic diagnostic confirms that imagined short-horizon optimization can still exploit model errors and fail real transfer
+  - the `P5` checkpoint is still the cleanest visual prior among the physics-aware runs
+  - manual hard-turn data is valuable, but only in a limited curated proportion
 - what we have ruled out:
   - the baseline failure is not just lack of optimization time on the original narrow dataset
   - more replay diversity alone does not fully solve long-horizon geometry drift
+  - adding a large noisy manual hard-turn block directly into training does not improve the model by default and can visibly regress reconstruction quality
 - what remains uncertain:
   - whether short-horizon imagined dynamics are still control-faithful despite the egocentric visual artifact
   - whether predicted reward stays aligned enough to support actor-critic training
   - whether one larger-scale run is justified after the next diagnostic checks
+  - whether a very small `P5` fine-tune on curated turn-heavy data can improve sharp-turn hallucinations without destabilizing the decoder
 
 ## Budget Ledger
 
@@ -673,3 +847,174 @@ The final sprint succeeds if:
     - the longer-horizon follow-up improved reconstruction and telemetry losses further
     - hallucination quality remained strong overall
     - the remaining gate is held-out reward / telemetry faithfulness, especially `progress_delta`
+- remote A100 continuation:
+  - purpose:
+    - test whether a larger-throughput continuation on `A100 80GB` can strengthen short-horizon physics faithfulness without giving up hallucination quality
+  - run:
+    - `P5_d4_main_telemetry_a100_bs128_e15`
+  - hardware / setup:
+    - `1x A100 80GB`
+    - warm start from `models/world_model/P4_d4_main_telemetry_horizon/rssm_sequence_epoch_005.pt`
+    - checkpoint-compatible horizon config with throughput scaled up:
+      - `batch_size=128`
+      - `num_workers=24`
+      - `prefetch_factor=6`
+      - `use_amp=true`
+  - final train / validation snapshot:
+    - checkpoint: `models/world_model/P5_d4_main_telemetry_a100_bs128_e15/rssm_sequence_epoch_015.pt`
+    - hallucination metrics:
+      - `mean_mse=0.004041`
+      - `mean_ssim=0.9651`
+      - `sharp_turn_ssim=0.9159`
+      - `gentle_turn_ssim=0.9307`
+      - `recovery_ssim=0.9119`
+    - W&B run:
+      - `https://wandb.ai/yuv05malik-university-of-pennsylvania/racing-world-model/runs/nv6lx85v`
+  - held-out evaluation:
+    - output: `results/world_model/control/reward_faithfulness_p5_d4_main_telemetry_a100_bs128_e15.json`
+    - reward metrics:
+      - `mean_mse`: `0.1007`
+      - `mean_mae`: `0.0965`
+      - `mean_corr`: `0.8387`
+      - `mean_sign_match`: `0.8921`
+      - `mean_bias`: `0.0090`
+    - telemetry metrics:
+      - `speed`: `mean_mse=2.8807`, `mean_mae=0.8186`, `mean_corr=0.7750`
+      - `progress_delta`: `mean_mse=0.001131`, `mean_mae=0.01933`, `mean_corr=0.0713`
+      - `steer`: `mean_mse=0.006319`, `mean_mae=0.06235`, `mean_corr=0.6478`
+      - `corner_angle`: `mean_mse=0.000556`, `mean_mae=0.01735`, correlation still low-signal / undefined
+      - `offtrack`: `mean_bce=0.000830`, `mean_accuracy=1.0000`
+  - conclusion:
+    - the A100 continuation improved `speed` substantially and kept `reward`, `steer`, and `offtrack` strong
+    - hallucination quality remained high, so the physics-aware continuation did not damage the visual result
+    - `progress_delta` improved in absolute error but still did not become a strongly predictive signal
+    - this is strong enough to support the final project story, with `progress_delta` / ego-world advancement consistency remaining the clearest unresolved physics gap
+
+### Q6: Manual Hard-Turn Data Injection
+
+- purpose:
+  - test whether explicitly collected manual sharp-turn driving can improve the sharp-turn hallucination regime that the earlier replay sets underrepresented
+- collected datasets:
+  - `results/world_model/replay/d5_manual_hard_turns_ccw_manifest.json`
+    - `9` manual episodes
+    - `15000` frames
+    - `mean_progress=0.7727`
+    - `offtrack_rate=0.7778`
+  - `results/world_model/replay/d5_manual_hard_turns_ccw_fast_manifest.json`
+    - `5` manual episodes
+    - `10000` frames
+    - `mean_progress=0.9321`
+    - `offtrack_rate=1.0000`
+- initial merged training set:
+  - `results/world_model/replay/d6_d4_plus_d5_hard_turns_train_manifest.json`
+  - `results/world_model/replay/d6_d4_plus_d5_hard_turns_val_manifest.json`
+- result:
+  - `D6` added the right kind of turn coverage, but in too large and too noisy a proportion
+  - roughly `25000 / 39000` train frames were manual hard-turn data
+  - the model became more specialized toward that regime but visual stability regressed
+  - the side-by-side sharp-turn hallucinations showed scattered dot artifacts and worse geometry consistency
+- conclusion:
+  - the issue was not that manual turn data is useless
+  - the issue was the merge ratio and noise level
+  - manual turn data should be treated as targeted augmentation, not the dominant training distribution
+
+### Q7: Curated Manual Turn Supplement
+
+- purpose:
+  - preserve genuine turn signal from manual collection without overwhelming the stable `D4_main` visual prior
+- curated manual subset:
+  - manifest: `results/world_model/replay/d5_manual_hard_turns_curated_train_manifest.json`
+  - selected episodes:
+    - `d5_manual_hard_turns_ccw/episode_000000.npz`
+    - `d5_manual_hard_turns_ccw/episode_000003.npz`
+    - `d5_manual_hard_turns_ccw/episode_000008.npz`
+  - selected summary:
+    - `3` manual episodes
+    - `5579` frames
+    - `mean_progress=0.9664`
+    - `offtrack_rate=0.6667`
+- balanced mixed dataset:
+  - train: `results/world_model/replay/d6b_d4_plus_d5_curated_train_manifest.json`
+  - val: `results/world_model/replay/d6b_d4_plus_d5_curated_val_manifest.json`
+  - train summary:
+    - `146` episodes
+    - `19579` frames
+    - `sources={'automatic': 138, 'ppo_policy': 5, 'manual': 3}`
+    - manual contribution now about `28.5%` of train frames instead of the much larger `D6` shift
+- quick continuation run:
+  - run: `P6b_d6b_curated_quick`
+  - warm start: `models/world_model/P5_d4_main_telemetry_a100_bs128_e15/rssm_sequence_epoch_015.pt`
+  - config: `config/world_model_local_e3_diverse_horizon.yaml`
+  - epochs: `2`
+  - sharp-turn-only evaluation is now the intended decision criterion
+- `P6b` result:
+  - epoch 1:
+    - `hallucination_ssim=0.9567`
+    - `sharp_turn_ssim=0.9148`
+  - epoch 2:
+    - `hallucination_ssim=0.9565`
+    - `sharp_turn_ssim=0.9088`
+  - train losses at epoch 2:
+    - `recon_loss=0.00442`
+    - `reward_loss=0.07009`
+    - `telemetry_loss=1.07708`
+    - `speed_loss=0.96706`
+    - `progress_delta_loss=0.000240`
+    - `steer_loss=0.00832`
+    - `offtrack_loss=0.05270`
+    - `total_loss=1.35930`
+- conclusion:
+  - `D6b` is a better training set than `D6`
+  - the footage stayed much crisper than the broader hard-turn injection run
+  - the next disciplined experiment is a low-learning-rate `P5` fine-tune on `D6b`, not another broad continuation
+
+### Q8: Planned P5 Fine-Tune
+
+- purpose:
+  - test whether `P5` can absorb a small amount of curated manual turn data without sacrificing the stable visual prior
+- setup:
+  - init checkpoint: `models/world_model/P5_d4_main_telemetry_a100_bs128_e15/rssm_sequence_epoch_015.pt`
+  - train manifest: `results/world_model/replay/d6b_d4_plus_d5_curated_train_manifest.json`
+  - val manifest: `results/world_model/replay/d6b_d4_plus_d5_curated_val_manifest.json`
+  - config: `config/world_model_local_p5_finetune.yaml`
+  - learning rate: `1e-4`
+  - batch size: `8`
+  - curated evaluation clips:
+    - `sharp_turn` only
+- status:
+  - completed
+- go / no-go criterion:
+  - sharp-turn hallucination should improve or at least remain stable without the decoder regressions seen in `D6/P7`
+- result:
+  - run family: `P8_p5_finetune_d6b`
+  - setup:
+    - init checkpoint: `models/world_model/P5_d4_main_telemetry_a100_bs128_e15/rssm_sequence_epoch_015.pt`
+    - train manifest: `results/world_model/replay/d6b_d4_plus_d5_curated_train_manifest.json`
+    - val manifest: `results/world_model/replay/d6b_d4_plus_d5_curated_val_manifest.json`
+    - fine-tune config: `config/world_model_local_p5_finetune.yaml`
+    - sharp-turn-only evaluation
+    - low learning rate, small local fine-tune
+  - qualitative read:
+    - results were average rather than clearly positive or clearly negative
+    - future track modeling remained limited
+    - it was still difficult to tell whether the ego car was truly turning through the imagined sharp turn
+    - the run did not produce a decisive breakthrough, but it also did not look like a total dead end
+- conclusion:
+  - a very small `P5` fine-tune on curated manual turn data is not enough by itself to unlock robust future turn modeling
+  - the remaining bottleneck still looks more like coverage plus representation than pure optimization time
+  - `P5` remains the cleanest overall checkpoint, while `P6b/P8` are useful for clarifying the remaining gap rather than replacing it
+
+## Intervention 1 Decision Log
+
+- active baseline:
+  - `P5`
+- active claim:
+  - the next disciplined test is objective-level correction, not more generic continuation training
+- immediate implementation changes to test:
+  - perceptual-only
+  - safer progress-only
+  - combined-safe only after one isolated ablation is non-destructive
+- explicit non-goals for this phase:
+  - no actor-critic follow-up
+  - no new hero run under the old pixel-MSE objective
+  - no more `D6`-style broad hard-turn merges

@@ -29,8 +29,8 @@ collector:
             speed_cap_ratio: 0.30
 
 autoencoder:
-  batch_size: 32
-  epochs: 200
+  batch_size: 16
+  epochs: 100
   learning_rate: 0.001
 
 rssm:
@@ -43,8 +43,8 @@ rssm:
 
 offline_training:
   sequence_length: 100
-  batch_size: 16
-  learning_rate: 0.0003
+  batch_size: 24
+  learning_rate: 0.0001
   free_nats: 1.0
   kl_scale: 1.0
   reward_scale: 1.0
@@ -59,7 +59,7 @@ offline_training:
   hallucination_horizon: 150
   hallucination_video_fps: 8.0
   window_stride: 4
-  num_workers: 8
+  num_workers: 4
   pin_memory: true
   persistent_workers: true
   prefetch_factor: 2

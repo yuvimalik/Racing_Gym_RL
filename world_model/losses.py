@@ -78,6 +78,39 @@ def masked_mse_loss(prediction: torch.Tensor, target: torch.Tensor, mask: torch.
     return weighted_error.sum() / normalizer
 
 
+def normalized_masked_mse_loss(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    mask: torch.Tensor,
+    min_scale: float = 1e-4,
+) -> torch.Tensor:
+    """Masked MSE after rescaling by the average masked target magnitude.
+
+    This is useful for tiny-magnitude targets such as progress_delta, where raw
+    MSE can encourage near-zero predictions because the absolute scale is so low.
+    """
+    masked_abs_target = target.abs() * mask
+    normalizer = torch.clamp(mask.sum(), min=1.0)
+    scale = torch.clamp(masked_abs_target.sum() / normalizer, min=float(min_scale))
+    return masked_mse_loss(prediction / scale, target / scale, mask)
+
+
+def fixed_scale_normalized_masked_mse_loss(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    mask: torch.Tensor,
+    scale: float,
+    min_scale: float = 1e-4,
+) -> torch.Tensor:
+    """Masked MSE with a dataset-level fixed normalization scale.
+
+    This avoids the batch-to-batch scale volatility that can occur when targets
+    are tiny and frequently zero, as with progress_delta.
+    """
+    safe_scale = max(float(scale), float(min_scale))
+    return masked_mse_loss(prediction / safe_scale, target / safe_scale, mask)
+
+
 def masked_bce_with_logits_loss(logits: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     raw_loss = F.binary_cross_entropy_with_logits(logits, target, reduction="none")
     weighted_loss = raw_loss * mask

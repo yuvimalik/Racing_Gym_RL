@@ -184,6 +184,7 @@ python world_model_train.py --config config/world_model_config.yaml --epochs 10
 python world_model_train_control.py --config config/world_model_config.yaml --epochs 10
 python scripts/evaluate_reward_faithfulness.py --config config/world_model_config.yaml --manifest results/world_model/replay/d4_pilot_val_manifest.json --world-model-checkpoint models/world_model/rssm_sequence.pt
 python world_model_collect_replay.py --config config/world_model_config.yaml --split-prefix d4pilot
+python world_model_collect_replay.py --config config/world_model_config.yaml --manual --manual_target_frames 12000 --manual_target_episodes 5 --manual_direction CCW --manual_regime harsh_turns_fast --manual_split d5_manual_hard_turns_ccw_fast --render --record_video
 ```
 
 Current qualitative status:
@@ -193,12 +194,18 @@ Current qualitative status:
 - latent-control training now assumes the RSSM is frozen and uses it as a differentiable simulator
 - `E3` improved geometry persistence over `E2`, but the dominant remaining failure mode is world/ego inconsistency
 - the actor-critic diagnostic showed that imagined short-horizon optimization can look healthy while still failing to transfer in the real environment
-- the next phase focuses on telemetry-supervised physics modeling rather than blindly scaling the same objective
+- `P5` is the current best stable checkpoint
+- later experiments showed that adding too much noisy manual hard-turn data at once can visibly regress decoder quality
+- curated manual turn data is useful diagnostically, but data mixing alone did not solve sharp-turn hallucination
+- the next planned intervention is a perceptual-loss fine-tune from `P5` with corrected progress supervision
+- actor-critic is paused until the world model earns better sharp-turn geometry
 
 Current training defaults for the local RTX 4070 Laptop GPU:
 - world-model training uses replay windowing, CUDA AMP, and worker-based loading
 - latent-control training uses a short real context plus imagined rollouts from the frozen RSSM
 - telemetry-supervised world-model training adds auxiliary heads for speed, progress delta, steer, corner angle, and offtrack probability
+- for targeted turn adaptation, prefer `config/world_model_local_p5_finetune.yaml` over a full continuation config
+- for the next intervention stage, the mainline is objective-level correction rather than a larger fixed-objective hero run
 
 Artifacts:
 - checkpoints: `models/world_model/<run_name>/`
@@ -211,6 +218,7 @@ Artifacts:
 - physics-faithfulness summaries: `results/world_model/control/*.json`
 
 See `WORLD_MODEL_PROGRESS.md` for a concise progress log and next-step roadmap.
+See `WORLD_MODEL_INTERVENTION_1.md` for the active execution handoff for the next world-model intervention.
 
 ## Observation and Action Spaces
 

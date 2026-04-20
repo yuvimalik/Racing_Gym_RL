@@ -278,9 +278,9 @@ NEUTRAL_STEER = 0.0
 MANUAL_MAX_STEER = 0.55
 MANUAL_STEER_STEP = 0.12
 MANUAL_STEER_DECAY = 0.18
-MANUAL_THROTTLE_RISE = 0.22
-MANUAL_THROTTLE_DECAY = 0.32
-MANUAL_THROTTLE_BRAKE_DECAY = 0.05
+MANUAL_THROTTLE_STEP = 0.12
+MANUAL_THROTTLE_DECAY = 0.06
+MANUAL_THROTTLE_BRAKE_DECAY = 0.18
 MANUAL_HALF_THROTTLE_TARGET = 0.50
 MANUAL_BRAKE_RISE = 0.10
 MANUAL_BRAKE_DECAY = 0.18
@@ -688,9 +688,9 @@ def _poll_manual_controls(
     if brake_pressed:
         throttle = max(0.0, throttle - MANUAL_THROTTLE_BRAKE_DECAY)
     elif keys[pygame_module.K_UP]:
-        throttle = min(1.0, throttle + MANUAL_THROTTLE_RISE)
+        throttle = min(1.0, throttle + MANUAL_THROTTLE_STEP)
     elif keys[pygame_module.K_x]:
-        throttle = min(MANUAL_HALF_THROTTLE_TARGET, throttle + MANUAL_THROTTLE_RISE)
+        throttle = min(MANUAL_HALF_THROTTLE_TARGET, throttle + MANUAL_THROTTLE_STEP)
     else:
         throttle = max(0.0, throttle - MANUAL_THROTTLE_DECAY)
 
@@ -743,6 +743,7 @@ def collect_manual_keyboard_dataset(
     split: str,
     seed: int,
     target_frames: int,
+    target_episodes: int | None = None,
     render: bool = True,
     record_video: bool = False,
     video_fps: float = 30.0,
@@ -772,7 +773,9 @@ def collect_manual_keyboard_dataset(
     quit_requested = False
 
     try:
-        while frames_collected < target_frames and not quit_requested:
+        while frames_collected < target_frames and not quit_requested and (
+            target_episodes is None or episode_id < int(target_episodes)
+        ):
             obs = env.reset()
             done = False
             state = ManualControlState()
@@ -823,8 +826,8 @@ def collect_manual_keyboard_dataset(
                             f"source=manual split={split}",
                             f"direction={direction} regime={speed_regime} recovery_focus={int(state.recovery_focus)}",
                             f"action=[{env_action[0]:+.2f}, {env_action[1]:.2f}, {env_action[2]:.2f}]",
-                            f"keys: Left/Right ramp steer to +/-{MANUAL_MAX_STEER:.2f}, Up ramps throttle, Down ramps brake",
-                            "keys: release = fast throttle/brake decay, Down adds brake and rapidly bleeds throttle",
+                            f"keys: Left/Right ramp steer to +/-{MANUAL_MAX_STEER:.2f}, Up ramps throttle by {MANUAL_THROTTLE_STEP:.2f}, Down ramps brake",
+                            "keys: throttle holds and decays slowly on release, Down bleeds throttle while braking",
                             "keys: f recovery, m marker, r reset, q quit",
                         ],
                     )

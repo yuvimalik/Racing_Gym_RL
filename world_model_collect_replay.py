@@ -7,6 +7,7 @@ import yaml
 
 from world_model.collector import (
     collect_automatic_maneuver_dataset,
+    collect_manual_keyboard_dataset,
     collect_ppo_policy_dataset,
     save_collection_manifest,
 )
@@ -127,12 +128,72 @@ def _run_ppo_policy(config: dict, args: argparse.Namespace) -> None:
             print(f"Saved {len(result.episode_paths)} PPO policy episodes to {manifest_path}")
 
 
+def _run_manual(config: dict, args: argparse.Namespace) -> None:
+    """Collect long manual driving episodes with keyboard control.
+
+    Why: Manual collection is the only path where the user can intentionally
+    drive harsh turn entry/apex/exit sequences and mark interesting segments
+    during collection. This is the right tool when automatic/PPO replay lacks
+    true turning behavior.
+    """
+    collector_cfg = config["collector"]["manual"]
+    output_dir = Path(config["paths"]["replay_dir"])
+    seed = int(collector_cfg.get("seed", 123))
+    target_frames = int(args.manual_target_frames or collector_cfg.get("target_frames", 5000))
+    target_episodes = int(args.manual_target_episodes) if args.manual_target_episodes is not None else None
+    direction = str(args.manual_direction or collector_cfg.get("direction", "CCW")).upper()
+    regime = str(args.manual_regime or collector_cfg.get("regime", "high"))
+    render = bool(args.render or collector_cfg.get("render", True))
+    record_video = bool(args.record_video or collector_cfg.get("record_video", True))
+    video_fps = float(collector_cfg.get("video_fps", 30.0))
+
+    split = args.manual_split or f"manual_{regime.lower()}_{direction.lower()}"
+    if args.split_prefix:
+        split = f"{args.split_prefix}_{split}"
+
+    overrides = {
+        "environment": {
+            "direction": direction,
+            "use_random_direction": False,
+        },
+        "safety_governor": {
+            "enabled": False,
+        },
+    }
+
+    result = collect_manual_keyboard_dataset(
+        base_config_path=config["base_config_path"],
+        output_dir=output_dir,
+        split=split,
+        seed=seed,
+        target_frames=target_frames,
+        target_episodes=target_episodes,
+        render=render,
+        record_video=record_video,
+        video_fps=video_fps,
+        config_overrides=overrides,
+        speed_regime=regime,
+    )
+    manifest_path = save_collection_manifest(
+        output_dir=output_dir,
+        split=split,
+        episode_paths=result.episode_paths,
+        summary=result.summary,
+    )
+    print(f"Saved {len(result.episode_paths)} manual episodes to {manifest_path}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Collect replay episodes for the world model. "
                     "By default uses scripted maneuvers. Use --policy_checkpoint to collect with a trained PPO policy."
     )
     parser.add_argument("--config", default="config/world_model_config.yaml")
+    parser.add_argument(
+        "--manual",
+        action="store_true",
+        help="Collect manual keyboard driving data instead of automatic maneuvers or PPO replay.",
+    )
 
     # PPO policy collection arguments
     parser.add_argument(
@@ -199,12 +260,41 @@ def main() -> None:
         default=None,
         help="Optional prefix for output split and manifest names, e.g. d4pilot or d4main.",
     )
+    parser.add_argument(
+        "--manual_target_frames",
+        type=int,
+        default=None,
+        help="Manual collection target frame budget. Defaults to config collector.manual.target_frames.",
+    )
+    parser.add_argument(
+        "--manual_target_episodes",
+        type=int,
+        default=None,
+        help="Optional cap on the number of manual episodes to save.",
+    )
+    parser.add_argument(
+        "--manual_direction",
+        default=None,
+        help="Manual collection direction override, e.g. CCW or CW.",
+    )
+    parser.add_argument(
+        "--manual_regime",
+        default=None,
+        help="Manual collection regime label to store in metadata, e.g. high or harsh_turns.",
+    )
+    parser.add_argument(
+        "--manual_split",
+        default=None,
+        help="Explicit manual split name. Defaults to manual_<regime>_<direction>.",
+    )
     args = parser.parse_args()
 
     with open(args.config, "r", encoding="utf-8") as handle:
         config = yaml.safe_load(handle)
 
-    if args.policy_checkpoint is not None:
+    if args.manual:
+        _run_manual(config, args)
+    elif args.policy_checkpoint is not None:
         _run_ppo_policy(config, args)
     else:
         _run_automatic(config, args)

@@ -43,7 +43,7 @@ rssm:
 
 offline_training:
   sequence_length: 100
-  batch_size: 8
+  batch_size: 16
   learning_rate: 0.0003
   free_nats: 1.0
   kl_scale: 1.0
@@ -66,19 +66,7 @@ offline_training:
   curated_eval_clips:
     - name: sharp_turn
       clip_type: sharp_turn
-      episode_path: ./results/world_model/replay/manual_wide_line_20260404_145350/episode_000002.npz
-      start_index: 80
-      context_length: 50
-      horizon: 100
-    - name: gentle_turn
-      clip_type: gentle_turn
-      episode_path: ./results/world_model/replay/manual_wide_line_20260404_145350/episode_000001.npz
-      start_index: 1060
-      context_length: 50
-      horizon: 100
-    - name: recovery
-      clip_type: recovery
-      episode_path: ./results/world_model/replay/manual_wide_line_20260404_145350/episode_000001.npz
-      start_index: 1750
+      episode_path: ./results/world_model/replay/d5_manual_hard_turns_ccw_fast/episode_000002.npz
+      start_index: 840
       context_length: 50
       horizon: 100

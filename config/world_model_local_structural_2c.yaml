@@ -17,37 +17,32 @@ collector:
     directions:
       - CCW
       - CW
-    regimes:
-      slow:
-        throttle_scale: 0.50
-        steering_scale: 0.85
-        brake_scale: 1.00
-        transition_steps: 4
-        config_overrides:
-          safety_governor:
-            enabled: true
-            speed_cap_ratio: 0.30
 
 autoencoder:
-  batch_size: 32
-  epochs: 200
+  batch_size: 16
+  epochs: 100
   learning_rate: 0.001
 
 rssm:
   action_dim: 3
   hidden_dim: 512
   stochastic_dim: 32
+  stochastic_world_dim: 32
+  stochastic_motion_dim: 16
   embedding_dim: 512
   min_std: 0.1
   max_std: 2.0
+  ego_motion_head_enabled: true
+  ego_motion_decoder_conditioning: false
 
 offline_training:
   sequence_length: 100
-  batch_size: 16
-  learning_rate: 0.0003
+  batch_size: 4
+  learning_rate: 0.0001
   free_nats: 1.0
   kl_scale: 1.0
   reward_scale: 1.0
+  perceptual_loss_scale: 0.0
   telemetry_loss_scale: 0.25
   telemetry_weights:
     speed: 1.0
@@ -55,14 +50,19 @@ offline_training:
     steer: 0.5
     corner_angle: 0.5
     offtrack: 2.0
+  progress_loss_type: mse
+  ego_motion_loss_scale: 1.0
+  ego_motion_targets:
+    - speed
+    - steer
+    - progress_delta
   hallucination_context: 50
   hallucination_horizon: 150
   hallucination_video_fps: 8.0
   window_stride: 4
-  num_workers: 8
-  pin_memory: true
-  persistent_workers: true
-  prefetch_factor: 2
+  num_workers: 0
+  pin_memory: false
+  persistent_workers: false
   use_amp: true
   curated_eval_clips:
     - name: sharp_turn

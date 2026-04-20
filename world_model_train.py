@@ -9,6 +9,7 @@ from pathlib import Path
 import torch
 import yaml
 
+from world_model.losses import PerceptualLoss
 from world_model.models import RSSMSequence
 from world_model.training import (
     build_curated_eval_batch,
@@ -23,6 +24,64 @@ from world_model.training import (
 def load_manifest(path: str | Path) -> list[str]:
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
     return list(payload["episodes"])
+
+
+def adapt_checkpoint_for_structural_warm_start(
+    checkpoint_state: dict[str, torch.Tensor],
+    model_state: dict[str, torch.Tensor],
+) -> dict[str, torch.Tensor]:
+    adapted: dict[str, torch.Tensor] = {}
+    expandable_input_keys = {
+        "cell.sequence_model.input_projection.0.weight",
+        "cell.reward_predictor.network.0.weight",
+        "cell.telemetry_predictor.trunk.0.weight",
+        "cell.decoder.fc.0.weight",
+    }
+
+    for key, checkpoint_tensor in checkpoint_state.items():
+        model_tensor = model_state.get(key)
+        if model_tensor is None:
+            continue
+        if checkpoint_tensor.shape == model_tensor.shape:
+            adapted[key] = checkpoint_tensor
+            continue
+        if key in expandable_input_keys:
+            if checkpoint_tensor.ndim != 2 or model_tensor.ndim != 2:
+                continue
+            if checkpoint_tensor.shape[0] != model_tensor.shape[0] or checkpoint_tensor.shape[1] > model_tensor.shape[1]:
+                continue
+            expanded_tensor = model_tensor.clone()
+            expanded_tensor[:, : checkpoint_tensor.shape[1]] = checkpoint_tensor
+            expanded_tensor[:, checkpoint_tensor.shape[1] :] = 0.0
+            adapted[key] = expanded_tensor
+
+    branch_remaps = {
+        "cell.dynamics_model.head.backbone.0.weight": "cell.dynamics_model.world_head.backbone.0.weight",
+        "cell.dynamics_model.head.backbone.0.bias": "cell.dynamics_model.world_head.backbone.0.bias",
+        "cell.dynamics_model.head.backbone.2.weight": "cell.dynamics_model.world_head.backbone.2.weight",
+        "cell.dynamics_model.head.backbone.2.bias": "cell.dynamics_model.world_head.backbone.2.bias",
+        "cell.dynamics_model.head.mean.weight": "cell.dynamics_model.world_head.mean.weight",
+        "cell.dynamics_model.head.mean.bias": "cell.dynamics_model.world_head.mean.bias",
+        "cell.dynamics_model.head.std_raw.weight": "cell.dynamics_model.world_head.std_raw.weight",
+        "cell.dynamics_model.head.std_raw.bias": "cell.dynamics_model.world_head.std_raw.bias",
+        "cell.posterior_model.head.backbone.0.weight": "cell.posterior_model.world_head.backbone.0.weight",
+        "cell.posterior_model.head.backbone.0.bias": "cell.posterior_model.world_head.backbone.0.bias",
+        "cell.posterior_model.head.backbone.2.weight": "cell.posterior_model.world_head.backbone.2.weight",
+        "cell.posterior_model.head.backbone.2.bias": "cell.posterior_model.world_head.backbone.2.bias",
+        "cell.posterior_model.head.mean.weight": "cell.posterior_model.world_head.mean.weight",
+        "cell.posterior_model.head.mean.bias": "cell.posterior_model.world_head.mean.bias",
+        "cell.posterior_model.head.std_raw.weight": "cell.posterior_model.world_head.std_raw.weight",
+        "cell.posterior_model.head.std_raw.bias": "cell.posterior_model.world_head.std_raw.bias",
+    }
+    for source_key, target_key in branch_remaps.items():
+        source_tensor = checkpoint_state.get(source_key)
+        target_tensor = model_state.get(target_key)
+        if source_tensor is None or target_tensor is None:
+            continue
+        if source_tensor.shape == target_tensor.shape:
+            adapted[target_key] = source_tensor
+
+    return adapted
 
 
 def main() -> None:
@@ -203,13 +262,22 @@ def main() -> None:
         return free_nats_start + (free_nats_target - free_nats_start) * progress
 
     model = RSSMSequence(**config["rssm"]).to(device)
+    perceptual_loss_scale = float(offline_cfg.get("perceptual_loss_scale", 0.0))
+    perceptual_loss_module = None
+    if perceptual_loss_scale > 0.0:
+        perceptual_loss_module = PerceptualLoss(device=device).to(device)
+        print(f"Perceptual loss enabled with scale={perceptual_loss_scale:.4f}")
 
     if args.init_checkpoint is not None:
         checkpoint_path = Path(args.init_checkpoint)
         if not checkpoint_path.is_absolute():
             checkpoint_path = Path.cwd() / checkpoint_path
         checkpoint_payload = torch.load(checkpoint_path, map_location=device)
-        missing, unexpected = model.load_state_dict(checkpoint_payload["model_state_dict"], strict=False)
+        checkpoint_state = adapt_checkpoint_for_structural_warm_start(
+            checkpoint_payload["model_state_dict"],
+            model.state_dict(),
+        )
+        missing, unexpected = model.load_state_dict(checkpoint_state, strict=False)
         print(f"Initialized model from checkpoint: {checkpoint_path}")
         if missing:
             print(f"Missing checkpoint keys: {sorted(missing)}")
@@ -303,6 +371,12 @@ def main() -> None:
             batch_logger=batch_logger,
             telemetry_loss_scale=float(offline_cfg.get("telemetry_loss_scale", 0.0)),
             telemetry_weights=dict(offline_cfg.get("telemetry_weights", {})),
+            perceptual_loss_module=perceptual_loss_module,
+            perceptual_loss_scale=perceptual_loss_scale,
+            progress_loss_type=str(offline_cfg.get("progress_loss_type", "mse")),
+            progress_loss_scale=offline_cfg.get("progress_loss_scale", None),
+            ego_motion_loss_scale=float(offline_cfg.get("ego_motion_loss_scale", 0.0)),
+            ego_motion_targets=list(offline_cfg.get("ego_motion_targets", ["speed", "steer", "progress_delta"])),
         )
         epoch_duration = time.perf_counter() - epoch_start
         epoch_durations.append(epoch_duration)
@@ -335,9 +409,14 @@ def main() -> None:
             wandb_log = {
                 "epoch": epoch + 1,
                 "train/recon_loss": metrics["recon_loss"],
+                "train/perceptual_loss": metrics["perceptual_loss"],
                 "train/reward_loss": metrics["reward_loss"],
                 "train/kl_loss": metrics["kl_loss"],
                 "train/telemetry_loss": metrics["telemetry_loss"],
+                "train/ego_motion_loss": metrics["ego_motion_loss"],
+                "train/ego_motion_speed_loss": metrics["ego_motion_speed_loss"],
+                "train/ego_motion_steer_loss": metrics["ego_motion_steer_loss"],
+                "train/ego_motion_progress_delta_loss": metrics["ego_motion_progress_delta_loss"],
                 "train/speed_loss": metrics["speed_loss"],
                 "train/progress_delta_loss": metrics["progress_delta_loss"],
                 "train/steer_loss": metrics["steer_loss"],
