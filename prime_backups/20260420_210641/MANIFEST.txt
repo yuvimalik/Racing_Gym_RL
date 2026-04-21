@@ -1,0 +1,26 @@
+Prime artifact backup manifest
+================================
+created_utc: 2026-04-21T01:22:19.766107+00:00
+source: root@64.247.196.128:/workspace/Racing_Gym_RL/artifacts/
+ssh_port: 15489
+local_backup_root: /Users/epablo/prime_backups/20260420_210641
+
+transfer_method: tar_over_ssh (remote has no rsync; rsync would fail with exit 127)
+
+sizes:
+1.6G	/Users/epablo/prime_backups/20260420_210641/artifacts
+1.6G	/Users/epablo/prime_backups/20260420_210641/artifacts/prime_marl_10car_16m
+ 16K	/Users/epablo/prime_backups/20260420_210641/artifacts/prime_marl_10car_preflight
+
+counts_under_artifacts:
+  *.pt files: 50
+  *.mp4 files: 13
+  *.json files: 40
+
+spot_checks:
+  5loop_videos_per_car mp4: 10
+  broadcast_all_10car_nohup.log: True
+
+terminate_instance:
+  After you confirm this backup, stop or delete the GPU instance in the Prime Intellect web dashboard.
+  Do not rely on SSH shutdown alone (container init may ignore it).

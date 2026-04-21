@@ -1,0 +1,30 @@
+Track generation: 1160..1454 -> 294-tiles track
+Track generation: 1075..1348 -> 273-tiles track
+Track generation: 1090..1372 -> 282-tiles track
+Track generation: 1268..1589 -> 321-tiles track
+[TorchPPO] 0.5% | 81,920/16,000,000 | 113 steps/s | avg 111 steps/s | 0.01 iters/s | ETA 39.1h | pg=0.0428 | vf=66.4802 | ent=-3.3852 | kl=0.058055 | clip=0.365 | grad=51.976 | lr=0.000249 | 51 MB alloc | last_eval=0.0s
+Track generation: 1052..1324 -> 272-tiles track
+Track generation: 1109..1390 -> 281-tiles track
+Track generation: 1159..1453 -> 294-tiles track
+Track generation: 1058..1327 -> 269-tiles track
+Track generation: 1181..1480 -> 299-tiles track
+Track generation: 1169..1465 -> 296-tiles track
+Track generation: 1091..1376 -> 285-tiles track
+Track generation: 1164..1459 -> 295-tiles track
+Track generation: 1075..1347 -> 272-tiles track
+Track generation: 1053..1320 -> 267-tiles track
+Track generation: 1032..1294 -> 262-tiles track
+Track generation: 1128..1414 -> 286-tiles track
+Track generation: 1119..1403 -> 284-tiles track
+Track generation: 1082..1357 -> 275-tiles track
+Track generation: 1143..1433 -> 290-tiles track
+Track generation: 1279..1603 -> 324-tiles track
+Track generation: 1009..1268 -> 259-tiles track
+retry to generate track (normal if there are not many of this messages)
+Track generation: 1111..1393 -> 282-tiles track
+Track generation: 1118..1402 -> 284-tiles track
+Track generation: 1114..1402 -> 288-tiles track
+Track generation: 1031..1293 -> 262-tiles track
+Track generation: 1223..1533 -> 310-tiles track
+Track generation: 1171..1468 -> 297-tiles track
+[TorchPPO] 0.6% | 92,160/16,000,000 | 115 steps/s | avg 111 steps/s | 0.01 iters/s | ETA 38.4h | pg=0.0216 | vf=41.6853 | ent=-3.3869 | kl=0.030143 | clip=0.319 | grad=28.694 | lr=0.000249 | 50 MB alloc | last_eval=0.0s

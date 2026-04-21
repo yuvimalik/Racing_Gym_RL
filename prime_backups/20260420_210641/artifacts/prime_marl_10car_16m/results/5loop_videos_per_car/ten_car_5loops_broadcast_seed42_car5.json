@@ -1,0 +1,108 @@
+{
+  "mean_reward": 342.5333271438285,
+  "std_reward": 0.0,
+  "min_reward": 342.5333271438285,
+  "max_reward": 342.5333271438285,
+  "mean_length": 1370.0,
+  "std_length": 0.0,
+  "mean_progress": 0.75573770403862,
+  "std_progress": 0.0,
+  "mean_time": 0.0,
+  "std_time": 0.0,
+  "offtrack_rate": 1.0,
+  "mean_steer_variance": 0.09655419508888292,
+  "mean_rank": 5.5,
+  "collision_rate": 0.0,
+  "contact_rate": 0.0,
+  "hook_contact_rate": 0.0,
+  "contact_termination_rate": 0.0,
+  "mean_max_contact_steps": 2.0,
+  "episode_rewards": [
+    342.5333271438285
+  ],
+  "episode_lengths": [
+    1370
+  ],
+  "episode_progress": [
+    0.75573770403862
+  ],
+  "episode_times": [
+    0.0
+  ],
+  "episode_offtrack": [
+    1
+  ],
+  "episode_steer_variance": [
+    0.09655419508888292
+  ],
+  "episode_mean_rank": [
+    5.5
+  ],
+  "episode_collision": [
+    0
+  ],
+  "episode_contact": [
+    0
+  ],
+  "episode_hook_contact": [
+    0
+  ],
+  "episode_contact_termination": [
+    0
+  ],
+  "episode_max_contact_steps": [
+    2
+  ],
+  "mean_speed": 28.58646437192485,
+  "mean_speed_std": 2.5118364601747007,
+  "mean_throttle": 0.9804259348089678,
+  "mean_brake": 0.0011055515521634235,
+  "mean_overtakes": 2965.0,
+  "mean_front_gap": 12.634909408544972,
+  "min_front_gap": 3.3816614151000977,
+  "mean_side_gap": 8.103518944430526,
+  "min_side_gap": 2.142146348953247,
+  "mean_front_closing_speed": 0.6350856772592136,
+  "episode_mean_speed": [
+    28.58646437192485
+  ],
+  "episode_speed_std": [
+    2.5118364601747007
+  ],
+  "episode_mean_throttle": [
+    0.9804259348089678
+  ],
+  "episode_mean_brake": [
+    0.0011055515521634235
+  ],
+  "episode_mean_overtakes": [
+    2965
+  ],
+  "episode_mean_front_gap": [
+    12.634909408544972
+  ],
+  "episode_min_front_gap": [
+    3.3816614151000977
+  ],
+  "episode_mean_side_gap": [
+    8.103518944430526
+  ],
+  "episode_min_side_gap": [
+    2.142146348953247
+  ],
+  "episode_mean_front_closing_speed": [
+    0.6350856772592136
+  ],
+  "target_loops": 5,
+  "achieved_loops": 0,
+  "camera_mode": "broadcast",
+  "reference_car": 5,
+  "max_steps": 120000,
+  "stop_reason": "env_done",
+  "model_path": "/workspace/Racing_Gym_RL/artifacts/prime_marl_10car_16m/models/best_model_torch.pt",
+  "config_path": "/workspace/Racing_Gym_RL/config/prime_marl_10car_16m.yaml",
+  "seed": 42,
+  "episodes": 10,
+  "video_path": "artifacts/prime_marl_10car_16m/results/5loop_videos_per_car/ten_car_5loops_broadcast_seed42_car5.mp4",
+  "evaluated_at": "2026-04-20T21:59:54.381033"
+}

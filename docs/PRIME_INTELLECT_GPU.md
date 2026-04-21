@@ -75,6 +75,8 @@ After `git clone` and `cd` into the repo on your GPU instance, you can run these
 | [`scripts/prime_launch_10car_16m_nohup.sh`](../scripts/prime_launch_10car_16m_nohup.sh) | Background (`nohup`) launcher for the 10-car 10M policy-only resume run; logs to `artifacts/prime_marl_10car_16m/nohup_train.log`. |
 | [`scripts/prime_eval_10car_16m.sh`](../scripts/prime_eval_10car_16m.sh) | Post-run evaluator for 10-car checkpoints (defaults to `--no-video`; set `PRIME_10CAR_EVAL_WITH_VIDEO=1` for MP4). |
 | [`scripts/prime_export_10car_5loop_videos.sh`](../scripts/prime_export_10car_5loop_videos.sh) | Exports **two 5-loop videos** from a 10-car checkpoint: tiled all-cars + broadcast reference-car, with JSON summaries. |
+| [`scripts/prime_export_10car_5loop_broadcast_all.sh`](../scripts/prime_export_10car_5loop_broadcast_all.sh) | Exports **ten 5-loop broadcast videos** (cars `0`–`9`, single-car camera each; override range with `PRIME_10CAR_BROADCAST_FIRST_CAR` / `PRIME_10CAR_BROADCAST_LAST_CAR`). |
+| [`scripts/export_prime_10car_all_videos.sh`](../scripts/export_prime_10car_all_videos.sh) | **Full local sweep**: all `evaluate.py` video styles for a 10-car `.pt` checkpoint—multi-episode tiled + broadcast (cars `0`–`9`) and target-loops tiled + broadcast (default 5 loops). Skip phases with `PRIME_10CAR_ALLVID_RUN_EPISODES=0` / `PRIME_10CAR_ALLVID_RUN_LOOPS=0`. |
 | [`scripts/prime_launch_16h_nohup.sh`](../scripts/prime_launch_16h_nohup.sh) | Background **~16h** slot: `nohup` + [`scripts/prime_train_budget_fast.sh`](../scripts/prime_train_budget_fast.sh), log under `artifacts/prime_marl_2car_budget_fast/nohup_train.log` (override with `PRIME_16H_LOG`). |
 | [`scripts/prime_resume_budget_fast.sh`](../scripts/prime_resume_budget_fast.sh) | Resume from a `.pt` checkpoint and add stream steps: set `PRIME_RESUME_CHECKPOINT` and `PRIME_TIMESTEPS_ADD` (see §2.1). |
 | [`scripts/prime_run_competitive_calibration.sh`](../scripts/prime_run_competitive_calibration.sh) | Runs the staged competitiveness sweep (pace/overtake/combined) with short calibration configs and fixed-seed eval JSON/MP4 outputs. |
@@ -97,6 +99,12 @@ bash scripts/prime_train_budget.sh
 # PRIME_10CAR_EVAL_MODEL=artifacts/prime_marl_10car_16m/models/best_model_torch.pt \
 # PRIME_10CAR_VIDEO_LOOPS=5 PRIME_10CAR_BROADCAST_REF_CAR=0 \
 # bash scripts/prime_export_10car_5loop_videos.sh
+# Ten single-car 5-loop videos (broadcast camera per car):
+# PRIME_10CAR_EVAL_MODEL=artifacts/prime_marl_10car_16m/models/best_model_torch.pt \
+# bash scripts/prime_export_10car_5loop_broadcast_all.sh
+# All supported eval videos (episodic + loop, tiled + per-car broadcast) locally:
+# PRIME_10CAR_EVAL_MODEL=artifacts/prime_marl_10car_16m/models/best_model_torch.pt \
+# bash scripts/export_prime_10car_all_videos.sh
 # ~16h A100 2-car budget_fast (background): bash scripts/prime_launch_16h_nohup.sh
 # Or full long run:
 # bash scripts/prime_train_long.sh
