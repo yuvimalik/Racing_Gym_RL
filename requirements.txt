@@ -17,6 +17,7 @@ pyglet>=1.4.0,<=1.5.0
 # Visualization and logging (tight matplotlib floor avoids resolver backtracking)
 matplotlib>=3.7.5,<3.11
 opencv-python>=4.8.0,<4.13
+pygame>=2.5.0
 tensorboard>=2.13.0
 
 # Configuration

@@ -1,0 +1,28 @@
+Candidate enhanced_braking_apex_decel (post-run)
+================================================
+
+Rationale: Directly addresses the 'throttle_saturation_no_brake' pattern by reducing the penalty for braking and significantly increasing the reward for deceleration at corner apices, encouraging proactive speed management.
+Parent patterns: []
+
+Config changes:
+- reward_shaping.apex_decel_reward_cap: 2.0 -> 3.0
+- reward_shaping.apex_decel_reward_scale: 0.2 -> 0.35
+- reward_shaping.brake_penalty_scale: 0.01 -> 0.005
+
+Code changes:
+No code changes.
+
+Metrics:
+- mean_reward: -999.00
+- mean_progress: 0.0000
+- offtrack_rate: 1.0000
+- mean_speed: 0.00
+- mean_throttle: 0.00
+- mean_brake: 0.00
+- mean_steer_variance: 0.00000
+- mean_episode_length: 0.0
+- steps_per_second: 0.0
+
+Inferred patterns: ['speed_collapse']
+Gate reasons: ['reward<-500.00', 'progress<0.050', 'offtrack>0.600', 'speed<5.00']
+Promoted: False

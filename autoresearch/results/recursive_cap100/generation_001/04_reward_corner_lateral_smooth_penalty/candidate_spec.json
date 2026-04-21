@@ -1,0 +1,14 @@
+{
+  "generation": 1,
+  "candidate_index": 4,
+  "candidate_name": "reward_corner_lateral_smooth_penalty",
+  "rationale": "Introducing a penalty for corner overspeed and lateral velocity encourages the agent to maintain a clean racing line, while a higher steer smoothness penalty discourages jerky movements.",
+  "source": "llm",
+  "config_overrides": {
+    "reward_shaping.corner_overspeed_penalty_scale": 0.1,
+    "reward_shaping.lateral_velocity_penalty": 0.1,
+    "reward_shaping.steer_smoothness_penalty": 0.05
+  },
+  "code_change": "keep_parent",
+  "parent_checkpoint": "C:\\Users\\yuv05\\OneDrive\\Documents\\GitHub\\Racing_Gym_RL\\models\\v2_ceiling_cap100\\best_model_torch.pt"
+}

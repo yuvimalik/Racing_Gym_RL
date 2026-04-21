@@ -1,0 +1,14 @@
+{
+  "generation": 1,
+  "candidate_index": 2,
+  "candidate_name": "enhanced_braking_apex_decel",
+  "rationale": "Directly addresses the 'throttle_saturation_no_brake' pattern by reducing the penalty for braking and significantly increasing the reward for deceleration at corner apices, encouraging proactive speed management.",
+  "source": "llm",
+  "config_overrides": {
+    "reward_shaping.brake_penalty_scale": 0.005,
+    "reward_shaping.apex_decel_reward_scale": 0.35,
+    "reward_shaping.apex_decel_reward_cap": 3.0
+  },
+  "code_change": "keep_parent",
+  "parent_checkpoint": "C:\\Users\\yuv05\\OneDrive\\Documents\\GitHub\\Racing_Gym_RL\\autoresearch\\results\\recursive_cap100\\generation_003\\03_explore_brake_and_lower_corner_speed\\final.pt"
+}

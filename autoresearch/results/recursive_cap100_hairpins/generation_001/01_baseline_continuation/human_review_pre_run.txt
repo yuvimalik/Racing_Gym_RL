@@ -1,0 +1,11 @@
+Candidate baseline_continuation (pre-run)
+=========================================
+
+Rationale: Continue training the current parent unchanged as the control candidate.
+Parent patterns: []
+
+Config changes:
+No config overrides.
+
+Code changes:
+No code changes.

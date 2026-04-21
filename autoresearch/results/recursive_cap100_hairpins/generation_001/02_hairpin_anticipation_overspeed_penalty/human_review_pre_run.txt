@@ -1,0 +1,12 @@
+Candidate hairpin_anticipation_overspeed_penalty (pre-run)
+==========================================================
+
+Rationale: This experiment aims to encourage earlier braking and prevent overspeeding into sharp turns by increasing the lookahead for sharp turns and introducing a small penalty for exceeding target corner speeds, directly targeting full-throttle-into-hairpin behavior.
+Parent patterns: []
+
+Config changes:
+- reward_shaping.corner_overspeed_penalty_scale: 0.0 -> 0.05
+- reward_shaping.sharp_turn_lookahead: 6 -> 9
+
+Code changes:
+No code changes.

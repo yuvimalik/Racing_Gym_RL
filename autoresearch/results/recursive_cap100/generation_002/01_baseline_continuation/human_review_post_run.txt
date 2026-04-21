@@ -1,0 +1,26 @@
+Candidate baseline_continuation (post-run)
+==========================================
+
+Rationale: Continue training the current parent unchanged as the control candidate.
+Parent patterns: []
+
+Config changes:
+No config overrides.
+
+Code changes:
+No code changes.
+
+Metrics:
+- mean_reward: -108.99
+- mean_progress: 0.6371
+- offtrack_rate: 0.4374
+- mean_speed: 32.47
+- mean_throttle: 0.97
+- mean_brake: 0.00
+- mean_steer_variance: 0.10411
+- mean_episode_length: 1565.3
+- steps_per_second: 160.9
+
+Inferred patterns: ['throttle_saturation_no_brake']
+Gate reasons: []
+Promoted: False

@@ -1,0 +1,12 @@
+Candidate ppo_stability_gae_clip (pre-run)
+==========================================
+
+Rationale: Lowering the PPO clip range to reduce the magnitude of policy updates and adjusting GAE lambda to rely more on immediate rewards, aiming for more stable training and mitigating early instability.
+Parent patterns: []
+
+Config changes:
+- ppo.clip_range: 0.2 -> 0.1
+- ppo.gae_lambda: 0.95 -> 0.9
+
+Code changes:
+No code changes.

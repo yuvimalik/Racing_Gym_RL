@@ -1,0 +1,27 @@
+Candidate ppo_fast_learning_more_epochs (post-run)
+==================================================
+
+Rationale: After recent reward shaping changes, increasing the learning rate and the number of PPO epochs per update can help the agent adapt more quickly and stabilize policy updates, especially when new reward signals are introduced.
+Parent patterns: ['throttle_saturation_no_brake']
+
+Config changes:
+- ppo.learning_rate: 0.00025 -> 0.0005
+- ppo.n_epochs: 3 -> 4
+
+Code changes:
+No code changes.
+
+Metrics:
+- mean_reward: -327.82
+- mean_progress: 0.1754
+- offtrack_rate: 0.8431
+- mean_speed: 29.14
+- mean_throttle: 0.98
+- mean_brake: 0.00
+- mean_steer_variance: 0.00293
+- mean_episode_length: 1518.7
+- steps_per_second: 157.0
+
+Inferred patterns: ['throttle_saturation_no_brake', 'low_steer_variance_circling_or_understeer', 'late_or_missing_brake']
+Gate reasons: ['reward<-227.93', 'progress<0.533', 'offtrack>0.600', 'throttle_saturated_without_progress']
+Promoted: False

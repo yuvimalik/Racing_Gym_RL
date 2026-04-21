@@ -1,0 +1,27 @@
+Candidate ppo_stability_gae_clip (post-run)
+===========================================
+
+Rationale: Lowering the PPO clip range to reduce the magnitude of policy updates and adjusting GAE lambda to rely more on immediate rewards, aiming for more stable training and mitigating early instability.
+Parent patterns: []
+
+Config changes:
+- ppo.clip_range: 0.2 -> 0.1
+- ppo.gae_lambda: 0.95 -> 0.9
+
+Code changes:
+No code changes.
+
+Metrics:
+- mean_reward: -234.63
+- mean_progress: 0.3031
+- offtrack_rate: 0.7779
+- mean_speed: 23.61
+- mean_throttle: 0.98
+- mean_brake: 0.00
+- mean_steer_variance: 0.01224
+- mean_episode_length: 1211.7
+- steps_per_second: 158.2
+
+Inferred patterns: ['throttle_saturation_no_brake']
+Gate reasons: ['offtrack>0.600']
+Promoted: False

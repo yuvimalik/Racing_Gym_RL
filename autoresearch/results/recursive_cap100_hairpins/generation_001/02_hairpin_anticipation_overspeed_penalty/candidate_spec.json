@@ -1,0 +1,13 @@
+{
+  "generation": 1,
+  "candidate_index": 2,
+  "candidate_name": "hairpin_anticipation_overspeed_penalty",
+  "rationale": "This experiment aims to encourage earlier braking and prevent overspeeding into sharp turns by increasing the lookahead for sharp turns and introducing a small penalty for exceeding target corner speeds, directly targeting full-throttle-into-hairpin behavior.",
+  "source": "llm",
+  "config_overrides": {
+    "reward_shaping.sharp_turn_lookahead": 9,
+    "reward_shaping.corner_overspeed_penalty_scale": 0.05
+  },
+  "code_change": "keep_parent",
+  "parent_checkpoint": "C:\\Users\\yuv05\\OneDrive\\Documents\\GitHub\\Racing_Gym_RL\\autoresearch\\results\\recursive_cap100\\generation_003\\03_explore_brake_and_lower_corner_speed\\final.pt"
+}

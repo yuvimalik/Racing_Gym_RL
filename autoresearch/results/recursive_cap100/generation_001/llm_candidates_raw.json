@@ -1,0 +1,34 @@
+{
+  "candidates": [
+    {
+      "name": "ppo_lr_bs_epochs",
+      "rationale": "Decreasing the learning rate, increasing the batch size, and slightly increasing epochs per update can lead to more stable and robust policy updates, potentially improving convergence.",
+      "config_overrides": {
+        "ppo.learning_rate": 0.0001,
+        "ppo.batch_size": 3072,
+        "ppo.n_epochs": 4
+      },
+      "code_change": "keep_parent"
+    },
+    {
+      "name": "ppo_exploration_gae_steer_std",
+      "rationale": "Increasing the entropy coefficient promotes more exploration, a higher GAE lambda prioritizes long-term rewards, and a wider steer standard deviation allows for more diverse steering actions.",
+      "config_overrides": {
+        "ppo.ent_coef": 0.15,
+        "ppo.gae_lambda": 0.98,
+        "ppo.steer_max_log_std": 0.2
+      },
+      "code_change": "keep_parent"
+    },
+    {
+      "name": "reward_corner_lateral_smooth_penalty",
+      "rationale": "Introducing a penalty for corner overspeed and lateral velocity encourages the agent to maintain a clean racing line, while a higher steer smoothness penalty discourages jerky movements.",
+      "config_overrides": {
+        "reward_shaping.corner_overspeed_penalty_scale": 0.1,
+        "reward_shaping.lateral_velocity_penalty": 0.1,
+        "reward_shaping.steer_smoothness_penalty": 0.05
+      },
+      "code_change": "keep_parent"
+    }
+  ]
+}
