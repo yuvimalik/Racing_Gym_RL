@@ -1,0 +1,31 @@
+{
+  "candidates": [
+    {
+      "name": "decrease_collider_penalty_high",
+      "hypothesis": "Reducing the high penalties for collision will encourage agents to drive more closely without excessive contact.",
+      "rationale": "This change aims to balance aggression and safety, allowing for overtaking while minimizing penalty-driven stagnation.",
+      "config_overrides": {
+        "reward_shaping.multi_agent.collision_high_penalty": -8.0
+      },
+      "code_change": "keep_parent"
+    },
+    {
+      "name": "increase_overtake_bonus",
+      "hypothesis": "Increasing the bonus for clean overtakes will promote more aggressive but safe passing behavior.",
+      "rationale": "Promoting clean overtakes can enhance competitive dynamics and overall progress in races.",
+      "config_overrides": {
+        "reward_shaping.multi_agent.overtake_bonus": 0.3
+      },
+      "code_change": "keep_parent"
+    },
+    {
+      "name": "reduce_hook_contact_penalty",
+      "hypothesis": "Lowering the penalty for hook contact will help minimize drastic setbacks associated with minor contact.",
+      "rationale": "This will foster more competitive interactions by allowing slight contacts without severe penalties.",
+      "config_overrides": {
+        "reward_shaping.multi_agent.hook_contact_penalty": -5.0
+      },
+      "code_change": "keep_parent"
+    }
+  ]
+}

@@ -1,0 +1,102 @@
+{
+  "mean_reward": -25.603831216692924,
+  "std_reward": 0.0,
+  "min_reward": -25.603831216692924,
+  "max_reward": -25.603831216692924,
+  "mean_length": 31.0,
+  "std_length": 0.0,
+  "mean_progress": 0.012987012974917889,
+  "std_progress": 0.0,
+  "mean_time": 0.0,
+  "std_time": 0.0,
+  "offtrack_rate": 1.0,
+  "mean_steer_variance": 0.004891312779114672,
+  "mean_rank": 1.5,
+  "collision_rate": 0.0,
+  "contact_rate": 0.0,
+  "hook_contact_rate": 0.0,
+  "contact_termination_rate": 0.0,
+  "mean_max_contact_steps": 0.0,
+  "episode_rewards": [
+    -25.603831216692924
+  ],
+  "episode_lengths": [
+    31
+  ],
+  "episode_progress": [
+    0.012987012974917889
+  ],
+  "episode_times": [
+    0.0
+  ],
+  "episode_offtrack": [
+    1
+  ],
+  "episode_steer_variance": [
+    0.004891312779114672
+  ],
+  "episode_mean_rank": [
+    1.5
+  ],
+  "episode_collision": [
+    0
+  ],
+  "episode_contact": [
+    0
+  ],
+  "episode_hook_contact": [
+    0
+  ],
+  "episode_contact_termination": [
+    0
+  ],
+  "episode_max_contact_steps": [
+    0
+  ],
+  "mean_speed": 14.261238328872189,
+  "mean_speed_std": 6.686422195258836,
+  "mean_throttle": 0.9729616074792801,
+  "mean_brake": 0.00023756056062636838,
+  "mean_overtakes": 2.0,
+  "mean_front_gap": 13.960373009404828,
+  "min_front_gap": 5.999996662139893,
+  "mean_side_gap": 5.90865522046243,
+  "min_side_gap": 5.90826416015625,
+  "mean_front_closing_speed": 2.0653483728995437e-07,
+  "episode_mean_speed": [
+    14.261238328872189
+  ],
+  "episode_speed_std": [
+    6.686422195258836
+  ],
+  "episode_mean_throttle": [
+    0.9729616074792801
+  ],
+  "episode_mean_brake": [
+    0.00023756056062636838
+  ],
+  "episode_mean_overtakes": [
+    2
+  ],
+  "episode_mean_front_gap": [
+    13.960373009404828
+  ],
+  "episode_min_front_gap": [
+    5.999996662139893
+  ],
+  "episode_mean_side_gap": [
+    5.90865522046243
+  ],
+  "episode_min_side_gap": [
+    5.90826416015625
+  ],
+  "episode_mean_front_closing_speed": [
+    2.0653483728995437e-07
+  ],
+  "model_path": "/workspace/Racing_Gym_RL/artifacts/prime_marl_2car_budget_fast/results/torch_20260412_224539_seed42/evaluations/eval_checkpoint_step_1404928.pt",
+  "config_path": "/workspace/Racing_Gym_RL/config/prime_marl_2car_budget_fast.yaml",
+  "seed": 1042,
+  "episodes": 1,
+  "video_path": null,
+  "evaluated_at": "2026-04-13T01:53:42.663129"
+}

@@ -1,0 +1,15 @@
+Candidate baseline_continuation (post-run)
+==========================================
+
+Rationale: Continue the current parent through the validation ladder as the control branch.
+
+Config changes:
+No config overrides.
+
+Surface changes:
+No surface code changes.
+
+Stage results:
+- smoke_control: reward=-999.00, progress=0.000, offtrack=1.000, contact=0.000, hook=0.000, overtakes=0.00, score=-1239.00
+
+Gate reasons: ['experiment_failed', 'progress_too_low', 'offtrack_near_total', 'steering_variance_dead', 'smoke_control_offtrack']

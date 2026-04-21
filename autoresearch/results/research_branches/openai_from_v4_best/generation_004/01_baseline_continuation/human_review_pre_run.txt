@@ -1,0 +1,10 @@
+Candidate baseline_continuation (pre-run)
+=========================================
+
+Rationale: Continue the current parent through the validation ladder as the control branch.
+
+Config changes:
+No config overrides.
+
+Surface changes:
+No surface code changes.

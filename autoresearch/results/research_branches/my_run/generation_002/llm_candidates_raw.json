@@ -1,0 +1,31 @@
+{
+  "candidates": [
+    {
+      "name": "decrease_collision_high_penalty",
+      "hypothesis": "Reducing the collision high penalty will encourage smoother interactions between cars.",
+      "rationale": "A less severe penalty may allow agents to be more lenient with minimizing contact while racing.",
+      "config_overrides": {
+        "reward_shaping.multi_agent.collision_high_penalty": -8.0
+      },
+      "code_change": "keep_parent"
+    },
+    {
+      "name": "increase_overtake_bonus",
+      "hypothesis": "Increasing the overtake bonus will motivate agents to focus on clean overtaking behavior.",
+      "rationale": "A higher reward for overtaking can encourage more aggressive yet safely executed passes.",
+      "config_overrides": {
+        "reward_shaping.multi_agent.overtake_bonus": 0.3
+      },
+      "code_change": "keep_parent"
+    },
+    {
+      "name": "reduce_brake_penalty_scale",
+      "hypothesis": "Lowering the brake penalty scale will promote more frequent braking, allowing for better cornering control.",
+      "rationale": "Encouraging braking can help agents avoid throttle saturation in tight turns.",
+      "config_overrides": {
+        "reward_shaping.brake_penalty_scale": 0.005
+      },
+      "code_change": "keep_parent"
+    }
+  ]
+}

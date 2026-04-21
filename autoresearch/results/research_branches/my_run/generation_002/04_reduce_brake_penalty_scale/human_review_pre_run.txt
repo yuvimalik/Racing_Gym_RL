@@ -1,0 +1,10 @@
+Candidate reduce_brake_penalty_scale (pre-run)
+==============================================
+
+Rationale: Encouraging braking can help agents avoid throttle saturation in tight turns.
+
+Config changes:
+- reward_shaping.brake_penalty_scale: 0.01 -> 0.005
+
+Surface changes:
+No surface code changes.

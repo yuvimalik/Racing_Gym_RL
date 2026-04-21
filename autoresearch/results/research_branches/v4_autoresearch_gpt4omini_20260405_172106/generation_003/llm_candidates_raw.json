@@ -1,0 +1,18 @@
+{
+  "candidates": [
+    {
+      "name": "increase_brake_penalty",
+      "rationale": "Encourages earlier braking to recover control before aggression.",
+      "config_overrides": {"reward_shaping.brake_penalty_scale": 0.05},
+      "code_change": "keep_parent",
+      "resume_policy": "inherit_parent"
+    },
+    {
+      "name": "expand_overtake_bonus",
+      "rationale": "Promotes cleaner overtakes by increasing the reward for successful passes.",
+      "config_overrides": {"reward_shaping.multi_agent.overtake_bonus": 0.25},
+      "code_change": "keep_parent",
+      "resume_policy": "inherit_parent"
+    }
+  ]
+}

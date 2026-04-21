@@ -1,0 +1,15 @@
+Candidate dry_run_synthetic (post-screen)
+=========================================
+
+Rationale: plumbing test
+
+Config changes:
+No config overrides.
+
+Surface changes:
+No surface code changes.
+
+Stage results:
+- screen: reward=0.00, progress=0.100, offtrack=0.200, contact=0.150, hook=0.050, overtakes=0.00, score=4.00
+
+Gate reasons: ['steering_variance_dead']

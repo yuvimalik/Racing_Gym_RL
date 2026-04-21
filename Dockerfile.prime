@@ -1,0 +1,37 @@
+# CUDA training image for Prime Intellect / generic Linux GPU hosts.
+# Build:  docker build -f Dockerfile.prime -t racing-gym-rl:prime .
+# Run:    docker run --gpus all -e RACING_HEADLESS_PYGLET=1 -v $(pwd)/artifacts:/workspace/Racing_Gym_RL/artifacts racing-gym-rl:prime
+#
+# Install multi_car_racing from Git (see README.md); URL matches project docs.
+
+FROM pytorch/pytorch:2.2.2-cuda12.1-cudnn8-runtime
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    RACING_HEADLESS_PYGLET=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    ffmpeg \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    xvfb \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace/Racing_Gym_RL
+
+COPY requirements.txt requirements_sb3.txt ./
+RUN pip install --no-cache-dir -r requirements.txt \
+    && pip install --no-cache-dir -r requirements_sb3.txt --no-deps
+
+# gym-multi-car-racing: clone at build time (override with build-arg if needed)
+ARG MULTI_CAR_RACING_REPO=https://github.com/igilitschenski/multi_car_racing.git
+RUN git clone --depth 1 "${MULTI_CAR_RACING_REPO}" /tmp/multi_car_racing \
+    && pip install --no-cache-dir --no-deps -e /tmp/multi_car_racing
+
+COPY . .
+
+RUN mkdir -p artifacts/prime_marl_2car/models artifacts/prime_marl_2car/logs artifacts/prime_marl_2car/results \
+    artifacts/prime_marl_smoke/models artifacts/prime_marl_smoke/logs artifacts/prime_marl_smoke/results
+
+CMD ["python", "train.py", "--config", "config/prime_marl_2car_long.yaml", "--seed", "42"]

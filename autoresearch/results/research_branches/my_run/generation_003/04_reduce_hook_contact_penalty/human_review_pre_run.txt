@@ -1,0 +1,10 @@
+Candidate reduce_hook_contact_penalty (pre-run)
+===============================================
+
+Rationale: A less severe penalty for hook contact may promote more competitive behavior while maintaining safety.
+
+Config changes:
+- reward_shaping.multi_agent.hook_contact_penalty: -10.0 -> -5.0
+
+Surface changes:
+No surface code changes.

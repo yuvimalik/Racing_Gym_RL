@@ -1,0 +1,10 @@
+Candidate increase_brake_penalty (pre-run)
+==========================================
+
+Rationale: Increasing the brake penalty may encourage earlier braking behavior to prevent throttle saturation.
+
+Config changes:
+- reward_shaping.brake_penalty_scale: 0.01 -> 0.1
+
+Surface changes:
+No surface code changes.

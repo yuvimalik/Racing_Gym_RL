@@ -1,0 +1,5 @@
+Generation 1
+Promoted: none
+
+- baseline_continuation: score=4.00, gate=['steering_variance_dead'], err=None
+- dry_run_synthetic: score=4.00, gate=['steering_variance_dead'], err=None

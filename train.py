@@ -7,11 +7,25 @@ Backends:
 """
 
 import os
+
+# Headless servers (SSH without a display): MultiCarRacing reset() uses pyglet via
+# state_pixels rendering. Set RACING_HEADLESS_PYGLET=1 before imports so pyglet uses
+# its headless EGL path (Linux with EGL libs). On macOS, EGL is usually absent—omit
+# this and use a normal display, or use: xvfb-run -a python train.py ...
+if str(os.environ.get("RACING_HEADLESS_PYGLET", "")).strip().lower() in ("1", "true", "yes"):
+    import pyglet
+
+    pyglet.options["headless"] = True
+
+import sys
 import json
 import yaml
 import argparse
+import subprocess
+import importlib.util
+from copy import deepcopy
 from pathlib import Path
-from typing import Dict, Iterable
+from typing import Any, Callable, Dict, Iterable, Optional, Tuple
 import gym
 import gym_multi_car_racing
 import numpy as np
@@ -24,8 +38,9 @@ from stable_baselines3.common.utils import set_random_seed
 import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
-import threading
+from torch.utils.tensorboard import SummaryWriter
 import time
+import traceback
 from datetime import datetime, timedelta
 import torch.nn as nn
 import torch.nn.functional as F
@@ -38,6 +53,238 @@ def load_config(config_path):
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
     return config
+
+
+def mps_is_available() -> bool:
+    return bool(getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available())
+
+
+def resolve_surface_path(surface_source: str, config_path: Optional[str] = None) -> Path:
+    candidate = Path(surface_source).expanduser()
+    if candidate.is_absolute():
+        return candidate.resolve()
+    if config_path:
+        return (Path(config_path).resolve().parent / candidate).resolve()
+    return candidate.resolve()
+
+
+def load_external_torch_surface(
+    surface_source: Optional[str],
+    config_path: Optional[str] = None,
+) -> tuple[Dict[str, Any], Optional[Callable], Dict[str, Any]]:
+    if not surface_source:
+        return {}, None, {}
+
+    surface_path = resolve_surface_path(surface_source, config_path=config_path)
+    if not surface_path.is_file():
+        raise FileNotFoundError(f"External torch policy surface not found: {surface_path}")
+
+    module_name = f"autoresearch_surface_{surface_path.stem}_{abs(hash(str(surface_path)))}"
+    spec = importlib.util.spec_from_file_location(module_name, surface_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Could not load surface module from {surface_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    get_policy_variants = getattr(module, "get_policy_variants", None)
+    if get_policy_variants is None or not callable(get_policy_variants):
+        raise ValueError(
+            f"Surface module {surface_path} must define callable get_policy_variants()."
+        )
+    variants = get_policy_variants()
+    if not isinstance(variants, dict) or not variants:
+        raise ValueError(
+            f"Surface module {surface_path} returned invalid policy variants: {type(variants).__name__}"
+        )
+
+    optimizer_builder = getattr(module, "build_optimizer", None)
+    if optimizer_builder is not None and not callable(optimizer_builder):
+        raise ValueError(
+            f"Surface module {surface_path} build_optimizer must be callable when provided."
+        )
+
+    metadata_builder = getattr(module, "surface_metadata", None)
+    metadata = metadata_builder() if callable(metadata_builder) else {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+    metadata = {
+        **metadata,
+        "surface_source": str(surface_path),
+    }
+    return variants, optimizer_builder, metadata
+
+
+def debug_log_763171(run_id, hypothesis_id, location, message, data):
+    # #region agent log
+    payload = {
+        "sessionId": "763171",
+        "runId": run_id,
+        "hypothesisId": hypothesis_id,
+        "location": location,
+        "message": message,
+        "data": data,
+        "timestamp": int(time.time() * 1000),
+    }
+    try:
+        with open("/Users/epablo/Documents/UPenn/SophmoreSpring26/STAT4830/WedApr1_Work/Racing_Gym_RL/.cursor/debug-763171.log", "a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, default=str) + "\n")
+    except Exception:
+        pass
+    # #endregion
+
+
+def debug_log(run_id, hypothesis_id, location, message, data):
+    # #region agent log
+    payload = {
+        "sessionId": "52ee9e",
+        "runId": run_id,
+        "hypothesisId": hypothesis_id,
+        "location": location,
+        "message": message,
+        "data": data,
+        "timestamp": int(time.time() * 1000),
+    }
+    try:
+        with open("/Users/epablo/Documents/UPenn/SophmoreSpring26/STAT4830/WedApr1_Work/Racing_Gym_RL/.cursor/debug-52ee9e.log", "a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, default=str) + "\n")
+    except Exception:
+        pass
+    # #endregion
+
+
+def reward_to_scalar(reward):
+    reward_arr = np.asarray(reward, dtype=np.float32)
+    if reward_arr.ndim == 0:
+        return float(reward_arr)
+    return float(np.mean(reward_arr))
+
+
+def first_agent_info(info):
+    if isinstance(info, dict):
+        return info
+    if isinstance(info, (list, tuple)) and len(info) > 0:
+        first = info[0]
+        if isinstance(first, dict):
+            return first
+    return {}
+
+
+def done_to_bool(done):
+    done_arr = np.asarray(done)
+    if done_arr.ndim == 0:
+        return bool(done_arr)
+    return bool(done_arr.reshape(-1).any())
+
+
+def infer_image_space_layout(space_shape: Tuple[int, ...]) -> Tuple[int, Tuple[int, int, int], str]:
+    """Infer agent count and image layout from Box observations."""
+    shape = tuple(space_shape)
+    if len(shape) == 3:
+        if shape[-1] in (1, 3, 4):
+            h, w, c = shape
+            return 1, (c, h, w), "hwc"
+        c, h, w = shape
+        return 1, (c, h, w), "chw"
+    if len(shape) == 4 and shape[-1] in (1, 3, 4):
+        n_agents, h, w, c = shape
+        return int(n_agents), (c, h, w), "agent_hwc"
+    if len(shape) == 4:
+        n_agents, c, h, w = shape
+        return int(n_agents), (c, h, w), "agent_chw"
+    raise ValueError(f"Unsupported observation space shape for torch backend: {shape}")
+
+
+def obs_to_policy_batch(obs: np.ndarray, obs_layout: str) -> np.ndarray:
+    """Convert env observations into a flat `(batch, C, H, W)` array."""
+    obs_arr = np.asarray(obs, dtype=np.float32)
+    if obs_layout == "chw":
+        if obs_arr.ndim == 3:
+            return obs_arr[None, ...]
+        return obs_arr.reshape(-1, *obs_arr.shape[-3:])
+    if obs_layout == "hwc":
+        if obs_arr.ndim == 3:
+            obs_arr = obs_arr[None, ...]
+        obs_arr = obs_arr.reshape(-1, *obs_arr.shape[-3:])
+        return np.transpose(obs_arr, (0, 3, 1, 2))
+    if obs_layout == "agent_hwc":
+        if obs_arr.ndim == 4:
+            obs_arr = obs_arr[None, ...]
+        obs_arr = obs_arr.reshape(-1, *obs_arr.shape[-3:])
+        return np.transpose(obs_arr, (0, 3, 1, 2))
+    if obs_layout == "agent_chw":
+        if obs_arr.ndim == 4:
+            obs_arr = obs_arr[None, ...]
+        return obs_arr.reshape(-1, *obs_arr.shape[-3:])
+    raise ValueError(f"Unknown observation layout: {obs_layout}")
+
+
+def action_batch_to_env(action_batch: np.ndarray, n_envs: int, n_agents: int) -> np.ndarray:
+    # Box2D setters in gym's car dynamics are sensitive to numpy float32 scalars.
+    # Keep env-facing actions in float64 so downstream scalar extraction uses a
+    # Box2D-compatible numeric type for both single-agent and multi-agent paths.
+    action_batch = np.asarray(action_batch, dtype=np.float64)
+    if n_agents <= 1:
+        return action_batch.reshape(n_envs, -1)
+    return action_batch.reshape(n_envs, n_agents, -1)
+
+
+def flatten_transition_array(values, n_envs: int, n_agents: int, dtype=np.float32, default=0.0,
+                             value_name: str = "transition") -> np.ndarray:
+    expected_size = int(n_envs * n_agents)
+    if values is None:
+        return np.full(expected_size, default, dtype=dtype)
+    arr = np.asarray(values, dtype=dtype)
+    if arr.ndim == 0:
+        return np.full(expected_size, arr.item(), dtype=dtype)
+    flat = arr.reshape(-1)
+    if n_agents == 1 and flat.size == n_envs:
+        return flat.astype(dtype, copy=False)
+    if flat.size != expected_size:
+        raise ValueError(
+            f"{value_name} shape {tuple(arr.shape)} cannot be flattened to the expected "
+            f"{expected_size} values for n_envs={n_envs}, num_agents={n_agents}."
+        )
+    return flat.astype(dtype, copy=False)
+
+
+def validate_agent_space_contract(env, configured_num_agents: int, context: str) -> None:
+    obs_shape = tuple(getattr(env.observation_space, "shape", ()))
+    action_shape = tuple(getattr(env.action_space, "shape", ()))
+    configured_num_agents = int(max(1, configured_num_agents))
+
+    if configured_num_agents <= 1:
+        if len(obs_shape) == 4 and obs_shape[0] != 1:
+            raise ValueError(
+                f"{context}: single-agent config expected observation space without a multi-agent "
+                f"leading axis, got shape {obs_shape}."
+            )
+        if len(action_shape) == 2 and action_shape[0] != 1:
+            raise ValueError(
+                f"{context}: single-agent config expected action space without a multi-agent "
+                f"leading axis, got shape {action_shape}."
+            )
+        return
+
+    if len(obs_shape) != 4:
+        raise ValueError(
+            f"{context}: multi-agent config with num_agents={configured_num_agents} expected "
+            f"observation space shape (num_agents, ...), got {obs_shape}."
+        )
+    if len(action_shape) != 2:
+        raise ValueError(
+            f"{context}: multi-agent config with num_agents={configured_num_agents} expected "
+            f"action space shape (num_agents, action_dim), got {action_shape}."
+        )
+    if int(obs_shape[0]) != configured_num_agents:
+        raise ValueError(
+            f"{context}: configured num_agents={configured_num_agents} but observation space "
+            f"reports {obs_shape[0]} agents."
+        )
+    if int(action_shape[0]) != configured_num_agents:
+        raise ValueError(
+            f"{context}: configured num_agents={configured_num_agents} but action space "
+            f"reports {action_shape[0]} agents."
+        )
 
 
 class CnnActorCritic(nn.Module):
@@ -275,17 +522,17 @@ TORCH_POLICY_VARIANTS = {
 class RolloutBuffer:
     """Rollout storage for PPO."""
 
-    def __init__(self, n_steps, n_envs, obs_shape, action_dim):
+    def __init__(self, n_steps, n_streams, obs_shape, action_dim):
         self.n_steps = n_steps
-        self.n_envs = n_envs
-        self.obs = np.zeros((n_steps, n_envs, *obs_shape), dtype=np.float32)
-        self.actions = np.zeros((n_steps, n_envs, action_dim), dtype=np.float32)
-        self.rewards = np.zeros((n_steps, n_envs), dtype=np.float32)
-        self.dones = np.zeros((n_steps, n_envs), dtype=np.float32)
-        self.values = np.zeros((n_steps, n_envs), dtype=np.float32)
-        self.log_probs = np.zeros((n_steps, n_envs), dtype=np.float32)
-        self.advantages = np.zeros((n_steps, n_envs), dtype=np.float32)
-        self.returns = np.zeros((n_steps, n_envs), dtype=np.float32)
+        self.n_streams = n_streams
+        self.obs = np.zeros((n_steps, n_streams, *obs_shape), dtype=np.float32)
+        self.actions = np.zeros((n_steps, n_streams, action_dim), dtype=np.float32)
+        self.rewards = np.zeros((n_steps, n_streams), dtype=np.float32)
+        self.dones = np.zeros((n_steps, n_streams), dtype=np.float32)
+        self.values = np.zeros((n_steps, n_streams), dtype=np.float32)
+        self.log_probs = np.zeros((n_steps, n_streams), dtype=np.float32)
+        self.advantages = np.zeros((n_steps, n_streams), dtype=np.float32)
+        self.returns = np.zeros((n_steps, n_streams), dtype=np.float32)
         self.pos = 0
 
     def add(self, obs, action, reward, done, value, log_prob):
@@ -298,7 +545,7 @@ class RolloutBuffer:
         self.pos += 1
 
     def compute_returns_advantages(self, last_values, last_dones, gamma, gae_lambda):
-        last_gae = np.zeros(self.n_envs, dtype=np.float32)
+        last_gae = np.zeros(self.n_streams, dtype=np.float32)
         for step in reversed(range(self.n_steps)):
             if step == self.n_steps - 1:
                 next_non_terminal = 1.0 - last_dones.astype(np.float32)
@@ -313,7 +560,7 @@ class RolloutBuffer:
 
     def batches(self, batch_size, device, normalize_advantage=True,
                 distributed=False) -> Iterable[Dict[str, torch.Tensor]]:
-        n_samples = self.n_steps * self.n_envs
+        n_samples = self.n_steps * self.n_streams
         obs = self.obs.reshape(n_samples, *self.obs.shape[2:])
         actions = self.actions.reshape(n_samples, self.actions.shape[-1])
         old_log_probs = self.log_probs.reshape(n_samples)
@@ -353,6 +600,7 @@ class TorchPPOTrainer:
     """PPO training loop implemented locally in PyTorch."""
 
     def __init__(self, env, eval_env, config, device, model_dir: Path, log_dir: Path,
+                 results_dir: Path = None, config_path: str = None, seed: int = 0,
                  local_rank: int = 0, world_size: int = 1):
         self.env = env
         self.eval_env = eval_env
@@ -361,27 +609,111 @@ class TorchPPOTrainer:
         self.world_size = int(world_size)
         self.rank = local_rank  # within-node rank; for multi-node use dist.get_rank()
         self.distributed = world_size > 1
-        self.device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
+        self.device = torch.device(device)
         self.model_dir = Path(model_dir)
         self.log_dir = Path(log_dir)
+        self.results_root = Path(results_dir) if results_dir is not None else self.log_dir.parent / "results"
+        self.config_path = str(Path(config_path).resolve()) if config_path else None
+        self.seed = int(seed)
+        self.eval_seed = self.seed + 1000
 
         if not hasattr(env.observation_space, "shape"):
             raise ValueError("Torch backend currently supports Box image observations only.")
         if not hasattr(env.action_space, "shape"):
             raise ValueError("Torch backend currently supports Box action space only.")
 
-        self.obs_shape = tuple(env.observation_space.shape)
-        self.action_dim = int(np.prod(env.action_space.shape))
+        training_cfg = config.get("training", {}) or {}
+        self.marl_paradigm = str(training_cfg.get("marl_paradigm", "shared_policy_ippo")).strip().lower()
+        if self.marl_paradigm not in {"shared_policy_ippo"}:
+            raise ValueError(
+                f"Unsupported torch MARL paradigm: {self.marl_paradigm}. "
+                "Only shared_policy_ippo is currently implemented."
+            )
+        self.policy_surface_source = training_cfg.get("torch_policy_variant_source")
+        self.external_policy_variants, self.external_optimizer_builder, self.policy_surface_metadata = (
+            load_external_torch_surface(
+                self.policy_surface_source,
+                config_path=self.config_path,
+            )
+        )
+        self.available_policy_variants = {
+            **TORCH_POLICY_VARIANTS,
+            **self.external_policy_variants,
+        }
+        env_cfg = config.get("environment", {}) or {}
+        configured_num_agents = int(max(1, env_cfg.get("num_agents", 1)))
+        validate_agent_space_contract(env, configured_num_agents, "TorchPPOTrainer")
+
+        inferred_agents, policy_obs_shape, obs_layout = infer_image_space_layout(tuple(env.observation_space.shape))
+        self.obs_shape = tuple(policy_obs_shape)
+        self.obs_layout = obs_layout
+        self.num_agents = int(max(1, inferred_agents))
+
+        action_shape = tuple(env.action_space.shape)
+        if len(action_shape) == 1:
+            self.per_agent_action_dim = int(action_shape[0])
+            self.num_agents = 1
+        elif len(action_shape) == 2:
+            self.num_agents = int(max(self.num_agents, action_shape[0]))
+            self.per_agent_action_dim = int(action_shape[-1])
+        else:
+            raise ValueError(f"Unsupported action space shape for torch backend: {action_shape}")
+        if self.num_agents != configured_num_agents:
+            raise ValueError(
+                f"TorchPPOTrainer: configured num_agents={configured_num_agents} but inferred "
+                f"{self.num_agents} agents from env spaces."
+            )
+        self.multi_agent = self.num_agents > 1
+        self.action_dim = self.per_agent_action_dim
         self.env_action_low = np.asarray(env.action_space.low, dtype=np.float32)
         self.env_action_high = np.asarray(env.action_space.high, dtype=np.float32)
+        self.obs_mode = "per_agent_image"
+        self.policy_sharing_mode = "shared"
+        run_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.run_id = f"torch_{run_stamp}_seed{self.seed}"
+        self.run_dir = self.results_root / self.run_id
+        self.eval_results_dir = self.run_dir / "evaluations"
+        self.plots_dir = self.run_dir / "plots"
+        self.training_history_path = self.run_dir / "training_metrics.jsonl"
+        self.episode_history_path = self.run_dir / "episode_summaries.jsonl"
+        self.eval_history_path = self.run_dir / "torch_eval_history.jsonl"
+        self.run_manifest_path = self.run_dir / "run_manifest.json"
+        self.run_summary_path = self.run_dir / "run_summary.json"
+        self.tb_log_dir = self.log_dir / self.run_id
+        self.tb_writer = None
+        self.latest_train_metrics = {}
+        self.latest_eval_stats = None
+        self.use_subprocess_eval = bool(training_cfg.get("eval_subprocess", self.multi_agent))
+        if not self.distributed or self.rank == 0:
+            self.run_dir.mkdir(parents=True, exist_ok=True)
+            self.eval_results_dir.mkdir(parents=True, exist_ok=True)
+            self.plots_dir.mkdir(parents=True, exist_ok=True)
+            self.tb_log_dir.mkdir(parents=True, exist_ok=True)
+            self.tb_writer = SummaryWriter(log_dir=str(self.tb_log_dir))
+        debug_log_763171(
+            "pre-fix",
+            "H1",
+            "train.py:TorchPPOTrainer:init",
+            "trainer inferred spaces",
+            {
+                "env_obs_shape": tuple(getattr(env.observation_space, "shape", ())),
+                "env_action_shape": tuple(getattr(env.action_space, "shape", ())),
+                "inferred_agents": inferred_agents,
+                "trainer_num_agents": self.num_agents,
+                "per_agent_action_dim": self.per_agent_action_dim,
+                "obs_layout": self.obs_layout,
+                "multi_agent": self.multi_agent,
+                "rollout_collection_mode": "main_thread",
+                "selected_device": str(self.device),
+            },
+        )
 
         ppo_cfg = config["ppo"]
-        training_cfg = config.get("training", {}) or {}
         self.policy_variant = str(training_cfg.get("torch_policy_variant", "legacy")).strip().lower()
-        if self.policy_variant not in TORCH_POLICY_VARIANTS:
+        if self.policy_variant not in self.available_policy_variants:
             raise ValueError(
                 f"Unknown torch policy variant: {self.policy_variant}. "
-                f"Expected one of: {sorted(TORCH_POLICY_VARIANTS)}"
+                f"Expected one of: {sorted(self.available_policy_variants)}"
             )
         self.learning_rate = float(ppo_cfg["learning_rate"])
         self.n_steps = int(ppo_cfg["n_steps"])
@@ -400,7 +732,7 @@ class TorchPPOTrainer:
         steer_min_log_std = float(steer_min_log_std) if steer_min_log_std is not None else None
         steer_max_log_std = float(steer_max_log_std) if steer_max_log_std is not None else None
 
-        policy_cls = TORCH_POLICY_VARIANTS[self.policy_variant]
+        policy_cls = self.available_policy_variants[self.policy_variant]
         self.policy = policy_cls(
             self.obs_shape, self.action_dim,
             min_log_std=min_log_std, max_log_std=max_log_std,
@@ -408,14 +740,279 @@ class TorchPPOTrainer:
         ).to(self.device)
         if self.distributed:
             self.policy = DDP(self.policy, device_ids=[self.local_rank])
-        self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=self.learning_rate)
+        optimizer_builder = self.external_optimizer_builder
+        if optimizer_builder is not None:
+            self.optimizer = optimizer_builder(self.policy, self.learning_rate)
+        else:
+            self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=self.learning_rate)
         self.num_timesteps = 0
-        self.eval_history_path = self.log_dir / "torch_eval_history.jsonl"
 
         # Phase 4A: AMP (mixed precision)
         self.use_amp = self.device.type == "cuda"
         self.amp_dtype = torch.bfloat16 if (self.use_amp and torch.cuda.is_bf16_supported()) else torch.float16
         self.grad_scaler = torch.amp.GradScaler("cuda", enabled=(self.use_amp and self.amp_dtype == torch.float16))
+        self._write_run_manifest()
+
+    def _write_jsonl(self, path: Path, payload: Dict) -> None:
+        if self.distributed and self.rank != 0:
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(payload) + "\n")
+
+    def _write_json(self, path: Path, payload: Dict) -> None:
+        if self.distributed and self.rank != 0:
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+
+    def _step_metadata(self) -> Dict[str, int]:
+        n_envs = int(self.env.num_envs)
+        stream_steps = int(self.num_timesteps)
+        env_steps = int(stream_steps // max(1, self.num_agents))
+        update_steps = int(max(1, self.n_steps * n_envs * self.num_agents))
+        updates_completed = int(stream_steps // update_steps)
+        return {
+            "stream_steps": stream_steps,
+            "env_steps": env_steps,
+            "n_envs": n_envs,
+            "num_agents": int(self.num_agents),
+            "update_steps": update_steps,
+            "updates_completed": updates_completed,
+        }
+
+    def _write_run_manifest(self) -> None:
+        manifest = {
+            "run_id": self.run_id,
+            "created_at": datetime.now().isoformat(),
+            "seed": self.seed,
+            "device": str(self.device),
+            "config_path": self.config_path,
+            "model_dir": str(self.model_dir.resolve()),
+            "log_dir": str(self.log_dir.resolve()),
+            "tensorboard_log_dir": str(self.tb_log_dir.resolve()),
+            "results_dir": str(self.run_dir.resolve()),
+            "training_topology": {
+                "backend": "torch",
+                "marl_paradigm": self.marl_paradigm,
+                "policy_variant": self.policy_variant,
+                "policy_variant_source": self.policy_surface_metadata.get("surface_source"),
+                "policy_surface_metadata": self.policy_surface_metadata,
+                "num_agents": self.num_agents,
+                "policy_sharing_mode": self.policy_sharing_mode,
+                "obs_mode": self.obs_mode,
+                "eval_mode": "subprocess" if self.use_subprocess_eval else "in_process",
+            },
+            "artifacts": {
+                "training_metrics_jsonl": str(self.training_history_path.resolve()),
+                "episode_summaries_jsonl": str(self.episode_history_path.resolve()),
+                "eval_history_jsonl": str(self.eval_history_path.resolve()),
+                "evaluations_dir": str(self.eval_results_dir.resolve()),
+                "plots_dir": str(self.plots_dir.resolve()),
+            },
+            "step_semantics": {
+                "stream_steps_description": "Counts vectorized agent streams (n_envs * num_agents per env step).",
+                "env_steps_description": "Approximate vectorized environment steps derived from stream_steps / num_agents.",
+            },
+            "config": self.config,
+        }
+        self._write_json(self.run_manifest_path, manifest)
+
+    def _record_episode_summary(self, episode_summary: Dict) -> None:
+        if not isinstance(episode_summary, dict):
+            return
+        record = {
+            "timestamp": datetime.now().isoformat(),
+            **self._step_metadata(),
+            "reward": float(episode_summary.get("r", 0.0)),
+            "length": int(episode_summary.get("l", 0)),
+            "time": float(episode_summary.get("t", 0.0)),
+        }
+        self._write_jsonl(self.episode_history_path, record)
+
+    def _record_training_metrics(self, metrics: Dict, elapsed_seconds: float, rollout_seconds: float, update_seconds: float) -> None:
+        step_meta = self._step_metadata()
+        steps_per_second = float(step_meta["update_steps"] / max(elapsed_seconds, 1e-9))
+        env_steps_per_second = float((step_meta["update_steps"] / max(1, self.num_agents)) / max(elapsed_seconds, 1e-9))
+        record = {
+            "timestamp": datetime.now().isoformat(),
+            **step_meta,
+            "elapsed_seconds": float(elapsed_seconds),
+            "rollout_seconds": float(rollout_seconds),
+            "update_seconds": float(update_seconds),
+            "steps_per_second": steps_per_second,
+            "env_steps_per_second": env_steps_per_second,
+            "learning_rate": float(self.optimizer.param_groups[0]["lr"]),
+            **{k: float(v) for k, v in metrics.items()},
+        }
+        self.latest_train_metrics = record
+        self._write_jsonl(self.training_history_path, record)
+        if self.tb_writer is not None:
+            tb_step = step_meta["stream_steps"]
+            scalar_map = {
+                "train/policy_loss": record["policy_loss"],
+                "train/value_loss": record["value_loss"],
+                "train/entropy_loss": record["entropy_loss"],
+                "train/clip_fraction": record["clip_fraction"],
+                "train/approx_kl": record["approx_kl"],
+                "train/grad_norm": record["grad_norm"],
+                "train/learning_rate": record["learning_rate"],
+                "train/steps_per_second": record["steps_per_second"],
+                "train/env_steps_per_second": record["env_steps_per_second"],
+                "train/rollout_seconds": record["rollout_seconds"],
+                "train/update_seconds": record["update_seconds"],
+                "meta/env_steps": record["env_steps"],
+                "meta/updates_completed": record["updates_completed"],
+            }
+            for tag, value in scalar_map.items():
+                self.tb_writer.add_scalar(tag, value, tb_step)
+            self.tb_writer.flush()
+
+    def _record_eval_metrics(self, stats: Dict, source: str, duration_seconds: float = 0.0) -> None:
+        if not isinstance(stats, dict):
+            return
+        record = {
+            "timestamp": datetime.now().isoformat(),
+            "source": source,
+            "duration_seconds": float(duration_seconds),
+            **self._step_metadata(),
+            **stats,
+        }
+        self.latest_eval_stats = record
+        self._write_jsonl(self.eval_history_path, record)
+        if self.tb_writer is not None:
+            tb_step = record["stream_steps"]
+            for key in (
+                "mean_reward",
+                "std_reward",
+                "mean_progress",
+                "offtrack_rate",
+                "mean_steer_variance",
+                "mean_speed",
+                "mean_rank",
+                "collision_rate",
+                "contact_rate",
+                "hook_contact_rate",
+                "contact_termination_rate",
+                "mean_max_contact_steps",
+                "mean_overtakes",
+                "mean_length",
+            ):
+                if key in record:
+                    self.tb_writer.add_scalar(f"eval/{key}", float(record[key]), tb_step)
+            self.tb_writer.flush()
+
+    def write_run_summary(self, final_model_path: Path, best_model_path: Path = None) -> None:
+        summary = {
+            "run_id": self.run_id,
+            "completed_at": datetime.now().isoformat(),
+            **self._step_metadata(),
+            "final_model_path": str(Path(final_model_path).resolve()),
+            "best_model_path": str(Path(best_model_path).resolve()) if best_model_path is not None and Path(best_model_path).exists() else None,
+            "latest_train_metrics": self.latest_train_metrics,
+            "latest_eval_metrics": self.latest_eval_stats,
+            "artifacts": {
+                "run_manifest": str(self.run_manifest_path.resolve()),
+                "training_metrics_jsonl": str(self.training_history_path.resolve()),
+                "episode_summaries_jsonl": str(self.episode_history_path.resolve()),
+                "eval_history_jsonl": str(self.eval_history_path.resolve()),
+                "evaluations_dir": str(self.eval_results_dir.resolve()),
+                "tensorboard_log_dir": str(self.tb_log_dir.resolve()),
+            },
+        }
+        self._write_json(self.run_summary_path, summary)
+
+    def _evaluate_via_subprocess(self, n_episodes: int = 5, record_video: bool = False) -> Dict:
+        if not self.config_path:
+            raise RuntimeError("Subprocess evaluation requires a config path.")
+        if self.distributed and self.rank != 0:
+            return {}
+        temp_checkpoint = self.eval_results_dir / f"eval_checkpoint_step_{self.num_timesteps}.pt"
+        output_json = self.eval_results_dir / f"evaluation_stats_step_{self.num_timesteps}.json"
+        self.save(temp_checkpoint)
+        command = [
+            sys.executable,
+            str(Path(__file__).resolve().parent / "evaluate.py"),
+            "--model",
+            str(temp_checkpoint),
+            "--config",
+            self.config_path,
+            "--episodes",
+            str(int(n_episodes)),
+            "--seed",
+            str(self.eval_seed),
+            "--output-json",
+            str(output_json),
+        ]
+        if not record_video:
+            command.append("--no-video")
+        result = subprocess.run(command, capture_output=True, text=True)
+        if result.returncode != 0:
+            error_record = {
+                "timestamp": datetime.now().isoformat(),
+                **self._step_metadata(),
+                "evaluation_error": result.stderr.strip() or result.stdout.strip() or "Unknown subprocess evaluation failure.",
+                "checkpoint_path": str(temp_checkpoint),
+            }
+            self._write_jsonl(self.eval_history_path, error_record)
+            print("[TorchPPO Eval] Subprocess evaluation failed; skipping this eval.", flush=True)
+            if result.stderr:
+                print(result.stderr.strip(), flush=True)
+            return {}
+        with open(output_json, "r", encoding="utf-8") as f:
+            return json.load(f)
+
+    def _obs_to_policy_batch(self, obs: np.ndarray) -> np.ndarray:
+        return obs_to_policy_batch(obs, self.obs_layout)
+
+    def _env_actions_from_raw(self, raw_action_np: np.ndarray, n_envs: int) -> np.ndarray:
+        raw_t = torch.as_tensor(raw_action_np, dtype=torch.float32)
+        env_t = self._policy.raw_to_env_action(raw_t)
+        env_np = env_t.numpy().astype(np.float64, copy=False)
+        env_actions = action_batch_to_env(env_np, n_envs, self.num_agents)
+        return np.clip(env_actions, self.env_action_low, self.env_action_high).astype(np.float64, copy=False)
+
+    def _flatten_reward(self, rewards, n_envs: int) -> np.ndarray:
+        return flatten_transition_array(
+            rewards,
+            n_envs,
+            self.num_agents,
+            dtype=np.float32,
+            default=0.0,
+            value_name="reward",
+        )
+
+    def _flatten_done(self, dones, n_envs: int) -> np.ndarray:
+        return flatten_transition_array(
+            dones,
+            n_envs,
+            self.num_agents,
+            dtype=np.float32,
+            default=0.0,
+            value_name="done",
+        )
+
+    def _unflatten_agent_values(self, flat_values: np.ndarray, n_envs: int) -> np.ndarray:
+        if self.num_agents <= 1:
+            return flat_values.reshape(n_envs)
+        return flat_values.reshape(n_envs, self.num_agents)
+
+    def _collect_episode_summaries(self, infos):
+        summaries = []
+        for info in infos:
+            if isinstance(info, dict):
+                ep = info.get("episode")
+                if ep is not None and "r" in ep:
+                    summaries.append(ep)
+            elif isinstance(info, (list, tuple)):
+                for agent_info in info:
+                    if not isinstance(agent_info, dict):
+                        continue
+                    ep = agent_info.get("episode")
+                    if ep is not None and "r" in ep:
+                        summaries.append(ep)
+        return summaries
 
     @property
     def _policy(self) -> nn.Module:
@@ -423,48 +1020,78 @@ class TorchPPOTrainer:
         return self.policy.module if isinstance(self.policy, DDP) else self.policy
 
     def _raw_to_env_action_np(self, raw_action_np: np.ndarray) -> np.ndarray:
-        raw_t = torch.as_tensor(raw_action_np, dtype=torch.float32)
-        env_t = self._policy.raw_to_env_action(raw_t)
-        env_np = env_t.numpy()
-        return np.clip(env_np, self.env_action_low, self.env_action_high)
+        return self._env_actions_from_raw(raw_action_np, n_envs=1 if raw_action_np.ndim == 2 else raw_action_np.shape[0])
 
     def _collect_rollout(self, obs):
         n_envs = self.env.num_envs
-        buffer = RolloutBuffer(self.n_steps, n_envs, self.obs_shape, self.action_dim)
-        last_dones = np.zeros(n_envs, dtype=np.float32)
+        n_streams = n_envs * self.num_agents
+        buffer = RolloutBuffer(self.n_steps, n_streams, self.obs_shape, self.action_dim)
+        last_dones = np.zeros(n_streams, dtype=np.float32)
 
         for _ in range(self.n_steps):
-            obs_tensor = torch.as_tensor(obs, dtype=torch.float32, device=self.device) / 255.0
+            obs_policy = self._obs_to_policy_batch(obs)
+            obs_tensor = torch.as_tensor(obs_policy, dtype=torch.float32, device=self.device) / 255.0
             with torch.inference_mode():
                 raw_action, log_prob, value = self._policy.act(obs_tensor, deterministic=False)
 
             raw_action_np = raw_action.cpu().numpy()
-            env_actions = self._raw_to_env_action_np(raw_action_np)
+            env_actions = self._env_actions_from_raw(raw_action_np, n_envs=n_envs)
+            if not hasattr(self, "_debug_logged_first_rollout_step"):
+                debug_log_763171(
+                    "pre-fix",
+                    "H3",
+                    "train.py:_collect_rollout:pre_step",
+                    "first rollout step prepared",
+                    {
+                        "n_envs": n_envs,
+                        "num_agents": self.num_agents,
+                        "obs_input_shape": tuple(np.asarray(obs).shape),
+                        "obs_policy_shape": tuple(obs_policy.shape),
+                        "raw_action_shape": tuple(raw_action_np.shape),
+                        "env_actions_shape": tuple(np.asarray(env_actions).shape),
+                        "env_actions_dtype": str(np.asarray(env_actions).dtype),
+                    },
+                )
             next_obs, rewards, dones, infos = self.env.step(env_actions)
+            if not hasattr(self, "_debug_logged_first_rollout_step"):
+                debug_log_763171(
+                    "pre-fix",
+                    "H3",
+                    "train.py:_collect_rollout:post_step",
+                    "first rollout step succeeded",
+                    {
+                        "next_obs_shape": tuple(np.asarray(next_obs).shape),
+                        "rewards_shape": tuple(np.asarray(rewards).shape),
+                        "dones_shape": tuple(np.asarray(dones).shape),
+                        "infos_type": type(infos).__name__,
+                    },
+                )
+                self._debug_logged_first_rollout_step = True
 
             buffer.add(
-                obs=obs.astype(np.float32),
+                obs=obs_policy.astype(np.float32),
                 action=raw_action_np.astype(np.float32),
-                reward=np.asarray(rewards, dtype=np.float32),
-                done=np.asarray(dones, dtype=np.float32),
+                reward=self._flatten_reward(rewards, n_envs),
+                done=self._flatten_done(dones, n_envs),
                 value=value.cpu().numpy().astype(np.float32),
                 log_prob=log_prob.cpu().numpy().astype(np.float32),
             )
 
-            self.num_timesteps += n_envs
+            self.num_timesteps += n_streams
             obs = next_obs
-            last_dones = np.asarray(dones, dtype=np.float32)
+            last_dones = self._flatten_done(dones, n_envs)
 
-            for info in infos:
-                ep = info.get("episode") if isinstance(info, dict) else None
+            for ep in self._collect_episode_summaries(infos):
                 if ep is not None and "r" in ep:
+                    self._record_episode_summary(ep)
                     # Throttle: only print every 5th episode so progress lines stay visible
                     if getattr(self, "_episode_print_count", 0) % 5 == 0:
                         print(f"Episode reward: {ep['r']:.2f} | length: {ep.get('l', -1)}", flush=True)
                     self._episode_print_count = getattr(self, "_episode_print_count", 0) + 1
 
         with torch.inference_mode():
-            last_obs_tensor = torch.as_tensor(obs, dtype=torch.float32, device=self.device) / 255.0
+            last_obs_policy = self._obs_to_policy_batch(obs)
+            last_obs_tensor = torch.as_tensor(last_obs_policy, dtype=torch.float32, device=self.device) / 255.0
             _, _, last_values = self._policy.act(last_obs_tensor, deterministic=True)
         buffer.compute_returns_advantages(
             last_values=last_values.cpu().numpy().astype(np.float32),
@@ -539,6 +1166,8 @@ class TorchPPOTrainer:
 
     def _get_eval_base_env(self):
         env = self.eval_env
+        if env is None:
+            return None
         # Unwrap VecTransposeImage/DummyVecEnv wrappers until we reach the actual gym env.
         for attr in ("venv", "env"):
             while hasattr(env, attr):
@@ -552,6 +1181,7 @@ class TorchPPOTrainer:
         if base_env is None:
             print("[TorchPPO VisualEval] Skipped: could not access base eval env.", flush=True)
             return
+        visual_agents, _, visual_obs_layout = infer_image_space_layout(base_env.observation_space.shape)
 
         print(f"[TorchPPO VisualEval] Running {n_episodes} episode(s) with live render...", flush=True)
         rewards = []
@@ -561,16 +1191,30 @@ class TorchPPOTrainer:
             done = False
             ep_reward = 0.0
             final_progress = 0.0
-            while not done:
-                obs_t = torch.as_tensor(obs, dtype=torch.float32, device=self.device) / 255.0
-                obs_t = obs_t.permute(2, 0, 1).unsqueeze(0)
+            while not done_to_bool(done):
+                obs_policy = obs_to_policy_batch(obs, visual_obs_layout)
+                obs_t = torch.as_tensor(obs_policy, dtype=torch.float32, device=self.device) / 255.0
                 with torch.no_grad():
                     raw_action, _, _ = self._policy.act(obs_t, deterministic=True)
-                env_action_np = self._raw_to_env_action_np(raw_action.cpu().numpy().squeeze(0))
+                env_action_np = self._env_actions_from_raw(raw_action.cpu().numpy(), n_envs=1)
+                if visual_agents <= 1:
+                    env_action_np = env_action_np.reshape(-1)
+                else:
+                    env_action_np = env_action_np.reshape(visual_agents, self.action_dim)
                 obs, reward, done, info = base_env.step(env_action_np)
-                ep_reward += float(reward)
-                if isinstance(info, dict):
-                    final_progress = float(info.get("progress", final_progress))
+                ep_reward += reward_to_scalar(reward)
+                if isinstance(info, (list, tuple)) and info:
+                    progress_values = [
+                        float(agent_info.get("progress", 0.0))
+                        for agent_info in info
+                        if isinstance(agent_info, dict)
+                    ]
+                    if progress_values:
+                        final_progress = float(np.mean(progress_values))
+                else:
+                    info0 = first_agent_info(info)
+                    if info0:
+                        final_progress = float(info0.get("progress", final_progress))
                 frame = base_env.render(mode="rgb_array")
                 if frame is not None:
                     frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
@@ -590,6 +1234,10 @@ class TorchPPOTrainer:
         )
 
     def evaluate(self, n_episodes: int = 5):
+        if self.use_subprocess_eval:
+            return self._evaluate_via_subprocess(n_episodes=n_episodes, record_video=False)
+        if self.eval_env is None:
+            raise RuntimeError("Evaluation requested but no eval env is available.")
         rewards = []
         progresses = []
         offtrack_events = []
@@ -597,38 +1245,72 @@ class TorchPPOTrainer:
         mean_speeds = []
         mean_throttles = []
         mean_brakes = []
+        mean_ranks = []
+        collision_rates = []
+        contact_rates = []
+        hook_contact_rates = []
+        contact_termination_rates = []
+        max_contact_steps = []
+        overtake_counts = []
         lengths = []
         for _ in range(n_episodes):
             obs = self.eval_env.reset()
-            done = np.array([False])
+            done = np.array([False]) if not self.multi_agent else np.zeros((1, self.num_agents), dtype=np.bool_)
             total_reward = 0.0
             final_progress = 0.0
             episode_offtrack = 0
+            episode_collision = 0
+            episode_contact = 0
+            episode_hook_contact = 0
+            episode_contact_termination = 0
+            episode_overtakes = 0
+            final_rank_values = []
             steer_values = []
             speed_values = []
             throttle_values = []
             brake_values = []
+            episode_max_contact_steps = 0
             episode_len = 0
-            while not bool(done[0]):
-                obs_tensor = torch.as_tensor(obs, dtype=torch.float32, device=self.device) / 255.0
+            while not done_to_bool(done):
+                obs_policy = self._obs_to_policy_batch(obs)
+                obs_tensor = torch.as_tensor(obs_policy, dtype=torch.float32, device=self.device) / 255.0
                 with torch.no_grad():
                     raw_action, _, _ = self._policy.act(obs_tensor, deterministic=True)
                 raw_action_np = raw_action.cpu().numpy()
-                env_actions = self._raw_to_env_action_np(raw_action_np)
+                env_actions = self._env_actions_from_raw(raw_action_np, n_envs=self.eval_env.num_envs)
                 obs, reward, done, info = self.eval_env.step(env_actions)
-                total_reward += float(np.asarray(reward).reshape(-1)[0])
+                total_reward += reward_to_scalar(reward)
                 episode_len += 1
-                flat_env_actions = env_actions.reshape(-1, self.action_dim)
-                steer_values.append(float(flat_env_actions[0, 0]))
+                flat_env_actions = np.asarray(env_actions).reshape(-1, self.action_dim)
+                steer_values.extend(flat_env_actions[:, 0].astype(np.float32).tolist())
                 if self.action_dim >= 2:
-                    throttle_values.append(float(flat_env_actions[0, 1]))
+                    throttle_values.extend(flat_env_actions[:, 1].astype(np.float32).tolist())
                 if self.action_dim >= 3:
-                    brake_values.append(float(flat_env_actions[0, 2]))
-                info0 = info[0] if isinstance(info, (list, tuple)) and len(info) > 0 else {}
-                if isinstance(info0, dict):
-                    final_progress = float(info0.get("progress", final_progress))
-                    episode_offtrack += int(info0.get("events/offtrack", 0) > 0)
-                    speed_values.append(float(info0.get("telemetry/speed", 0.0)))
+                    brake_values.extend(flat_env_actions[:, 2].astype(np.float32).tolist())
+                info_env = info[0] if isinstance(info, (list, tuple)) and len(info) > 0 else info
+                agent_infos = info_env if isinstance(info_env, (list, tuple)) else [info_env]
+                progress_values = []
+                rank_values = []
+                for agent_info in agent_infos:
+                    if not isinstance(agent_info, dict):
+                        continue
+                    progress_values.append(float(agent_info.get("progress", 0.0)))
+                    rank_values.append(float(agent_info.get("telemetry/rank", 0.0)))
+                    episode_offtrack += int(agent_info.get("events/offtrack", 0) > 0)
+                    episode_collision += int(agent_info.get("events/collision", 0) > 0)
+                    episode_contact += int(agent_info.get("events/contact", 0) > 0)
+                    episode_hook_contact += int(agent_info.get("events/hook_contact", 0) > 0)
+                    episode_contact_termination += int(agent_info.get("events/contact_termination", 0) > 0)
+                    episode_overtakes += int(agent_info.get("events/overtake", 0))
+                    speed_values.append(float(agent_info.get("telemetry/speed", 0.0)))
+                    episode_max_contact_steps = max(
+                        episode_max_contact_steps,
+                        int(agent_info.get("telemetry/collision_contact_steps", 0)),
+                    )
+                if progress_values:
+                    final_progress = float(np.mean(progress_values))
+                if rank_values:
+                    final_rank_values = rank_values
             rewards.append(total_reward)
             progresses.append(final_progress)
             offtrack_events.append(int(episode_offtrack > 0))
@@ -637,6 +1319,13 @@ class TorchPPOTrainer:
             mean_speeds.append(float(np.mean(speed_values)) if speed_values else 0.0)
             mean_throttles.append(float(np.mean(throttle_values)) if throttle_values else 0.0)
             mean_brakes.append(float(np.mean(brake_values)) if brake_values else 0.0)
+            mean_ranks.append(float(np.mean(final_rank_values)) if final_rank_values else 1.0)
+            collision_rates.append(int(episode_collision > 0))
+            contact_rates.append(int(episode_contact > 0))
+            hook_contact_rates.append(int(episode_hook_contact > 0))
+            contact_termination_rates.append(int(episode_contact_termination > 0))
+            max_contact_steps.append(int(episode_max_contact_steps))
+            overtake_counts.append(int(episode_overtakes))
         return {
             "mean_reward": float(np.mean(rewards)),
             "std_reward": float(np.std(rewards)),
@@ -647,11 +1336,23 @@ class TorchPPOTrainer:
             "mean_speed": float(np.mean(mean_speeds)),
             "mean_throttle": float(np.mean(mean_throttles)),
             "mean_brake": float(np.mean(mean_brakes)),
+            "mean_rank": float(np.mean(mean_ranks)),
+            "collision_rate": float(np.mean(collision_rates)),
+            "contact_rate": float(np.mean(contact_rates)),
+            "hook_contact_rate": float(np.mean(hook_contact_rates)),
+            "contact_termination_rate": float(np.mean(contact_termination_rates)),
+            "mean_max_contact_steps": float(np.mean(max_contact_steps)),
+            "mean_overtakes": float(np.mean(overtake_counts)),
             "mean_length": float(np.mean(lengths)),
             "episode_rewards": rewards,
             "episode_progress": progresses,
             "episode_offtrack": offtrack_events,
             "episode_steer_variance": steer_variances,
+            "episode_collision": collision_rates,
+            "episode_contact": contact_rates,
+            "episode_hook_contact": hook_contact_rates,
+            "episode_contact_termination": contact_termination_rates,
+            "episode_max_contact_steps": max_contact_steps,
         }
 
     def save(self, path: Path):
@@ -670,6 +1371,13 @@ class TorchPPOTrainer:
             "optimizer_state_dict": self.optimizer.state_dict(),
             "num_timesteps": self.num_timesteps,
             "config": self.config,
+            "training_topology": {
+                "marl_paradigm": self.marl_paradigm,
+                "num_agents": self.num_agents,
+                "policy_sharing_mode": self.policy_sharing_mode,
+                "obs_mode": self.obs_mode,
+                "per_agent_action_dim": self.per_agent_action_dim,
+            },
             "rng_state": {
                 "numpy": np.random.get_state(),
                 "torch_cpu": torch.get_rng_state(),
@@ -682,7 +1390,7 @@ class TorchPPOTrainer:
         resume_mode = str(resume_mode).strip().lower()
         if resume_mode not in {"full", "policy_only"}:
             raise ValueError(f"Unknown resume mode: {resume_mode}")
-        payload = torch.load(str(path), map_location=self.device)
+        payload = torch.load(str(path), map_location=self.device, weights_only=False)
         raw_policy = self.policy.module if isinstance(self.policy, DDP) else self.policy
         raw_policy.load_state_dict(payload["policy_state_dict"])
 
@@ -745,6 +1453,18 @@ class TorchPPOTrainer:
         visual_eval_cfg: dict = None,
     ):
         obs = self.env.reset()
+        debug_log_763171(
+            "pre-fix",
+            "H2",
+            "train.py:learn:reset",
+            "learn reset completed",
+            {
+                "obs_shape": tuple(np.asarray(obs).shape),
+                "obs_dtype": str(np.asarray(obs).dtype),
+                "num_envs": self.env.num_envs,
+                "trainer_num_agents": self.num_agents,
+            },
+        )
         update_idx = 0
         best_eval_reward = -np.inf
         start_time = time.time()
@@ -804,27 +1524,13 @@ class TorchPPOTrainer:
 
         while self.num_timesteps < total_timesteps:
             lr_now = self._set_learning_rate(total_timesteps)
-
-            # Start collecting NEXT rollout in a background thread
-            next_obs_holder = [obs]
-            collect_exc_holder = [None]
-
-            def _collect_next(holder=next_obs_holder, exc_holder=collect_exc_holder, idx=1 - buf_idx):
-                try:
-                    holder[0], buffers[idx] = self._collect_rollout(holder[0])
-                except Exception as e:
-                    exc_holder[0] = e
-
-            collect_thread = threading.Thread(target=_collect_next, daemon=True)
-            collect_thread.start()
-
-            # GPU update on the current buffer while CPUs collect the next one
+            should_stop = False
+            update_started_at = time.time()
             train_metrics = self._update(buffers[buf_idx])
-
-            collect_thread.join()
-            if collect_exc_holder[0] is not None:
-                raise collect_exc_holder[0]
-            obs = next_obs_holder[0]
+            update_elapsed = time.time() - update_started_at
+            rollout_started_at = time.time()
+            obs, buffers[1 - buf_idx] = self._collect_rollout(obs)
+            rollout_elapsed = time.time() - rollout_started_at
 
             # Swap buffers
             buf_idx = 1 - buf_idx
@@ -863,6 +1569,12 @@ class TorchPPOTrainer:
                 f"{gpu_mb} | last_eval={last_eval_wall_clock:.1f}s",
                 flush=True,
             )
+            self._record_training_metrics(
+                train_metrics,
+                elapsed_seconds=elapsed_since_last,
+                rollout_seconds=rollout_elapsed,
+                update_seconds=update_elapsed,
+            )
 
             # Save checkpoint every save_freq steps (boundary-based so we never miss)
             if save_freq > 0 and (self.num_timesteps - last_checkpoint_step) >= save_freq:
@@ -877,19 +1589,30 @@ class TorchPPOTrainer:
 
             # Eval every eval_freq steps (boundary-based so we never miss)
             if eval_freq > 0 and (self.num_timesteps - last_eval_step) >= eval_freq:
+                if self.distributed and dist.is_available() and dist.is_initialized():
+                    dist.barrier()
                 eval_started_at = time.time()
                 eval_stats = self.evaluate(n_episodes=n_eval_episodes)
                 last_eval_wall_clock = time.time() - eval_started_at
-                eval_record = {
-                    "step": int(self.num_timesteps),
-                    "timestamp": datetime.now().isoformat(timespec="seconds"),
-                    "eval_wall_clock_seconds": float(last_eval_wall_clock),
-                    **{k: float(v) for k, v in eval_stats.items() if isinstance(v, (int, float, np.integer, np.floating))},
-                }
-                with open(self.eval_history_path, "a", encoding="utf-8") as f:
-                    f.write(json.dumps(eval_record) + "\n")
+                if eval_stats:
+                    self._record_eval_metrics(
+                        {k: v for k, v in eval_stats.items() if isinstance(v, (int, float, np.integer, np.floating))},
+                        source="subprocess" if self.use_subprocess_eval else "in_process",
+                        duration_seconds=last_eval_wall_clock,
+                    )
+                else:
+                    last_eval_step = self.num_timesteps
+                    if self.distributed and dist.is_available() and dist.is_initialized():
+                        dist.barrier()
+                    continue
                 mean_rew = eval_stats["mean_reward"]
                 std_rew = eval_stats["std_reward"]
+                mean_speed = float(eval_stats.get("mean_speed", 0.0))
+                mean_throttle = float(eval_stats.get("mean_throttle", 0.0))
+                mean_brake = float(eval_stats.get("mean_brake", 0.0))
+                contact_rate = float(eval_stats.get("contact_rate", eval_stats.get("collision_rate", 0.0)))
+                hook_contact_rate = float(eval_stats.get("hook_contact_rate", 0.0))
+                contact_termination_rate = float(eval_stats.get("contact_termination_rate", 0.0))
                 is_first_eval = (best_eval_reward == -np.inf)
                 is_new_best = mean_rew > best_eval_reward
                 print(
@@ -897,10 +1620,13 @@ class TorchPPOTrainer:
                     f"mean_reward={mean_rew:.2f} +/- {std_rew:.2f} | "
                     f"progress={eval_stats['mean_progress']:.2%} | "
                     f"offtrack_rate={eval_stats['offtrack_rate']:.2%} | "
+                    f"contact_rate={contact_rate:.2%} | "
+                    f"hook_rate={hook_contact_rate:.2%} | "
+                    f"contact_term_rate={contact_termination_rate:.2%} | "
                     f"steer_var={eval_stats['mean_steer_variance']:.5f} | "
-                    f"mean_speed={eval_stats['mean_speed']:.2f} | "
-                    f"throttle={eval_stats['mean_throttle']:.2f} | "
-                    f"brake={eval_stats['mean_brake']:.2f} | "
+                    f"mean_speed={mean_speed:.2f} | "
+                    f"throttle={mean_throttle:.2f} | "
+                    f"brake={mean_brake:.2f} | "
                     f"stage={curriculum_stage} | "
                     f"eval_time={last_eval_wall_clock:.1f}s"
                     f"{' (first eval)' if is_first_eval else (' (new best!)' if is_new_best else '')}",
@@ -933,28 +1659,29 @@ class TorchPPOTrainer:
                             flush=True,
                         )
                         print(f"[TorchPPO] Solved checkpoint: {solved_path.resolve()}", flush=True)
-                        break
+                        should_stop = True
                 if curriculum_enabled and curriculum_stage == 1:
-                    if eval_stats["mean_progress"] >= promote_progress and eval_stats["mean_speed"] >= promote_speed:
+                    if eval_stats["mean_progress"] >= promote_progress and mean_speed >= promote_speed:
                         self.env.env_method("set_curriculum_stage", 2)
-                        self.eval_env.env_method("set_curriculum_stage", 2)
+                        if self.eval_env is not None:
+                            self.eval_env.env_method("set_curriculum_stage", 2)
                         curriculum_stage = 2
                         print(
                             f"[TorchPPO Curriculum] Promoted to stage 2 at step {self.num_timesteps:,} "
-                            f"(progress={eval_stats['mean_progress']:.2%}, speed={eval_stats['mean_speed']:.2f}).",
+                            f"(progress={eval_stats['mean_progress']:.2%}, speed={mean_speed:.2f}).",
                             flush=True,
                         )
                 if fail_fast_enabled and self.num_timesteps >= fail_fast_min_steps:
                     is_bad_eval = (
                         eval_stats["mean_progress"] < fail_fast_min_progress
-                        and eval_stats["mean_speed"] < fail_fast_min_speed
+                        and mean_speed < fail_fast_min_speed
                         and eval_stats.get("mean_throttle", 0.0) < 0.25
                     )
                     if is_bad_eval:
                         fail_fast_bad_evals += 1
                         print(
                             f"[TorchPPO FailFast] idle-pattern eval {fail_fast_bad_evals}/{fail_fast_patience} "
-                            f"(progress={eval_stats['mean_progress']:.2%}, speed={eval_stats['mean_speed']:.2f}).",
+                            f"(progress={eval_stats['mean_progress']:.2%}, speed={mean_speed:.2f}).",
                             flush=True,
                         )
                     else:
@@ -967,8 +1694,12 @@ class TorchPPOTrainer:
                             f"Saved checkpoint: {fail_path.resolve()}",
                             flush=True,
                         )
-                        break
+                        should_stop = True
                 last_eval_step = self.num_timesteps
+                if self.distributed and dist.is_available() and dist.is_initialized():
+                    dist.barrier()
+                if should_stop:
+                    break
 
 
 class SingleAgentWrapper(gym.Wrapper):
@@ -1014,7 +1745,9 @@ class SingleAgentWrapper(gym.Wrapper):
 
     def step(self, action):
         if hasattr(self.env.action_space, "shape") and len(self.env.action_space.shape) == 2:
-            action = action.reshape(1, -1)
+            action = np.asarray(action, dtype=np.float64).reshape(1, -1)
+        elif action is not None:
+            action = np.asarray(action, dtype=np.float64)
         obs, reward, done, info = self.env.step(action)
         # Extract single agent observation if multi-agent format (num_agents, H, W, C)
         if hasattr(obs, "shape") and len(obs.shape) == 4 and obs.shape[0] == 1:
@@ -1027,8 +1760,106 @@ class SingleAgentWrapper(gym.Wrapper):
         return obs, reward, done, info
 
 
+class MultiAgentSpaceWrapper(gym.Wrapper):
+    """Expose correct stacked Box spaces for multi-agent MultiCarRacing."""
+
+    def __init__(self, env, num_agents: int):
+        super().__init__(env)
+        self.num_agents = int(max(1, num_agents))
+        obs_space = env.observation_space
+        act_space = env.action_space
+        if hasattr(obs_space, "shape") and len(obs_space.shape) == 3:
+            obs_low = np.repeat(np.expand_dims(obs_space.low, axis=0), self.num_agents, axis=0)
+            obs_high = np.repeat(np.expand_dims(obs_space.high, axis=0), self.num_agents, axis=0)
+            self.observation_space = gym.spaces.Box(
+                low=obs_low,
+                high=obs_high,
+                shape=(self.num_agents, *obs_space.shape),
+                dtype=obs_space.dtype
+            )
+        elif hasattr(obs_space, "shape") and len(obs_space.shape) == 4:
+            if int(obs_space.shape[0]) != self.num_agents:
+                raise ValueError(
+                    f"MultiAgentSpaceWrapper expected {self.num_agents} agents in observation "
+                    f"space, got {tuple(obs_space.shape)}."
+                )
+            self.observation_space = obs_space
+        else:
+            raise ValueError(
+                f"MultiAgentSpaceWrapper expected image observations with rank 3 or 4, got "
+                f"shape {tuple(getattr(obs_space, 'shape', ()))}."
+            )
+        if hasattr(act_space, "shape") and len(act_space.shape) == 1:
+            act_low = np.repeat(np.expand_dims(act_space.low, axis=0), self.num_agents, axis=0)
+            act_high = np.repeat(np.expand_dims(act_space.high, axis=0), self.num_agents, axis=0)
+            self.action_space = gym.spaces.Box(
+                low=act_low,
+                high=act_high,
+                shape=(self.num_agents, *act_space.shape),
+                dtype=act_space.dtype
+            )
+        elif hasattr(act_space, "shape") and len(act_space.shape) == 2:
+            if int(act_space.shape[0]) != self.num_agents:
+                raise ValueError(
+                    f"MultiAgentSpaceWrapper expected {self.num_agents} agents in action "
+                    f"space, got {tuple(act_space.shape)}."
+                )
+            self.action_space = act_space
+        else:
+            raise ValueError(
+                f"MultiAgentSpaceWrapper expected Box actions with rank 1 or 2, got "
+                f"shape {tuple(getattr(act_space, 'shape', ()))}."
+            )
+
+    def reset(self, **kwargs):
+        return self.env.reset(**kwargs)
+
+    def step(self, action):
+        if action is not None:
+            action = np.asarray(action, dtype=np.float64).reshape(self.num_agents, -1)
+        return self.env.step(action)
+
+
+class MultiAgentDummyVecEnv(DummyVecEnv):
+    """DummyVecEnv variant that preserves per-agent rewards and done flags."""
+
+    def __init__(self, env_fns):
+        super().__init__(env_fns)
+        action_shape = tuple(getattr(self.action_space, "shape", ()))
+        self.num_agents = int(action_shape[0]) if len(action_shape) == 2 else 1
+        self.buf_dones = np.zeros((self.num_envs, self.num_agents), dtype=bool)
+        self.buf_rews = np.zeros((self.num_envs, self.num_agents), dtype=np.float32)
+
+    def step_wait(self):
+        for env_idx in range(self.num_envs):
+            obs, reward, done, info = self.envs[env_idx].step(self.actions[env_idx])
+            reward_arr = np.asarray(reward, dtype=np.float32).reshape(-1)
+            done_arr = np.asarray(done, dtype=np.bool_).reshape(-1)
+            if reward_arr.size != self.num_agents:
+                raise ValueError(
+                    f"MultiAgentDummyVecEnv expected {self.num_agents} rewards, got "
+                    f"shape {tuple(np.asarray(reward).shape)}."
+                )
+            if done_arr.size == 1:
+                done_arr = np.full(self.num_agents, bool(done_arr.item()), dtype=np.bool_)
+            elif done_arr.size != self.num_agents:
+                raise ValueError(
+                    f"MultiAgentDummyVecEnv expected {self.num_agents} done flags, got "
+                    f"shape {tuple(np.asarray(done).shape)}."
+                )
+            self.buf_rews[env_idx] = reward_arr
+            self.buf_dones[env_idx] = done_arr
+            self.buf_infos[env_idx] = info
+            if done_to_bool(done_arr):
+                if isinstance(self.buf_infos[env_idx], dict):
+                    self.buf_infos[env_idx]["terminal_observation"] = obs
+                obs = self.envs[env_idx].reset()
+            self._save_obs(env_idx, obs)
+        return self._obs_from_buf(), np.copy(self.buf_rews), np.copy(self.buf_dones), deepcopy(self.buf_infos)
+
+
 class RewardShapingWrapper(gym.Wrapper):
-    """Minimal reward shaping focused on speed, cornering, and stability."""
+    """Reward shaping for both single-car and multi-car racing."""
 
     def __init__(self, env, reward_config):
         super().__init__(env)
@@ -1037,9 +1868,6 @@ class RewardShapingWrapper(gym.Wrapper):
         self.use_custom_reward = bool(reward_config.get('use_custom_reward', True))
 
         self.forward_progress_scale = float(reward_config.get('forward_progress_scale', 1.0))
-        # Dense alignment reward: velocity · track_dir. Gives step-by-step directional feedback
-        # so the policy learns WHICH WAY to steer before it ever sees a tile progress signal.
-        # Safe with off_track_mode=terminate since grass contact ends episode immediately.
         self.track_alignment_scale = float(reward_config.get('track_alignment_scale', 0.0))
         self.straight_speed_scale = float(reward_config.get('straight_speed_scale', 0.05))
         self.sharp_turn_threshold = float(reward_config.get('sharp_turn_threshold', 0.35))
@@ -1053,11 +1881,7 @@ class RewardShapingWrapper(gym.Wrapper):
         self.time_penalty = float(reward_config.get('time_penalty', -0.1))
         self.steer_smoothness_penalty = float(reward_config.get('steer_smoothness_penalty', 0.05))
         self.steer_delta_cap = float(reward_config.get('steer_delta_cap', 0.5))
-        # Lateral velocity penalty: penalises sliding/spinning perpendicular to track direction.
-        # At speed=29 with steering, the car slides hard — this directly penalises that physics.
         self.lateral_velocity_penalty = float(reward_config.get('lateral_velocity_penalty', 0.0))
-        # Magnitude penalty: penalises |steer|² to discourage full-lock steering / donuts.
-        # Squared so small adjustments are cheap, extreme angles are costly.
         self.steer_magnitude_penalty = float(reward_config.get('steer_magnitude_penalty', 0.0))
         self.idle_speed_threshold = float(reward_config.get('idle_speed_threshold', 1.5))
         self.idle_penalty = float(reward_config.get('idle_penalty', -0.4))
@@ -1070,13 +1894,10 @@ class RewardShapingWrapper(gym.Wrapper):
         self.stuck_progress_epsilon = float(reward_config.get('stuck_progress_epsilon', 1e-3))
         self.stuck_max_steps = int(reward_config.get('stuck_max_steps', 120))
         self.stuck_terminal_penalty = float(reward_config.get('stuck_terminal_penalty', -50.0))
-        # No-progress termination: catches donuts/spinning at high speed (speed check passes
-        # but progress stays zero — normal stuck detector misses this).
         self.no_progress_max_steps = int(reward_config.get('no_progress_max_steps', 200))
         self.no_progress_terminal_penalty = float(
             reward_config.get('no_progress_terminal_penalty', -15.0)
         )
-        # Yaw-rate penalty: directly taxes spinning/donuts by penalising angular velocity.
         self.yaw_rate_penalty = float(reward_config.get('yaw_rate_penalty', 0.0))
 
         self.off_track_mode = str(reward_config.get('off_track_mode', 'terminate')).strip().lower()
@@ -1084,6 +1905,7 @@ class RewardShapingWrapper(gym.Wrapper):
             reward_config.get('off_track_terminal_penalty', -100.0)
         )
         self.off_track_step_penalty = float(reward_config.get('off_track_step_penalty', -25.0))
+
         self.curriculum = reward_config.get('curriculum', {}) or {}
         self.curriculum_enabled = bool(self.curriculum.get('enabled', False))
         self.curriculum_stage = int(self.curriculum.get('start_stage', 1))
@@ -1095,28 +1917,109 @@ class RewardShapingWrapper(gym.Wrapper):
             "off_track_step_penalty": self.off_track_step_penalty,
             "corner_overspeed_penalty_scale": self.corner_overspeed_penalty_scale,
         }
+
+        marl_cfg = reward_config.get("multi_agent", {}) or {}
+        self.multi_agent_enabled = bool(marl_cfg.get("enabled", True))
+        self.rank_reward_scale = float(marl_cfg.get("rank_reward_scale", 0.0))
+        self.relative_velocity_scale = float(marl_cfg.get("relative_velocity_scale", 0.0))
+        self.relative_velocity_cap = float(marl_cfg.get("relative_velocity_cap", 10.0))
+        self.nearest_opponent_max_distance = float(marl_cfg.get("nearest_opponent_max_distance", 20.0))
+        self.overtake_bonus = float(marl_cfg.get("overtake_bonus", 0.0))
+        self.overtake_margin = float(marl_cfg.get("overtake_margin", 1e-3))
+        self.collision_distance_threshold = float(marl_cfg.get("collision_distance_threshold", 3.0))
+        self.collision_overlap_distance = float(
+            marl_cfg.get("collision_overlap_distance", max(0.5, self.collision_distance_threshold * 0.6))
+        )
+        self.collision_min_closing_speed = float(marl_cfg.get("collision_min_closing_speed", 0.5))
+        self.collision_low_speed_threshold = float(marl_cfg.get("collision_low_speed_threshold", 2.0))
+        self.collision_medium_speed_threshold = float(marl_cfg.get("collision_medium_speed_threshold", 5.0))
+        self.collision_high_speed_threshold = float(marl_cfg.get("collision_high_speed_threshold", 8.0))
+        self.collision_low_penalty = float(marl_cfg.get("collision_low_penalty", -1.0))
+        self.collision_medium_penalty = float(marl_cfg.get("collision_medium_penalty", -4.0))
+        self.collision_high_penalty = float(marl_cfg.get("collision_high_penalty", -10.0))
+        self.contact_penalty = float(marl_cfg.get("contact_penalty", 0.0))
+        self.sustained_contact_steps = int(max(1, marl_cfg.get("sustained_contact_steps", 2)))
+        self.sustained_contact_penalty = float(marl_cfg.get("sustained_contact_penalty", 0.0))
+        self.hook_contact_steps = int(max(1, marl_cfg.get("hook_contact_steps", self.sustained_contact_steps + 2)))
+        self.hook_contact_speed_threshold = float(
+            marl_cfg.get("hook_contact_speed_threshold", max(1.0, self.collision_min_closing_speed))
+        )
+        self.hook_contact_penalty = float(marl_cfg.get("hook_contact_penalty", 0.0))
+        self.contact_termination_mode = str(marl_cfg.get("contact_termination_mode", "none")).strip().lower()
+        self.contact_terminate_steps = int(max(0, marl_cfg.get("contact_terminate_steps", 0)))
+        self.terminate_on_hook_contact = bool(marl_cfg.get("terminate_on_hook_contact", False))
+        self.severe_contact_speed_threshold = float(
+            marl_cfg.get("severe_contact_speed_threshold", self.collision_high_speed_threshold)
+        )
+        self.contact_terminal_penalty = float(marl_cfg.get("contact_terminal_penalty", 0.0))
+        self.shared_collision_penalty = float(marl_cfg.get("shared_collision_penalty", 0.0))
+        self.front_gap_hard_distance = float(marl_cfg.get("front_gap_hard_distance", 2.5))
+        self.front_gap_soft_distance = float(
+            marl_cfg.get("front_gap_soft_distance", max(self.front_gap_hard_distance + 1.0, 5.0))
+        )
+        self.front_speed_penalty_scale = float(marl_cfg.get("front_speed_penalty_scale", 0.0))
+        self.front_throttle_penalty_scale = float(marl_cfg.get("front_throttle_penalty_scale", 0.0))
+        self.open_space_distance = float(
+            marl_cfg.get("open_space_distance", max(self.front_gap_soft_distance + 1.0, 7.0))
+        )
+        self.open_space_accel_scale = float(marl_cfg.get("open_space_accel_scale", 0.0))
+        self.side_gap_threshold = float(marl_cfg.get("side_gap_threshold", 2.8))
+        self.side_longitudinal_window = float(marl_cfg.get("side_longitudinal_window", 3.0))
+        self.side_clearance_penalty_scale = float(marl_cfg.get("side_clearance_penalty_scale", 0.0))
+        self.side_closing_penalty_scale = float(marl_cfg.get("side_closing_penalty_scale", 0.0))
+        self.relative_velocity_gate_front_strength = float(marl_cfg.get("relative_velocity_gate_front_strength", 0.85))
+        self.relative_velocity_gate_side_strength = float(marl_cfg.get("relative_velocity_gate_side_strength", 0.6))
+        self.relative_velocity_positive_requires_open_front = bool(
+            marl_cfg.get("relative_velocity_positive_requires_open_front", True)
+        )
+        self.collision_overlap_margin = float(marl_cfg.get("collision_overlap_margin", 0.35))
+        self.proximity_soft_penalty_scale = float(marl_cfg.get("proximity_soft_penalty_scale", 0.0))
+        self.proximity_soft_tangential_scale = float(marl_cfg.get("proximity_soft_tangential_scale", 0.0))
+        self.overtake_min_pairwise_distance = float(marl_cfg.get("overtake_min_pairwise_distance", 0.0))
+        self.overtake_spacing_soft_margin = float(marl_cfg.get("overtake_spacing_soft_margin", 2.0))
+        self.rank_unsafe_dampen_strength = float(marl_cfg.get("rank_unsafe_dampen_strength", 0.0))
+        self.contact_forward_dampening_scale = float(marl_cfg.get("contact_forward_dampening_scale", 0.0))
+        self.pre_hook_contact_steps = int(max(1, marl_cfg.get("pre_hook_contact_steps", 2)))
+        self.pre_hook_rel_speed_threshold = float(marl_cfg.get("pre_hook_rel_speed_threshold", 2.5))
+        self.pre_hook_penalty = float(marl_cfg.get("pre_hook_penalty", -3.0))
+        self.stick_penalty_per_step = float(marl_cfg.get("stick_penalty_per_step", 0.0))
+        self.stick_penalty_max_steps = int(max(1, marl_cfg.get("stick_penalty_max_steps", 10)))
+        self.collision_rub_penalty = float(marl_cfg.get("collision_rub_penalty", 0.0))
+        self.overlap_step_penalty = float(marl_cfg.get("overlap_step_penalty", 0.0))
+        self.overlap_step_penalty_max_steps = int(max(1, marl_cfg.get("overlap_step_penalty_max_steps", 20)))
+        self.overtake_requires_clean_contact = bool(marl_cfg.get("overtake_requires_clean_contact", False))
+        self.overtake_contact_dampen = float(np.clip(float(marl_cfg.get("overtake_contact_dampen", 1.0)), 0.0, 1.0))
+        self.rank_contact_dampen = float(np.clip(float(marl_cfg.get("rank_contact_dampen", 0.0)), 0.0, 1.0))
+
+        self._marl_stage2_defaults = {
+            "overtake_bonus": self.overtake_bonus,
+            "proximity_soft_penalty_scale": self.proximity_soft_penalty_scale,
+            "contact_terminate_steps": int(self.contact_terminate_steps),
+            "collision_rub_penalty": self.collision_rub_penalty,
+            "overlap_step_penalty": self.overlap_step_penalty,
+        }
         if self.curriculum_enabled:
             self._apply_curriculum_stage(self.curriculum_stage)
 
-        self._prev_steer = None
-        self._prev_speed = None
-        self._lap_count = 0
-        self._prev_progress = None
-        self._lap_completion_latched = False
-        self._stuck_steps = 0
-        self._no_progress_steps = 0
-        self._last_stuck_progress = None
-        self._episode_steps = 0
-        self._training_mode = True  # Phase 1C: minimal info dict during training
-
-        # Phase 1A: cached track geometry (populated on reset)
-        self._track_xy = None       # (N, 2) float32
-        self._track_betas = None    # (N,) float32
-        self._track_dirs = None     # (N, 2) float32 — precomputed direction vectors
+        self._training_mode = True
+        self._track_xy = None
+        self._track_betas = None
+        self._track_dirs = None
         self._n_track = 0
-        self._last_track_index = 0
+        self._num_agents = 0
+        self._prev_steer = np.zeros(0, dtype=np.float32)
+        self._prev_speed = np.zeros(0, dtype=np.float32)
+        self._lap_count = np.zeros(0, dtype=np.int32)
+        self._prev_progress = np.zeros(0, dtype=np.float32)
+        self._lap_completion_latched = np.zeros(0, dtype=np.bool_)
+        self._stuck_steps = np.zeros(0, dtype=np.int32)
+        self._no_progress_steps = np.zeros(0, dtype=np.int32)
+        self._last_stuck_progress = np.zeros(0, dtype=np.float32)
+        self._episode_steps = np.zeros(0, dtype=np.int32)
+        self._last_track_index = np.zeros(0, dtype=np.int32)
+        self._prev_race_progress = np.zeros(0, dtype=np.float32)
+        self._active_collision_pairs = {}
 
-        # Phase 1B: precompute whether we need track context at all
         self._needs_track_context = (
             self.track_alignment_scale != 0.0
             or self.straight_speed_scale != 0.0
@@ -1125,31 +2028,75 @@ class RewardShapingWrapper(gym.Wrapper):
             or self.lateral_velocity_penalty != 0.0
         )
 
+    def _infer_num_agents(self, base_env=None):
+        if base_env is not None and hasattr(base_env, "cars") and base_env.cars:
+            return max(1, int(len(base_env.cars)))
+        act_space = getattr(self.env, "action_space", None)
+        if act_space is not None and hasattr(act_space, "shape"):
+            if len(act_space.shape) == 2 and act_space.shape[0] > 0:
+                return int(act_space.shape[0])
+            if len(act_space.shape) == 1:
+                return 1
+        obs_space = getattr(self.env, "observation_space", None)
+        if obs_space is not None and hasattr(obs_space, "shape"):
+            if len(obs_space.shape) == 4 and obs_space.shape[0] > 0:
+                return int(obs_space.shape[0])
+        return 1
+
+    def _reset_agent_buffers(self, n_agents: int):
+        self._num_agents = int(max(1, n_agents))
+        self._prev_steer = np.full(self._num_agents, np.nan, dtype=np.float32)
+        self._prev_speed = np.full(self._num_agents, np.nan, dtype=np.float32)
+        self._lap_count = np.zeros(self._num_agents, dtype=np.int32)
+        self._prev_progress = np.full(self._num_agents, np.nan, dtype=np.float32)
+        self._lap_completion_latched = np.zeros(self._num_agents, dtype=np.bool_)
+        self._stuck_steps = np.zeros(self._num_agents, dtype=np.int32)
+        self._no_progress_steps = np.zeros(self._num_agents, dtype=np.int32)
+        self._last_stuck_progress = np.full(self._num_agents, np.nan, dtype=np.float32)
+        self._episode_steps = np.zeros(self._num_agents, dtype=np.int32)
+        self._last_track_index = np.zeros(self._num_agents, dtype=np.int32)
+        self._prev_race_progress = np.full(self._num_agents, np.nan, dtype=np.float32)
+        self._active_collision_pairs = {}
+
+    def _ensure_agent_buffers(self, n_agents: int):
+        if self._num_agents != int(max(1, n_agents)):
+            self._reset_agent_buffers(n_agents)
+
     def set_training_mode(self, mode: bool):
-        """Phase 1C: when True, info dict only has 4 training-critical keys."""
         self._training_mode = bool(mode)
 
     def reset(self, **kwargs):
-        self._prev_steer = None
-        self._prev_speed = None
-        self._lap_count = 0
-        self._prev_progress = None
-        self._lap_completion_latched = False
-        self._stuck_steps = 0
-        self._no_progress_steps = 0
-        self._last_stuck_progress = None
-        self._episode_steps = 0
-        self._last_track_index = 0
+        debug_log_763171(
+            "pre-fix",
+            "H4",
+            "train.py:RewardShapingWrapper:reset:entry",
+            "reward wrapper reset entered",
+            {
+                "kwargs_keys": sorted(kwargs.keys()),
+                "configured_multi_agent": self.multi_agent_enabled,
+                "curriculum_enabled": self.curriculum_enabled,
+            },
+        )
         obs = self.env.reset(**kwargs)
-
-        # Phase 1A: cache track geometry once per episode
+        debug_log_763171(
+            "pre-fix",
+            "H4",
+            "train.py:RewardShapingWrapper:reset:after_env_reset",
+            "reward wrapper base reset returned",
+            {
+                "obs_shape": tuple(np.asarray(obs).shape),
+                "obs_dtype": str(np.asarray(obs).dtype),
+            },
+        )
         base_env = self.env.unwrapped
+        n_agents = self._infer_num_agents(base_env)
+        self._reset_agent_buffers(n_agents)
+
         if hasattr(base_env, "track") and base_env.track and len(base_env.track) >= 2:
             raw = base_env.track
             self._n_track = len(raw)
             self._track_xy = np.array([t[2:] for t in raw], dtype=np.float32)
             self._track_betas = np.array([t[1] for t in raw], dtype=np.float32)
-            # Precompute direction vectors between consecutive tiles
             next_xy = np.roll(self._track_xy, -1, axis=0)
             diff = next_xy - self._track_xy
             norms = np.linalg.norm(diff, axis=1, keepdims=True)
@@ -1161,6 +2108,16 @@ class RewardShapingWrapper(gym.Wrapper):
             self._track_dirs = None
             self._n_track = 0
 
+        debug_log_763171(
+            "pre-fix",
+            "H4",
+            "train.py:RewardShapingWrapper:reset:exit",
+            "reward wrapper reset completed",
+            {
+                "n_agents": n_agents,
+                "track_len": self._n_track,
+            },
+        )
         return obs
 
     def _apply_curriculum_stage(self, stage: int):
@@ -1176,6 +2133,16 @@ class RewardShapingWrapper(gym.Wrapper):
             self.corner_overspeed_penalty_scale = float(
                 self.curriculum.get("stage1_corner_overspeed_penalty_scale", 0.3)
             )
+            if "stage1_overtake_bonus" in self.curriculum:
+                self.overtake_bonus = float(self.curriculum["stage1_overtake_bonus"])
+            if "stage1_proximity_soft_penalty_scale" in self.curriculum:
+                self.proximity_soft_penalty_scale = float(self.curriculum["stage1_proximity_soft_penalty_scale"])
+            if "stage1_contact_terminate_steps" in self.curriculum:
+                self.contact_terminate_steps = int(max(0, int(self.curriculum["stage1_contact_terminate_steps"])))
+            if "stage1_collision_rub_penalty" in self.curriculum:
+                self.collision_rub_penalty = float(self.curriculum["stage1_collision_rub_penalty"])
+            if "stage1_overlap_step_penalty" in self.curriculum:
+                self.overlap_step_penalty = float(self.curriculum["stage1_overlap_step_penalty"])
         else:
             self.time_penalty = float(self._stage2_defaults["time_penalty"])
             self.idle_penalty = float(self._stage2_defaults["idle_penalty"])
@@ -1185,6 +2152,11 @@ class RewardShapingWrapper(gym.Wrapper):
             self.corner_overspeed_penalty_scale = float(
                 self._stage2_defaults["corner_overspeed_penalty_scale"]
             )
+            self.overtake_bonus = float(self._marl_stage2_defaults["overtake_bonus"])
+            self.proximity_soft_penalty_scale = float(self._marl_stage2_defaults["proximity_soft_penalty_scale"])
+            self.contact_terminate_steps = int(self._marl_stage2_defaults["contact_terminate_steps"])
+            self.collision_rub_penalty = float(self._marl_stage2_defaults["collision_rub_penalty"])
+            self.overlap_step_penalty = float(self._marl_stage2_defaults["overlap_step_penalty"])
         self.curriculum_stage = stage
 
     def set_curriculum_stage(self, stage: int):
@@ -1201,30 +2173,77 @@ class RewardShapingWrapper(gym.Wrapper):
             return np.zeros_like(vec), 0.0
         return vec / norm, norm
 
-    def _get_track_context(self, car_pos):
-        """Return (track_dir, is_sharp_turn, corner_angle) using cached track data.
+    def _coerce_float_array(self, values, n_agents, default=0.0):
+        if values is None:
+            return np.full(n_agents, float(default), dtype=np.float32)
+        arr = np.asarray(values, dtype=np.float32)
+        if arr.ndim == 0:
+            return np.full(n_agents, float(arr), dtype=np.float32)
+        flat = arr.reshape(-1)
+        if flat.size >= n_agents:
+            return flat[:n_agents].astype(np.float32, copy=False)
+        out = np.full(n_agents, float(default), dtype=np.float32)
+        out[:flat.size] = flat
+        return out
 
-        Uses local search around _last_track_index (±30 tiles) instead of
-        O(N) argmin over all ~800 tiles.  ~13x faster on the hot path.
-        """
+    def _coerce_bool_array(self, values, n_agents):
+        if values is None:
+            return np.zeros(n_agents, dtype=np.bool_), True
+        arr = np.asarray(values)
+        scalar_input = arr.ndim == 0
+        if scalar_input:
+            return np.full(n_agents, bool(arr), dtype=np.bool_), True
+        flat = arr.reshape(-1).astype(np.bool_)
+        if flat.size >= n_agents:
+            return flat[:n_agents], False
+        out = np.zeros(n_agents, dtype=np.bool_)
+        out[:flat.size] = flat
+        return out, False
+
+    def _coerce_info_list(self, info, n_agents):
+        if isinstance(info, list):
+            info_list = [dict(item) if isinstance(item, dict) else {} for item in info[:n_agents]]
+            while len(info_list) < n_agents:
+                info_list.append({})
+            return info_list
+        if isinstance(info, tuple):
+            return self._coerce_info_list(list(info), n_agents)
+        if isinstance(info, dict):
+            return [dict(info) for _ in range(n_agents)]
+        return [{} for _ in range(n_agents)]
+
+    def _format_info_output(self, info_list):
+        if self._num_agents == 1:
+            return info_list[0]
+        return info_list
+
+    def _extract_action_matrix(self, action, n_agents):
+        if action is None:
+            return np.zeros((n_agents, 3), dtype=np.float32)
+        action_arr = np.asarray(action, dtype=np.float32)
+        if action_arr.ndim == 1:
+            if n_agents > 1 and action_arr.size % n_agents == 0:
+                return action_arr.reshape(n_agents, -1)
+            return action_arr.reshape(1, -1)
+        if action_arr.ndim >= 2:
+            return action_arr.reshape(action_arr.shape[0], -1)
+        return np.zeros((n_agents, 3), dtype=np.float32)
+
+    def _get_track_context(self, agent_idx, car_pos):
         if self._track_xy is None or self._n_track < 2:
-            return np.zeros(2, dtype=np.float32), False, 0.0
+            return np.zeros(2, dtype=np.float32), False, 0.0, 0
 
-        # Local search: car moves at most ~2 tiles/step at top speed
         search_radius = 30
-        center = self._last_track_index
+        center = int(self._last_track_index[agent_idx]) if self._last_track_index.size > agent_idx else 0
         n = self._n_track
         indices = np.arange(center - search_radius, center + search_radius + 1) % n
         local_xy = self._track_xy[indices]
         dists = (local_xy[:, 0] - car_pos[0]) ** 2 + (local_xy[:, 1] - car_pos[1]) ** 2
         best_local = int(np.argmin(dists))
         track_index = int(indices[best_local])
-        self._last_track_index = track_index
+        self._last_track_index[agent_idx] = track_index
 
-        # Direction from precomputed cache (no subtraction needed)
         track_dir = self._track_dirs[track_index]
-
-        # Sharp turn detection from cached betas
         lookahead_index = (track_index + self.sharp_turn_lookahead) % n
         beta_now = float(self._track_betas[track_index])
         beta_next = float(self._track_betas[lookahead_index])
@@ -1232,136 +2251,540 @@ class RewardShapingWrapper(gym.Wrapper):
         if angle_diff > np.pi:
             angle_diff = abs(angle_diff - 2 * np.pi)
         is_sharp_turn = angle_diff >= self.sharp_turn_threshold
-        return track_dir, is_sharp_turn, float(angle_diff)
+        return track_dir, is_sharp_turn, float(angle_diff), track_index
 
-    def _update_lap_count(self, info):
-        # info["progress"] is written by step() before this is called on subsequent steps,
-        # but on the very first call it may be absent — safe to skip if missing.
-        progress = info.get("progress")
-        if progress is None:
-            return
-        try:
-            progress = float(progress)
-        except (TypeError, ValueError):
-            return
-        if self._prev_progress is not None and progress < (self._prev_progress - 0.5):
-            self._lap_count += 1
-        if progress >= 0.999 and not self._lap_completion_latched:
-            self._lap_count += 1
-            self._lap_completion_latched = True
-        if progress < 0.2:
-            self._lap_completion_latched = False
-        self._prev_progress = progress
+    def _update_lap_counts(self, progress_arr):
+        for idx in range(self._num_agents):
+            progress = float(progress_arr[idx])
+            if np.isnan(progress):
+                continue
+            prev_progress = self._prev_progress[idx]
+            if not np.isnan(prev_progress) and progress < (prev_progress - 0.5):
+                self._lap_count[idx] += 1
+            if progress >= 0.999 and not bool(self._lap_completion_latched[idx]):
+                self._lap_count[idx] += 1
+                self._lap_completion_latched[idx] = True
+            if progress < 0.2:
+                self._lap_completion_latched[idx] = False
+            self._prev_progress[idx] = progress
+
+    def _collect_car_state(self, base_env):
+        positions = np.zeros((self._num_agents, 2), dtype=np.float32)
+        velocity_vecs = np.zeros((self._num_agents, 2), dtype=np.float32)
+        speeds = np.zeros(self._num_agents, dtype=np.float32)
+        yaw_rates = np.zeros(self._num_agents, dtype=np.float32)
+        track_dirs = np.zeros((self._num_agents, 2), dtype=np.float32)
+        is_sharp_turn = np.zeros(self._num_agents, dtype=np.bool_)
+        corner_angles = np.zeros(self._num_agents, dtype=np.float32)
+
+        cars = getattr(base_env, "cars", None)
+        if not cars:
+            return positions, velocity_vecs, speeds, yaw_rates, track_dirs, is_sharp_turn, corner_angles
+
+        for idx, car in enumerate(cars[:self._num_agents]):
+            vel = car.hull.linearVelocity
+            velocity_vec = np.array([vel[0], vel[1]], dtype=np.float32)
+            position = np.array([car.hull.position[0], car.hull.position[1]], dtype=np.float32)
+            velocity_vecs[idx] = velocity_vec
+            positions[idx] = position
+            speeds[idx] = float(np.linalg.norm(velocity_vec))
+            yaw_rates[idx] = abs(float(car.hull.angularVelocity))
+            if self._needs_track_context:
+                track_dir, sharp_turn, corner_angle, _ = self._get_track_context(idx, position)
+                track_dirs[idx] = track_dir
+                is_sharp_turn[idx] = bool(sharp_turn)
+                corner_angles[idx] = float(corner_angle)
+        return positions, velocity_vecs, speeds, yaw_rates, track_dirs, is_sharp_turn, corner_angles
+
+    def _compute_rank_reward(self, race_progress, front_pressure=None, side_pressure=None):
+        if self._num_agents <= 1 or self.rank_reward_scale == 0.0:
+            return np.zeros(self._num_agents, dtype=np.float32), np.ones(self._num_agents, dtype=np.int32)
+        order = np.argsort(-race_progress, kind="stable")
+        ranks = np.empty(self._num_agents, dtype=np.int32)
+        ranks[order] = np.arange(1, self._num_agents + 1, dtype=np.int32)
+        rank_score = (self._num_agents - ranks).astype(np.float32) / float(max(1, self._num_agents - 1))
+        comp = (self.rank_reward_scale * rank_score).astype(np.float32)
+        if self.rank_unsafe_dampen_strength > 0.0 and front_pressure is not None:
+            fp = np.clip(front_pressure, 0.0, 1.0).astype(np.float32)
+            sp = (
+                np.clip(side_pressure, 0.0, 1.0).astype(np.float32)
+                if side_pressure is not None
+                else np.zeros(self._num_agents, dtype=np.float32)
+            )
+            unsafe = np.maximum(fp, sp)
+            comp *= (1.0 - self.rank_unsafe_dampen_strength * unsafe).astype(np.float32)
+        return comp, ranks
+
+    def _compute_relative_velocity_reward(self, positions, speeds):
+        reward = np.zeros(self._num_agents, dtype=np.float32)
+        nearest_idx = np.full(self._num_agents, -1, dtype=np.int32)
+        nearest_dist = np.full(self._num_agents, np.inf, dtype=np.float32)
+        if self._num_agents <= 1 or self.relative_velocity_scale == 0.0:
+            return reward, nearest_idx, nearest_dist
+
+        diff = positions[:, None, :] - positions[None, :, :]
+        dists = np.linalg.norm(diff, axis=2)
+        np.fill_diagonal(dists, np.inf)
+        nearest_idx = np.argmin(dists, axis=1).astype(np.int32)
+        nearest_dist = dists[np.arange(self._num_agents), nearest_idx].astype(np.float32)
+
+        speed_delta = speeds - speeds[nearest_idx]
+        speed_delta = np.clip(speed_delta, -self.relative_velocity_cap, self.relative_velocity_cap)
+        reward = self.relative_velocity_scale * speed_delta.astype(np.float32)
+        if self.nearest_opponent_max_distance > 0.0:
+            reward = reward * (nearest_dist <= self.nearest_opponent_max_distance).astype(np.float32)
+        return reward.astype(np.float32), nearest_idx, nearest_dist
+
+    def _compute_overtake_bonus(self, race_progress, positions):
+        bonus = np.zeros(self._num_agents, dtype=np.float32)
+        counts = np.zeros(self._num_agents, dtype=np.int32)
+        if self._num_agents <= 1 or self.overtake_bonus == 0.0 or np.isnan(self._prev_race_progress).any():
+            return bonus, counts
+
+        for i in range(self._num_agents):
+            for j in range(i + 1, self._num_agents):
+                prev_diff = float(self._prev_race_progress[i] - self._prev_race_progress[j])
+                curr_diff = float(race_progress[i] - race_progress[j])
+                dist = float(np.linalg.norm(positions[i] - positions[j]))
+                spacing_factor = 1.0
+                if self.overtake_min_pairwise_distance > 0.0:
+                    spacing_factor = float(
+                        np.clip(
+                            (dist - self.overtake_min_pairwise_distance)
+                            / max(1e-6, self.overtake_spacing_soft_margin),
+                            0.0,
+                            1.0,
+                        )
+                    )
+                overt = self.overtake_bonus * spacing_factor
+                if prev_diff <= self.overtake_margin and curr_diff > self.overtake_margin:
+                    bonus[i] += overt
+                    counts[i] += 1
+                elif prev_diff >= -self.overtake_margin and curr_diff < -self.overtake_margin:
+                    bonus[j] += overt
+                    counts[j] += 1
+        return bonus, counts
+
+    def _compute_interaction_proximity(self, positions, velocity_vecs, speeds, track_dirs):
+        front_gap = np.full(self._num_agents, np.inf, dtype=np.float32)
+        side_gap = np.full(self._num_agents, np.inf, dtype=np.float32)
+        front_closing_speed = np.zeros(self._num_agents, dtype=np.float32)
+        side_closing_speed = np.zeros(self._num_agents, dtype=np.float32)
+        if self._num_agents <= 1:
+            return front_gap, side_gap, front_closing_speed, side_closing_speed
+
+        forward_dirs = np.zeros((self._num_agents, 2), dtype=np.float32)
+        for idx in range(self._num_agents):
+            track_dir, track_norm = self._normalize(track_dirs[idx])
+            vel_dir, vel_norm = self._normalize(velocity_vecs[idx])
+            if track_norm > 1e-6:
+                forward_dirs[idx] = track_dir
+            elif vel_norm > 1e-6:
+                forward_dirs[idx] = vel_dir
+            else:
+                forward_dirs[idx] = np.array([1.0, 0.0], dtype=np.float32)
+
+        for i in range(self._num_agents):
+            forward = forward_dirs[i]
+            right = np.array([-forward[1], forward[0]], dtype=np.float32)
+            for j in range(self._num_agents):
+                if i == j:
+                    continue
+                delta = positions[j] - positions[i]
+                distance = float(np.linalg.norm(delta))
+                if distance <= 1e-6:
+                    continue
+                rel_vel = velocity_vecs[i] - velocity_vecs[j]
+                longitudinal = float(np.dot(delta, forward))
+                lateral_abs = abs(float(np.dot(delta, right)))
+                unit_delta = delta / distance
+                closing_speed = max(0.0, float(np.dot(rel_vel, unit_delta)))
+                lateral_closing = abs(float(np.dot(rel_vel, right)))
+
+                if longitudinal > 0.0 and distance < front_gap[i]:
+                    front_gap[i] = distance
+                    front_closing_speed[i] = closing_speed
+
+                if abs(longitudinal) <= self.side_longitudinal_window and lateral_abs < side_gap[i]:
+                    side_gap[i] = lateral_abs
+                    side_closing_speed[i] = lateral_closing
+
+            if not np.isfinite(front_gap[i]):
+                front_gap[i] = float(self.open_space_distance + max(5.0, speeds[i]))
+            if not np.isfinite(side_gap[i]):
+                side_gap[i] = float(self.side_gap_threshold + 5.0)
+
+        return front_gap, side_gap, front_closing_speed, side_closing_speed
+
+    def _tiered_collision_penalty(self, relative_speed):
+        if relative_speed >= self.collision_high_speed_threshold:
+            return float(self.collision_high_penalty)
+        if relative_speed >= self.collision_medium_speed_threshold:
+            return float(self.collision_medium_penalty)
+        if relative_speed >= self.collision_low_speed_threshold:
+            return float(self.collision_low_penalty)
+        return 0.0
+
+    def _compute_collision_penalties(self, positions, velocity_vecs):
+        penalties = np.zeros(self._num_agents, dtype=np.float32)
+        shared = np.zeros(self._num_agents, dtype=np.float32)
+        collision_counts = np.zeros(self._num_agents, dtype=np.int32)
+        contact_counts = np.zeros(self._num_agents, dtype=np.int32)
+        collision_relative_speed = np.zeros(self._num_agents, dtype=np.float32)
+        collision_contact_steps = np.zeros(self._num_agents, dtype=np.int32)
+        hook_counts = np.zeros(self._num_agents, dtype=np.int32)
+        contact_termination = np.zeros(self._num_agents, dtype=np.bool_)
+        overlap_tax_acc = np.zeros(self._num_agents, dtype=np.float32)
+        rub_impact_acc = np.zeros(self._num_agents, dtype=np.float32)
+        if self._num_agents <= 1 or not self.multi_agent_enabled:
+            self._active_collision_pairs = {}
+            return (
+                penalties,
+                shared,
+                collision_counts,
+                contact_counts,
+                collision_relative_speed,
+                collision_contact_steps,
+                hook_counts,
+                contact_termination,
+                overlap_tax_acc,
+                rub_impact_acc,
+            )
+
+        current_pairs = {}
+        new_collision_pairs = 0
+        for i in range(self._num_agents):
+            for j in range(i + 1, self._num_agents):
+                delta = positions[j] - positions[i]
+                distance = float(np.linalg.norm(delta))
+                if distance > self.collision_distance_threshold:
+                    continue
+
+                rel_vel = velocity_vecs[i] - velocity_vecs[j]
+                rel_speed = float(np.linalg.norm(rel_vel))
+                if distance > 1e-6:
+                    unit_delta = delta / distance
+                    closing_speed = max(0.0, float(np.dot(rel_vel, unit_delta)))
+                else:
+                    closing_speed = rel_speed
+                overlap_eff_distance = self.collision_overlap_distance + self.collision_overlap_margin
+                is_overlap_eff = distance <= overlap_eff_distance
+                collision_proxy = (
+                    is_overlap_eff
+                    or closing_speed >= self.collision_min_closing_speed
+                )
+                if not collision_proxy:
+                    if self.proximity_soft_penalty_scale != 0.0 or self.proximity_soft_tangential_scale != 0.0:
+                        band = max(0.0, (self.collision_distance_threshold - distance) / max(1e-6, self.collision_distance_threshold))
+                        soft = 0.0
+                        if self.proximity_soft_penalty_scale != 0.0:
+                            soft += self.proximity_soft_penalty_scale * band
+                        if self.proximity_soft_tangential_scale != 0.0 and rel_speed > 1e-6:
+                            tangential_sq = max(0.0, rel_speed * rel_speed - closing_speed * closing_speed)
+                            tangential = float(np.sqrt(tangential_sq))
+                            soft += self.proximity_soft_tangential_scale * tangential * band
+                        if soft != 0.0:
+                            penalties[i] -= soft
+                            penalties[j] -= soft
+                    continue
+
+                pair = (i, j)
+                prev_contact_steps = int(self._active_collision_pairs.get(pair, 0))
+                contact_steps = prev_contact_steps + 1
+                current_pairs[pair] = contact_steps
+                impact_speed = max(rel_speed, closing_speed)
+                is_overlap = is_overlap_eff
+                hook_contact = (
+                    contact_steps >= self.hook_contact_steps
+                    and rel_speed <= self.hook_contact_speed_threshold
+                )
+                severe_contact = is_overlap and impact_speed >= self.severe_contact_speed_threshold
+
+                penalty = 0.0
+                if prev_contact_steps == 0:
+                    tier_pen = self._tiered_collision_penalty(impact_speed)
+                    if tier_pen != 0.0:
+                        penalty += tier_pen
+                    elif self.collision_rub_penalty != 0.0:
+                        penalty += self.collision_rub_penalty
+                        rub_impact_acc[i] += self.collision_rub_penalty
+                        rub_impact_acc[j] += self.collision_rub_penalty
+                if is_overlap:
+                    penalty += self.contact_penalty
+                    contact_counts[i] += 1
+                    contact_counts[j] += 1
+                    if self.overlap_step_penalty != 0.0:
+                        capped = min(int(contact_steps), int(self.overlap_step_penalty_max_steps))
+                        o_tax = self.overlap_step_penalty * float(capped)
+                        penalty += o_tax
+                        overlap_tax_acc[i] += o_tax
+                        overlap_tax_acc[j] += o_tax
+                    if contact_steps >= self.sustained_contact_steps:
+                        penalty += self.sustained_contact_penalty
+                    if (
+                        contact_steps >= self.pre_hook_contact_steps
+                        and rel_speed <= self.pre_hook_rel_speed_threshold
+                    ):
+                        penalty += self.pre_hook_penalty
+                    if self.stick_penalty_per_step != 0.0:
+                        capped = min(int(contact_steps), int(self.stick_penalty_max_steps))
+                        penalty += self.stick_penalty_per_step * float(capped)
+                    if hook_contact:
+                        penalty += self.hook_contact_penalty
+                        hook_counts[i] += 1
+                        hook_counts[j] += 1
+                    if self.contact_termination_mode == "both":
+                        terminate_pair = False
+                        if self.contact_terminate_steps > 0 and contact_steps >= self.contact_terminate_steps:
+                            terminate_pair = True
+                        if self.terminate_on_hook_contact and hook_contact:
+                            terminate_pair = True
+                        if severe_contact:
+                            terminate_pair = True
+                        if terminate_pair:
+                            contact_termination[i] = True
+                            contact_termination[j] = True
+
+                penalties[i] += penalty
+                penalties[j] += penalty
+                collision_counts[i] += 1
+                collision_counts[j] += 1
+                collision_relative_speed[i] = max(collision_relative_speed[i], rel_speed)
+                collision_relative_speed[j] = max(collision_relative_speed[j], rel_speed)
+                collision_contact_steps[i] = max(collision_contact_steps[i], contact_steps)
+                collision_contact_steps[j] = max(collision_contact_steps[j], contact_steps)
+                if prev_contact_steps == 0:
+                    new_collision_pairs += 1
+
+        self._active_collision_pairs = current_pairs
+        if new_collision_pairs > 0 and self.shared_collision_penalty != 0.0:
+            shared += float(new_collision_pairs) * self.shared_collision_penalty
+        return (
+            penalties,
+            shared,
+            collision_counts,
+            contact_counts,
+            collision_relative_speed,
+            collision_contact_steps,
+            hook_counts,
+            contact_termination,
+            overlap_tax_acc,
+            rub_impact_acc,
+        )
 
     def step(self, action):
         obs, reward, done, info = self.env.step(action)
-        if not isinstance(info, dict):
-            info = {}
+        base_env = self.env.unwrapped
+        n_agents = self._infer_num_agents(base_env)
+        self._ensure_agent_buffers(n_agents)
+        info_list = self._coerce_info_list(info, self._num_agents)
         self._episode_steps += 1
 
-        # Compute and inject progress BEFORE _update_lap_count so it has correct data.
-        # The base env always returns info={} — we read tile_visited_count directly.
-        base_env = self.env.unwrapped
-        if (hasattr(base_env, "tile_visited_count") and hasattr(base_env, "track")
-                and base_env.track and len(base_env.track) > 0):
-            info["progress"] = float(base_env.tile_visited_count[0]) / float(len(base_env.track))
+        progress_now = np.full(self._num_agents, np.nan, dtype=np.float32)
+        if (
+            hasattr(base_env, "tile_visited_count")
+            and hasattr(base_env, "track")
+            and base_env.track
+            and len(base_env.track) > 0
+        ):
+            tile_counts = self._coerce_float_array(base_env.tile_visited_count, self._num_agents, default=0.0)
+            progress_now = tile_counts / float(len(base_env.track))
+            for idx, agent_info in enumerate(info_list):
+                agent_info["progress"] = float(progress_now[idx])
 
-        self._update_lap_count(info)
+        self._update_lap_counts(progress_now)
 
-        # Phase 1D: consolidated base_env access — read car state once
-        speed = 0.0
-        track_dir = np.zeros(2, dtype=np.float32)
-        is_sharp_turn = False
-        corner_angle = 0.0
-        velocity_vec = np.zeros(2, dtype=np.float32)
-        yaw_rate = 0.0
-        if hasattr(base_env, "cars") and base_env.cars:
-            car = base_env.cars[0]
-            vel = car.hull.linearVelocity
-            velocity_vec = np.array([vel[0], vel[1]], dtype=np.float32)
-            speed = float(np.linalg.norm(velocity_vec))
-            yaw_rate = abs(float(car.hull.angularVelocity))
-            # Phase 1B: only compute track context if any dependent reward is active
-            if self._needs_track_context:
-                car_pos = np.array([car.hull.position[0], car.hull.position[1]], dtype=np.float32)
-                track_dir, is_sharp_turn, corner_angle = self._get_track_context(car_pos)
+        positions, velocity_vecs, speeds, yaw_rates, track_dirs, is_sharp_turn, corner_angles = self._collect_car_state(base_env)
+        action_matrix = self._extract_action_matrix(action, self._num_agents)
+        if action_matrix.shape[0] < self._num_agents:
+            pad_rows = self._num_agents - action_matrix.shape[0]
+            action_matrix = np.vstack([action_matrix, np.zeros((pad_rows, action_matrix.shape[1]), dtype=np.float32)])
 
-        action_arr = np.asarray(action).reshape(-1) if action is not None else np.zeros(3, dtype=np.float32)
-        steer_value = float(np.clip(action_arr[0], -1.0, 1.0)) if action_arr.size >= 1 else 0.0
-        throttle_value = float(np.clip(action_arr[1], 0.0, 1.0)) if action_arr.size >= 2 else 0.0
-        brake_value = float(np.clip(action_arr[2], 0.0, 1.0)) if action_arr.size >= 3 else 0.0
+        steer_values = np.clip(action_matrix[:, 0], -1.0, 1.0) if action_matrix.shape[1] >= 1 else np.zeros(self._num_agents, dtype=np.float32)
+        throttle_values = np.clip(action_matrix[:, 1], 0.0, 1.0) if action_matrix.shape[1] >= 2 else np.zeros(self._num_agents, dtype=np.float32)
+        brake_values = np.clip(action_matrix[:, 2], 0.0, 1.0) if action_matrix.shape[1] >= 3 else np.zeros(self._num_agents, dtype=np.float32)
 
-        # Read progress from info (written at top of step from tile_visited_count).
-        progress_now = info.get("progress")  # float or None
+        progress_delta = np.zeros(self._num_agents, dtype=np.float32)
+        for idx in range(self._num_agents):
+            if np.isnan(progress_now[idx]):
+                continue
+            if not np.isnan(self._last_stuck_progress[idx]):
+                progress_delta[idx] = max(0.0, float(progress_now[idx] - self._last_stuck_progress[idx]))
+            self._last_stuck_progress[idx] = progress_now[idx]
 
-        progress_delta = 0.0
-        if progress_now is not None:
-            if self._last_stuck_progress is not None:
-                progress_delta = max(0.0, progress_now - self._last_stuck_progress)
-            self._last_stuck_progress = progress_now
-
-        # Detect off-track early so we can gate the speed reward.
         driving_on_grass = getattr(base_env, "driving_on_grass", None)
-        is_offtrack = bool(
-            driving_on_grass is not None
-            and len(driving_on_grass) > 0
-            and bool(driving_on_grass[0])
-        )
+        is_offtrack = self._coerce_float_array(driving_on_grass, self._num_agents, default=0.0) > 0.0
 
-        # Primary reward: actual tile progress (0→1 per lap). Scaled up so one full
-        # lap ≈ forward_progress_scale total reward.
+        race_progress = self._lap_count.astype(np.float32) + np.nan_to_num(progress_now, nan=0.0)
+        comp_rank = np.zeros(self._num_agents, dtype=np.float32)
+        ranks = np.ones(self._num_agents, dtype=np.int32)
+        comp_relative_velocity = np.zeros(self._num_agents, dtype=np.float32)
+        nearest_idx = np.full(self._num_agents, -1, dtype=np.int32)
+        nearest_dist = np.full(self._num_agents, np.inf, dtype=np.float32)
+        comp_overtake = np.zeros(self._num_agents, dtype=np.float32)
+        overtake_counts = np.zeros(self._num_agents, dtype=np.int32)
+        comp_collision = np.zeros(self._num_agents, dtype=np.float32)
+        comp_shared_collision = np.zeros(self._num_agents, dtype=np.float32)
+        collision_counts = np.zeros(self._num_agents, dtype=np.int32)
+        contact_counts = np.zeros(self._num_agents, dtype=np.int32)
+        collision_relative_speed = np.zeros(self._num_agents, dtype=np.float32)
+        collision_contact_steps = np.zeros(self._num_agents, dtype=np.int32)
+        hook_counts = np.zeros(self._num_agents, dtype=np.int32)
+        contact_termination = np.zeros(self._num_agents, dtype=np.bool_)
+        front_gap = np.full(self._num_agents, np.inf, dtype=np.float32)
+        side_gap = np.full(self._num_agents, np.inf, dtype=np.float32)
+        front_closing_speed = np.zeros(self._num_agents, dtype=np.float32)
+        side_closing_speed = np.zeros(self._num_agents, dtype=np.float32)
+        comp_front_speed_control = np.zeros(self._num_agents, dtype=np.float32)
+        comp_side_clearance = np.zeros(self._num_agents, dtype=np.float32)
+        comp_open_space_accel = np.zeros(self._num_agents, dtype=np.float32)
+        overlap_tax_component = np.zeros(self._num_agents, dtype=np.float32)
+        rub_impact_component = np.zeros(self._num_agents, dtype=np.float32)
+        comp_overtake_raw = np.zeros(self._num_agents, dtype=np.float32)
+        overtake_clean_gate = np.ones(self._num_agents, dtype=np.float32)
+
+        front_pressure = np.zeros(self._num_agents, dtype=np.float32)
+        side_pressure = np.zeros(self._num_agents, dtype=np.float32)
+        if self.multi_agent_enabled and self._num_agents > 1:
+            (
+                front_gap,
+                side_gap,
+                front_closing_speed,
+                side_closing_speed,
+            ) = self._compute_interaction_proximity(
+                positions,
+                velocity_vecs,
+                speeds,
+                track_dirs,
+            )
+            front_den = max(1e-6, self.front_gap_soft_distance - self.front_gap_hard_distance)
+            front_pressure = np.clip(
+                (self.front_gap_soft_distance - front_gap) / front_den,
+                0.0,
+                1.0,
+            ).astype(np.float32)
+            side_den = max(1e-6, self.side_gap_threshold)
+            side_pressure = np.clip(
+                (self.side_gap_threshold - side_gap) / side_den,
+                0.0,
+                1.0,
+            ).astype(np.float32)
+            (
+                comp_collision,
+                comp_shared_collision,
+                collision_counts,
+                contact_counts,
+                collision_relative_speed,
+                collision_contact_steps,
+                hook_counts,
+                contact_termination,
+                overlap_tax_component,
+                rub_impact_component,
+            ) = self._compute_collision_penalties(
+                positions,
+                velocity_vecs,
+            )
+            comp_rank, ranks = self._compute_rank_reward(race_progress, front_pressure, side_pressure)
+            if self.rank_contact_dampen > 0.0:
+                dirty_rank = (contact_counts > 0).astype(np.float32)
+                comp_rank = comp_rank * (1.0 - self.rank_contact_dampen * dirty_rank)
+            comp_relative_velocity, nearest_idx, nearest_dist = self._compute_relative_velocity_reward(positions, speeds)
+            gf = float(np.clip(self.relative_velocity_gate_front_strength, 0.0, 1.0))
+            gs = float(np.clip(self.relative_velocity_gate_side_strength, 0.0, 1.0))
+            rel_gate = (1.0 - gf * front_pressure) * (1.0 - gs * side_pressure)
+            rel_gate = np.clip(rel_gate, 0.0, 1.0).astype(np.float32)
+            if self.relative_velocity_positive_requires_open_front:
+                pos_part = np.maximum(comp_relative_velocity, 0.0)
+                neg_part = np.minimum(comp_relative_velocity, 0.0)
+                open_ok = (front_gap >= self.open_space_distance).astype(np.float32)
+                comp_relative_velocity = pos_part * rel_gate * open_ok + neg_part * rel_gate
+            else:
+                comp_relative_velocity = comp_relative_velocity * rel_gate
+            comp_overtake, overtake_counts = self._compute_overtake_bonus(race_progress, positions)
+            comp_overtake_raw = comp_overtake.astype(np.float32, copy=True)
+            if self.overtake_requires_clean_contact:
+                dirty_ot = (contact_counts > 0) | (hook_counts > 0)
+                overtake_clean_gate = np.where(dirty_ot, self.overtake_contact_dampen, 1.0).astype(np.float32)
+                comp_overtake = comp_overtake * overtake_clean_gate
+
         comp_forward = self.forward_progress_scale * progress_delta
-
-        # Phase 1B: skip disabled reward computations
-        comp_alignment = 0.0
+        if self.multi_agent_enabled and self._num_agents > 1 and self.contact_forward_dampening_scale > 0.0:
+            has_contact = (contact_counts > 0).astype(np.float32)
+            damp = 1.0 - self.contact_forward_dampening_scale * has_contact
+            comp_forward = comp_forward * np.clip(damp, 0.0, 1.0).astype(np.float32)
+        comp_alignment = np.zeros(self._num_agents, dtype=np.float32)
         if self.track_alignment_scale != 0.0:
-            comp_alignment = self.track_alignment_scale * float(np.dot(velocity_vec, track_dir))
+            comp_alignment = self.track_alignment_scale * np.sum(velocity_vecs * track_dirs, axis=1)
 
-        comp_straight_speed = 0.0
-        if self.straight_speed_scale != 0.0 and not is_sharp_turn:
-            comp_straight_speed = self.straight_speed_scale * speed * (0.0 if is_offtrack else 1.0)
+        comp_straight_speed = np.zeros(self._num_agents, dtype=np.float32)
+        if self.straight_speed_scale != 0.0:
+            straight_mask = np.logical_not(is_sharp_turn) & np.logical_not(is_offtrack)
+            comp_straight_speed = self.straight_speed_scale * speeds * straight_mask.astype(np.float32)
 
-        comp_lateral = 0.0
+        comp_lateral = np.zeros(self._num_agents, dtype=np.float32)
         if self.lateral_velocity_penalty != 0.0:
-            lateral_dir = np.array([-track_dir[1], track_dir[0]], dtype=np.float32)
-            lateral_speed = float(np.dot(velocity_vec, lateral_dir))
-            comp_lateral = -self.lateral_velocity_penalty * abs(lateral_speed)
+            lateral_dirs = np.stack((-track_dirs[:, 1], track_dirs[:, 0]), axis=1)
+            lateral_speed = np.sum(velocity_vecs * lateral_dirs, axis=1)
+            comp_lateral = -self.lateral_velocity_penalty * np.abs(lateral_speed)
 
-        comp_corner_overspeed = 0.0
-        if self.corner_overspeed_penalty_scale != 0.0 and is_sharp_turn:
-            corner_overspeed = max(0.0, speed - self.corner_target_speed)
-            comp_corner_overspeed = -self.corner_overspeed_penalty_scale * corner_overspeed
+        comp_corner_overspeed = np.zeros(self._num_agents, dtype=np.float32)
+        if self.corner_overspeed_penalty_scale != 0.0:
+            corner_overspeed = np.maximum(0.0, speeds - self.corner_target_speed)
+            comp_corner_overspeed = -self.corner_overspeed_penalty_scale * corner_overspeed * is_sharp_turn.astype(np.float32)
 
-        comp_apex_decel = 0.0
-        if self.apex_decel_reward_scale != 0.0 and is_sharp_turn:
-            speed_delta = (self._prev_speed - speed) if self._prev_speed is not None else 0.0
-            if speed_delta > 0.0:
-                comp_apex_decel = min(self.apex_decel_reward_scale * speed_delta, self.apex_decel_reward_cap)
+        comp_apex_decel = np.zeros(self._num_agents, dtype=np.float32)
+        if self.apex_decel_reward_scale != 0.0:
+            prev_speed = np.nan_to_num(self._prev_speed, nan=speeds)
+            speed_delta = np.maximum(0.0, prev_speed - speeds)
+            comp_apex_decel = np.minimum(self.apex_decel_reward_scale * speed_delta, self.apex_decel_reward_cap)
+            comp_apex_decel = comp_apex_decel * is_sharp_turn.astype(np.float32)
 
-        comp_steer_smooth = 0.0
-        if self.steer_smoothness_penalty != 0.0 and self._prev_steer is not None:
-            steer_delta = abs(steer_value - self._prev_steer)
+        comp_steer_smooth = np.zeros(self._num_agents, dtype=np.float32)
+        if self.steer_smoothness_penalty != 0.0:
+            prev_steer = np.nan_to_num(self._prev_steer, nan=steer_values)
+            steer_delta = np.abs(steer_values - prev_steer)
             if self.steer_delta_cap > 0.0:
-                steer_delta = min(steer_delta, self.steer_delta_cap)
-            comp_steer_smooth = -self.steer_smoothness_penalty * steer_delta
+                steer_delta = np.minimum(steer_delta, self.steer_delta_cap)
+            has_prev_steer = np.logical_not(np.isnan(self._prev_steer)).astype(np.float32)
+            comp_steer_smooth = -self.steer_smoothness_penalty * steer_delta * has_prev_steer
 
-        comp_steer_mag = 0.0
+        comp_steer_mag = np.zeros(self._num_agents, dtype=np.float32)
         if self.steer_magnitude_penalty != 0.0:
-            comp_steer_mag = -self.steer_magnitude_penalty * (steer_value ** 2)
-        self._prev_steer = steer_value
-        self._prev_speed = speed
+            comp_steer_mag = -self.steer_magnitude_penalty * (steer_values ** 2)
 
-        comp_time = float(self.time_penalty)
-        comp_idle = float(self.idle_penalty) if speed < self.idle_speed_threshold else 0.0
-        comp_throttle = float(self.throttle_bonus_scale * throttle_value) if self.throttle_bonus_scale != 0.0 else 0.0
-        comp_brake = 0.0
-        if self.brake_penalty_scale != 0.0 and not is_sharp_turn:
-            comp_brake = -float(self.brake_penalty_scale * brake_value)
-        comp_launch = 0.0
-        if self.launch_bonus_scale != 0.0 and self._episode_steps <= self.launch_boost_steps and speed < self.launch_speed_target:
-            comp_launch = float(self.launch_bonus_scale * throttle_value)
-        # Yaw-rate penalty: penalise spinning/donuts directly via angular velocity.
-        comp_yaw = -self.yaw_rate_penalty * yaw_rate
+        self._prev_steer = steer_values.astype(np.float32)
+        self._prev_speed = speeds.astype(np.float32)
+
+        comp_time = np.full(self._num_agents, float(self.time_penalty), dtype=np.float32)
+        comp_idle = np.where(speeds < self.idle_speed_threshold, float(self.idle_penalty), 0.0).astype(np.float32)
+        comp_throttle = (self.throttle_bonus_scale * throttle_values).astype(np.float32) if self.throttle_bonus_scale != 0.0 else np.zeros(self._num_agents, dtype=np.float32)
+        comp_brake = np.zeros(self._num_agents, dtype=np.float32)
+        if self.brake_penalty_scale != 0.0:
+            comp_brake = -self.brake_penalty_scale * brake_values * np.logical_not(is_sharp_turn).astype(np.float32)
+        comp_launch = np.zeros(self._num_agents, dtype=np.float32)
+        if self.launch_bonus_scale != 0.0:
+            launch_mask = (self._episode_steps <= self.launch_boost_steps) & (speeds < self.launch_speed_target)
+            comp_launch = self.launch_bonus_scale * throttle_values * launch_mask.astype(np.float32)
+        comp_yaw = -self.yaw_rate_penalty * yaw_rates
+        if self.multi_agent_enabled and self._num_agents > 1:
+            comp_front_speed_control = (
+                -self.front_speed_penalty_scale * front_pressure * speeds
+                -self.front_throttle_penalty_scale * front_pressure * throttle_values
+            ).astype(np.float32)
+            comp_side_clearance = (
+                -self.side_clearance_penalty_scale * side_pressure
+                -self.side_closing_penalty_scale * side_pressure * side_closing_speed
+            ).astype(np.float32)
+
+            if self.open_space_accel_scale != 0.0:
+                open_space_mask = (front_gap >= self.open_space_distance).astype(np.float32)
+                comp_open_space_accel = (
+                    self.open_space_accel_scale
+                    * open_space_mask
+                    * throttle_values
+                    * (1.0 - np.minimum(1.0, np.abs(steer_values)))
+                ).astype(np.float32)
+
         shaped_reward = (
             comp_forward
             + comp_alignment
@@ -1377,70 +2800,116 @@ class RewardShapingWrapper(gym.Wrapper):
             + comp_brake
             + comp_launch
             + comp_yaw
-        )
+            + comp_collision
+            + comp_shared_collision
+            + comp_rank
+            + comp_relative_velocity
+            + comp_overtake
+            + comp_front_speed_control
+            + comp_side_clearance
+            + comp_open_space_accel
+        ).astype(np.float32)
 
-        total_reward = shaped_reward if self.use_custom_reward else float(reward)
-        if is_offtrack:
+        base_reward = self._coerce_float_array(reward, self._num_agents, default=0.0)
+        total_reward = shaped_reward.copy() if self.use_custom_reward else base_reward
+        terminal_mask = np.zeros(self._num_agents, dtype=np.bool_)
+        if np.any(is_offtrack):
             if self.off_track_mode == "terminate":
-                total_reward = float(self.off_track_terminal_penalty)
-                done = True
+                total_reward = total_reward.astype(np.float32, copy=False)
+                total_reward[is_offtrack] = float(self.off_track_terminal_penalty)
+                terminal_mask |= is_offtrack
             else:
-                total_reward += float(self.off_track_step_penalty)
+                total_reward += is_offtrack.astype(np.float32) * float(self.off_track_step_penalty)
 
-        # Stuck detection: speed-based (slow AND no progress).
-        if speed < self.stuck_speed_threshold and progress_delta < self.stuck_progress_epsilon:
-            self._stuck_steps += 1
-        else:
-            self._stuck_steps = 0
+        slow_and_stalled = (speeds < self.stuck_speed_threshold) & (progress_delta < self.stuck_progress_epsilon)
+        self._stuck_steps = np.where(slow_and_stalled, self._stuck_steps + 1, 0)
         is_stuck = self._stuck_steps >= self.stuck_max_steps
-        if is_stuck:
-            total_reward = float(self.stuck_terminal_penalty)
-            done = True
+        if np.any(is_stuck):
+            total_reward[is_stuck] = float(self.stuck_terminal_penalty)
+            terminal_mask |= is_stuck
 
-        # No-progress detection: catches donuts — fast but zero tile advancement.
-        # Separate from speed-stuck so spinning at high speed still terminates.
-        if progress_delta < self.stuck_progress_epsilon:
-            self._no_progress_steps += 1
+        no_progress_mask = progress_delta < self.stuck_progress_epsilon
+        self._no_progress_steps = np.where(no_progress_mask, self._no_progress_steps + 1, 0)
+        is_no_progress = np.logical_and(np.logical_not(is_stuck), self._no_progress_steps >= self.no_progress_max_steps)
+        if np.any(is_no_progress):
+            total_reward[is_no_progress] = float(self.no_progress_terminal_penalty)
+            terminal_mask |= is_no_progress
+
+        if np.any(contact_termination):
+            total_reward[contact_termination] = float(self.contact_terminal_penalty)
+            terminal_mask |= contact_termination
+
+        done_arr, done_was_scalar = self._coerce_bool_array(done, self._num_agents)
+        done_arr = np.logical_or(done_arr, terminal_mask)
+        if done_was_scalar:
+            done_out = bool(np.any(done_arr))
         else:
-            self._no_progress_steps = 0
-        is_no_progress = (not is_stuck) and self._no_progress_steps >= self.no_progress_max_steps
-        if is_no_progress:
-            total_reward = float(self.no_progress_terminal_penalty)
-            done = True
+            done_out = done_arr
+        if self._num_agents == 1:
+            done_out = bool(done_arr[0])
 
-        # Phase 1A: pass cached track index for downstream wrappers (ObservationAugment)
-        info["_track_index"] = self._last_track_index
+        self._prev_race_progress = race_progress.astype(np.float32)
 
-        # Phase 1C: minimal info dict during training (4 keys vs 23)
-        info["events/offtrack"] = int(is_offtrack)
-        info["events/stuck"] = int(is_stuck)
-        info["telemetry/speed"] = float(speed)
-        if not self._training_mode:
-            info["events/no_progress"] = int(is_no_progress)
-            info["telemetry/yaw_rate"] = float(yaw_rate)
-            info["telemetry/curriculum_stage"] = int(self.curriculum_stage)
-            info["telemetry/is_corner"] = int(is_sharp_turn)
-            info["telemetry/corner_angle"] = float(corner_angle)
-            info["telemetry/steer"] = float(steer_value)
-            info["telemetry/throttle"] = float(throttle_value)
-            info["telemetry/brake"] = float(brake_value)
-            info["rewards/forward_progress"] = float(comp_forward)
-            info["rewards/alignment"] = float(comp_alignment)
-            info["rewards/straight_speed"] = float(comp_straight_speed)
-            info["rewards/corner_overspeed"] = float(comp_corner_overspeed)
-            info["rewards/apex_decel"] = float(comp_apex_decel)
-            info["rewards/steer_smoothness"] = float(comp_steer_smooth)
-            info["rewards/steer_magnitude"] = float(comp_steer_mag)
-            info["rewards/lateral"] = float(comp_lateral)
-            info["rewards/time"] = float(comp_time)
-            info["rewards/idle"] = float(comp_idle)
-            info["rewards/throttle"] = float(comp_throttle)
-            info["rewards/brake"] = float(comp_brake)
-            info["rewards/launch"] = float(comp_launch)
-            info["rewards/yaw"] = float(comp_yaw)
-            info["rewards/total"] = float(total_reward)
-            info["lap_count"] = int(self._lap_count)
-        return obs, float(total_reward), done, info
+        for idx, agent_info in enumerate(info_list):
+            agent_info["_track_index"] = int(self._last_track_index[idx]) if self._last_track_index.size > idx else 0
+            agent_info["events/offtrack"] = int(is_offtrack[idx])
+            agent_info["events/stuck"] = int(is_stuck[idx])
+            agent_info["events/contact"] = int(contact_counts[idx] > 0)
+            agent_info["events/collision"] = int(contact_counts[idx] > 0)
+            agent_info["events/hook_contact"] = int(hook_counts[idx] > 0)
+            agent_info["events/contact_termination"] = int(contact_termination[idx])
+            agent_info["telemetry/speed"] = float(speeds[idx])
+            agent_info["telemetry/collision_contact_steps"] = int(collision_contact_steps[idx])
+            agent_info["telemetry/collision_relative_speed"] = float(collision_relative_speed[idx])
+            agent_info["telemetry/front_gap"] = float(front_gap[idx])
+            agent_info["telemetry/side_gap"] = float(side_gap[idx])
+            agent_info["telemetry/front_closing_speed"] = float(front_closing_speed[idx])
+            agent_info["telemetry/side_closing_speed"] = float(side_closing_speed[idx])
+            if not self._training_mode:
+                agent_info["events/no_progress"] = int(is_no_progress[idx])
+                agent_info["events/overtake"] = int(overtake_counts[idx])
+                agent_info["telemetry/yaw_rate"] = float(yaw_rates[idx])
+                agent_info["telemetry/curriculum_stage"] = int(self.curriculum_stage)
+                agent_info["telemetry/is_corner"] = int(is_sharp_turn[idx])
+                agent_info["telemetry/corner_angle"] = float(corner_angles[idx])
+                agent_info["telemetry/steer"] = float(steer_values[idx])
+                agent_info["telemetry/throttle"] = float(throttle_values[idx])
+                agent_info["telemetry/brake"] = float(brake_values[idx])
+                agent_info["telemetry/rank"] = int(ranks[idx])
+                agent_info["telemetry/race_progress"] = float(race_progress[idx])
+                agent_info["telemetry/nearest_opponent"] = int(nearest_idx[idx])
+                agent_info["telemetry/nearest_opponent_distance"] = float(nearest_dist[idx]) if np.isfinite(nearest_dist[idx]) else -1.0
+                agent_info["rewards/forward_progress"] = float(comp_forward[idx])
+                agent_info["rewards/alignment"] = float(comp_alignment[idx])
+                agent_info["rewards/straight_speed"] = float(comp_straight_speed[idx])
+                agent_info["rewards/corner_overspeed"] = float(comp_corner_overspeed[idx])
+                agent_info["rewards/apex_decel"] = float(comp_apex_decel[idx])
+                agent_info["rewards/steer_smoothness"] = float(comp_steer_smooth[idx])
+                agent_info["rewards/steer_magnitude"] = float(comp_steer_mag[idx])
+                agent_info["rewards/lateral"] = float(comp_lateral[idx])
+                agent_info["rewards/time"] = float(comp_time[idx])
+                agent_info["rewards/idle"] = float(comp_idle[idx])
+                agent_info["rewards/throttle"] = float(comp_throttle[idx])
+                agent_info["rewards/brake"] = float(comp_brake[idx])
+                agent_info["rewards/launch"] = float(comp_launch[idx])
+                agent_info["rewards/yaw"] = float(comp_yaw[idx])
+                agent_info["rewards/collision"] = float(comp_collision[idx])
+                agent_info["rewards/overlap_step_tax"] = float(overlap_tax_component[idx])
+                agent_info["rewards/collision_rub"] = float(rub_impact_component[idx])
+                agent_info["rewards/shared_collision"] = float(comp_shared_collision[idx])
+                agent_info["rewards/rank"] = float(comp_rank[idx])
+                agent_info["rewards/relative_velocity"] = float(comp_relative_velocity[idx])
+                agent_info["rewards/overtake"] = float(comp_overtake[idx])
+                agent_info["rewards/overtake_raw"] = float(comp_overtake_raw[idx])
+                agent_info["rewards/overtake_clean_gate"] = float(overtake_clean_gate[idx])
+                agent_info["rewards/front_speed_control"] = float(comp_front_speed_control[idx])
+                agent_info["rewards/side_clearance"] = float(comp_side_clearance[idx])
+                agent_info["rewards/open_space_accel"] = float(comp_open_space_accel[idx])
+                agent_info["rewards/total"] = float(total_reward[idx])
+                agent_info["lap_count"] = int(self._lap_count[idx])
+
+        reward_out = float(total_reward[0]) if self._num_agents == 1 else total_reward.astype(np.float32)
+        return obs, reward_out, done_out, self._format_info_output(info_list)
 
 
 class SafetyGovernorWrapper(gym.Wrapper):
@@ -1455,23 +2924,73 @@ class SafetyGovernorWrapper(gym.Wrapper):
         self.speed_cap_ratio = float(governor_config.get('speed_cap_ratio', 0.5))
         self.speed_cap_top_speed = float(governor_config.get('speed_cap_top_speed', 30.0))
         self.speed_cap_brake = float(governor_config.get('speed_cap_brake', 0.2))
+        self.proximity_enabled = bool(governor_config.get('proximity_enabled', False))
+        self.proximity_distance_threshold = float(governor_config.get('proximity_distance_threshold', 5.0))
+        self.proximity_min_ratio = float(governor_config.get('proximity_min_speed_cap_ratio', 0.2))
+        self.proximity_brake_boost = float(governor_config.get('proximity_brake_boost', 0.2))
+        self.proximity_closing_speed_scale = float(governor_config.get('proximity_closing_speed_scale', 0.1))
 
     def step(self, action):
         if self.enabled and action is not None:
             base_env = self.env.unwrapped
             if hasattr(base_env, "cars") and base_env.cars:
-                car = base_env.cars[0]
-                vel = car.hull.linearVelocity
-                speed = float(np.linalg.norm([vel[0], vel[1]]))
                 speed_cap = self.speed_cap_ratio * self.speed_cap_top_speed
-                if speed_cap > 0.0 and speed > speed_cap:
-                    action_arr = np.asarray(action).copy()
+                if speed_cap > 0.0:
+                    action_arr = np.asarray(action, dtype=np.float64).copy()
                     orig_shape = action_arr.shape
-                    action_arr = action_arr.reshape(-1)
-                    if action_arr.size >= 3:
-                        action_arr[1] = 0.0
-                        action_arr[2] = max(float(action_arr[2]), self.speed_cap_brake)
-                    action = action_arr.reshape(orig_shape)
+                    if action_arr.ndim == 1:
+                        action_matrix = action_arr.reshape(1, -1)
+                    else:
+                        action_matrix = action_arr.reshape(action_arr.shape[0], -1)
+                    for idx, car in enumerate(base_env.cars[:action_matrix.shape[0]]):
+                        vel = car.hull.linearVelocity
+                        speed = float(np.linalg.norm([vel[0], vel[1]]))
+                        local_speed_cap = speed_cap
+                        local_brake = self.speed_cap_brake
+                        if self.proximity_enabled and len(base_env.cars) > 1:
+                            ego_pos = np.array([car.hull.position[0], car.hull.position[1]], dtype=np.float32)
+                            ego_vel = np.array([vel[0], vel[1]], dtype=np.float32)
+                            nearest_dist = np.inf
+                            nearest_closing = 0.0
+                            for j, other in enumerate(base_env.cars):
+                                if j == idx:
+                                    continue
+                                other_pos = np.array([other.hull.position[0], other.hull.position[1]], dtype=np.float32)
+                                delta = other_pos - ego_pos
+                                dist = float(np.linalg.norm(delta))
+                                if dist <= 1e-6 or dist >= nearest_dist:
+                                    continue
+                                other_vel = np.array(
+                                    [other.hull.linearVelocity[0], other.hull.linearVelocity[1]],
+                                    dtype=np.float32,
+                                )
+                                unit_delta = delta / dist
+                                closing_speed = max(0.0, float(np.dot(ego_vel - other_vel, unit_delta)))
+                                nearest_dist = dist
+                                nearest_closing = closing_speed
+                            if nearest_dist < self.proximity_distance_threshold:
+                                pressure = np.clip(
+                                    (self.proximity_distance_threshold - nearest_dist)
+                                    / max(1e-6, self.proximity_distance_threshold),
+                                    0.0,
+                                    1.0,
+                                )
+                                pressure = np.clip(
+                                    pressure + self.proximity_closing_speed_scale * nearest_closing,
+                                    0.0,
+                                    1.0,
+                                )
+                                ratio = self.speed_cap_ratio - (self.speed_cap_ratio - self.proximity_min_ratio) * pressure
+                                local_speed_cap = max(0.0, ratio) * self.speed_cap_top_speed
+                                local_brake = max(
+                                    self.speed_cap_brake,
+                                    self.speed_cap_brake + pressure * self.proximity_brake_boost,
+                                )
+                        if speed <= local_speed_cap or action_matrix.shape[1] < 3:
+                            continue
+                        action_matrix[idx, 1] = 0.0
+                        action_matrix[idx, 2] = max(float(action_matrix[idx, 2]), local_brake)
+                    action = action_matrix.reshape(orig_shape)
         return self.env.step(action)
 
 
@@ -1550,26 +3069,70 @@ class ObservationAugmentWrapper(gym.Wrapper):
         return {"image": image, "state": state}, reward, done, info
 
 
-def create_env(config, rank=0, seed=0):
+def set_reward_shaping_training_mode(env, training_mode: bool):
+    current = env
+    visited = set()
+    while current is not None and id(current) not in visited:
+        visited.add(id(current))
+        if isinstance(current, RewardShapingWrapper):
+            current.set_training_mode(training_mode)
+            return True
+        current = getattr(current, "env", None)
+    return False
+
+
+def create_env(config, rank=0, seed=0, training_mode=True):
     """Create and wrap the multi_car_racing environment."""
     env_config = config['environment']
+    debug_log(
+        "pre-fix",
+        "H1",
+        "train.py:create_env:start",
+        "create_env starting",
+        {
+            "rank": rank,
+            "seed": seed,
+            "env_id": env_config.get('env_id', 'MultiCarRacing-v0'),
+            "num_agents": env_config.get('num_agents', 1),
+        },
+    )
 
     env_id = env_config.get('env_id', 'MultiCarRacing-v0')
-    env = gym.make(
-        env_id,
-        num_agents=env_config.get('num_agents', 1),
-        direction=env_config.get('direction', 'CCW'),
-        use_random_direction=env_config.get('use_random_direction', True),
-        backwards_flag=env_config.get('backwards_flag', True),
-        h_ratio=env_config.get('h_ratio', 0.25),
-        use_ego_color=env_config.get('use_ego_color', False)
-    )
+    try:
+        env = gym.make(
+            env_id,
+            num_agents=env_config.get('num_agents', 1),
+            direction=env_config.get('direction', 'CCW'),
+            use_random_direction=env_config.get('use_random_direction', True),
+            backwards_flag=env_config.get('backwards_flag', True),
+            h_ratio=env_config.get('h_ratio', 0.25),
+            use_ego_color=env_config.get('use_ego_color', False)
+        )
+        debug_log(
+            "pre-fix",
+            "H1",
+            "train.py:create_env:gym_make",
+            "gym.make succeeded",
+            {"rank": rank, "env_type": type(env).__name__},
+        )
+    except Exception as exc:
+        debug_log(
+            "pre-fix",
+            "H1",
+            "train.py:create_env:gym_make",
+            "gym.make failed",
+            {"rank": rank, "error": repr(exc), "traceback": traceback.format_exc()},
+        )
+        raise
     max_episode_steps = env_config.get('max_episode_steps', None)
     if max_episode_steps is not None:
         env = gym.wrappers.TimeLimit(env.unwrapped, max_episode_steps=int(max_episode_steps))
 
     if env_config.get('num_agents', 1) == 1:
         env = SingleAgentWrapper(env)
+    elif env_config.get('num_agents', 1) > 1:
+        env = MultiAgentSpaceWrapper(env, env_config.get('num_agents', 1))
+    validate_agent_space_contract(env, int(env_config.get('num_agents', 1)), "create_env")
 
     # Safety governor (optional)
     governor_config = config.get('safety_governor', {})
@@ -1580,32 +3143,98 @@ def create_env(config, rank=0, seed=0):
     reward_config = config.get('reward_shaping', {})
     if reward_config.get('enabled', False):
         env = RewardShapingWrapper(env, reward_config)
+        set_reward_shaping_training_mode(env, training_mode)
 
     # Observation augmentation (optional)
     obs_config = config.get('observation', {})
     if obs_config.get('enabled', False):
         env = ObservationAugmentWrapper(env, obs_config)
 
-    # Wrap with Monitor for logging
     log_dir = config['paths']['log_dir']
     os.makedirs(log_dir, exist_ok=True)
-    env = Monitor(env, filename=os.path.join(log_dir, f'monitor_{rank}'))
+    if env_config.get('num_agents', 1) == 1:
+        env = Monitor(env, filename=os.path.join(log_dir, f'monitor_{rank}'))
+    debug_log(
+        "pre-fix",
+        "H2",
+        "train.py:create_env:wrapped",
+        "env wrappers applied",
+        {"rank": rank, "wrapper_type": type(env).__name__},
+    )
     
-    # Set seed
+    # Seed without forcing an eager reset. MultiCarRacing creates pyglet viewers
+    # during reset(), and a second reset at learn() startup can reuse stale windows
+    # and crash before training begins on macOS multi-agent runs.
     try:
-        env.reset(seed=seed)
-    except TypeError:
         if hasattr(env, "seed"):
             env.seed(seed)
-        env.reset()
+        elif hasattr(env.unwrapped, "seed"):
+            env.unwrapped.seed(seed)
+        if hasattr(env.action_space, "seed"):
+            env.action_space.seed(seed)
+        if hasattr(env.observation_space, "seed"):
+            env.observation_space.seed(seed)
+        debug_log(
+            "post-fix",
+            "H3",
+            "train.py:create_env:seed",
+            "env seeded without eager reset",
+            {"rank": rank, "seed": seed},
+        )
+    except Exception as exc:
+        debug_log(
+            "post-fix",
+            "H3",
+            "train.py:create_env:seed",
+            "env seed setup failed",
+            {"rank": rank, "error": repr(exc), "traceback": traceback.format_exc()},
+        )
+        raise
+    debug_log_763171(
+        "post-fix",
+        "H1",
+        "train.py:create_env:seed",
+        "env spaces validated without eager reset",
+        {
+            "rank": rank,
+            "configured_num_agents": int(env_config.get('num_agents', 1)),
+            "obs_space_shape": tuple(getattr(env.observation_space, "shape", ())),
+            "action_space_shape": tuple(getattr(env.action_space, "shape", ())),
+            "wrapper_type": type(env).__name__,
+        },
+    )
     
     return env
 
 
 def make_env(config, rank, seed):
     def _init():
-        env = create_env(config, rank=rank, seed=seed + rank)
-        return env
+        debug_log(
+            "pre-fix",
+            "H4",
+            "train.py:make_env:init",
+            "subprocess init entered",
+            {"rank": rank, "seed": seed + rank, "pid": os.getpid()},
+        )
+        try:
+            env = create_env(config, rank=rank, seed=seed + rank, training_mode=True)
+            debug_log(
+                "pre-fix",
+                "H4",
+                "train.py:make_env:init",
+                "subprocess init completed",
+                {"rank": rank, "pid": os.getpid(), "obs_space": str(env.observation_space), "action_space": str(env.action_space)},
+            )
+            return env
+        except Exception as exc:
+            debug_log(
+                "pre-fix",
+                "H4",
+                "train.py:make_env:init",
+                "subprocess init failed",
+                {"rank": rank, "pid": os.getpid(), "error": repr(exc), "traceback": traceback.format_exc()},
+            )
+            raise
     return _init
 
 
@@ -1616,11 +3245,16 @@ def get_device(config):
     if device_config == 'auto':
         if torch.cuda.is_available():
             device = 'cuda'
+        elif mps_is_available():
+            device = 'mps'
         else:
             device = 'cpu'
     elif device_config == 'cuda':
         if torch.cuda.is_available():
             device = 'cuda'
+        elif mps_is_available():
+            print("WARNING: CUDA requested but not available. Falling back to Apple MPS.")
+            device = 'mps'
         else:
             print("WARNING: CUDA requested but not available. Falling back to CPU.")
             device = 'cpu'
@@ -1631,8 +3265,22 @@ def get_device(config):
     if device == 'cuda':
         print(f"GPU detected: {torch.cuda.get_device_name(0)}")
         print(f"CUDA version: {torch.version.cuda}")
+    elif device == 'mps':
+        print("GPU detected: Apple Metal (MPS)")
     else:
         print("Using CPU for training")
+    debug_log_763171(
+        "post-fix",
+        "H9",
+        "train.py:get_device",
+        "device selected",
+        {
+            "requested_device": device_config,
+            "selected_device": device,
+            "cuda_available": torch.cuda.is_available(),
+            "mps_available": mps_is_available(),
+        },
+    )
     
     return device
 
@@ -1727,8 +3375,13 @@ class TelemetryCallback(BaseCallback):
             "telemetry/throttle",
             "telemetry/brake",
             "telemetry/curriculum_stage",
+            "telemetry/rank",
+            "telemetry/race_progress",
+            "telemetry/nearest_opponent_distance",
             "events/offtrack",
             "events/stuck",
+            "events/collision",
+            "events/overtake",
             "rewards/forward_progress",
             "rewards/straight_speed",
             "rewards/corner_overspeed",
@@ -1736,6 +3389,11 @@ class TelemetryCallback(BaseCallback):
             "rewards/steer_smoothness",
             "rewards/time",
             "rewards/idle",
+            "rewards/collision",
+            "rewards/shared_collision",
+            "rewards/rank",
+            "rewards/relative_velocity",
+            "rewards/overtake",
             "rewards/total",
             "lap_count",
         ]
@@ -1748,11 +3406,17 @@ class TelemetryCallback(BaseCallback):
         for key in self.metric_keys:
             values = []
             for info in infos:
-                if not isinstance(info, dict):
-                    continue
-                value = info.get(key)
-                if isinstance(value, (int, float, np.integer, np.floating)):
-                    values.append(float(value))
+                if isinstance(info, dict):
+                    value = info.get(key)
+                    if isinstance(value, (int, float, np.integer, np.floating)):
+                        values.append(float(value))
+                elif isinstance(info, (list, tuple)):
+                    for agent_info in info:
+                        if not isinstance(agent_info, dict):
+                            continue
+                        value = agent_info.get(key)
+                        if isinstance(value, (int, float, np.integer, np.floating)):
+                            values.append(float(value))
             if values:
                 self.logger.record(key, float(np.mean(values)))
 
@@ -1846,6 +3510,12 @@ def main():
         help='Torch policy variant override. Defaults to config.training.torch_policy_variant or legacy.'
     )
     parser.add_argument(
+        '--torch_policy_variant_source',
+        type=str,
+        default=None,
+        help='Optional path to an external torch policy surface module.'
+    )
+    parser.add_argument(
         '--resume_mode',
         type=str,
         default='full',
@@ -1861,6 +3531,9 @@ def main():
     if args.torch_policy_variant is not None:
         training_config['torch_policy_variant'] = args.torch_policy_variant
         config['training'] = training_config
+    if args.torch_policy_variant_source is not None:
+        training_config['torch_policy_variant_source'] = args.torch_policy_variant_source
+        config['training'] = training_config
     trainer_backend = (
         args.trainer_backend
         if args.trainer_backend is not None
@@ -1869,6 +3542,13 @@ def main():
     trainer_backend = str(trainer_backend).strip().lower()
     if trainer_backend not in {'sb3', 'torch'}:
         raise ValueError(f"Unknown trainer backend: {trainer_backend}")
+    num_agents = int(config.get('environment', {}).get('num_agents', 1))
+    marl_paradigm = str(training_config.get('marl_paradigm', 'shared_policy_ippo')).strip().lower()
+    if num_agents > 1 and trainer_backend == 'sb3':
+        raise ValueError(
+            "SB3 backend is de-scoped for multi-agent training in this repo. "
+            "Use the local torch backend with training.marl_paradigm=shared_policy_ippo."
+        )
     
     # Set random seeds
     set_random_seed(args.seed)
@@ -1892,6 +3572,8 @@ def main():
     print(f"Trainer backend: {trainer_backend}")
     if trainer_backend == 'torch':
         print(f"Torch policy variant: {training_config.get('torch_policy_variant', 'legacy')}")
+        print(f"MARL paradigm: {marl_paradigm}")
+        print(f"Environment agents: {num_agents}")
     if args.resume:
         print(f"Resuming from: {args.resume}")
         if trainer_backend == 'torch':
@@ -1917,20 +3599,33 @@ def main():
     num_envs = int(config.get('training', {}).get('num_envs', 1))
     if num_envs < 1:
         num_envs = 1
+    if env_id == 'MultiCarRacing-v0' and num_envs > 1:
+        print(
+            "WARNING: MultiCarRacing-v0 multi-agent training is only supported with a single "
+            "DummyVecEnv because reset() creates pyglet render contexts. Falling back to "
+            "DummyVecEnv with 1 environment."
+        )
+        num_envs = 1
     obs_config = config.get('observation', {})
     if num_envs > 1:
         env = SubprocVecEnv([make_env(config, rank=i, seed=args.seed) for i in range(num_envs)])
         print(f"Using SubprocVecEnv with {num_envs} parallel environments")
     else:
-        env = DummyVecEnv([lambda: create_env(config, rank=0, seed=args.seed)])
+        vec_env_cls = MultiAgentDummyVecEnv if (trainer_backend == 'torch' and num_agents > 1) else DummyVecEnv
+        env = vec_env_cls([lambda: create_env(config, rank=0, seed=args.seed, training_mode=True)])
         print("Using DummyVecEnv with 1 environment")
-    if not obs_config.get('enabled', False):
+    if not obs_config.get('enabled', False) and num_agents == 1:
         env = VecTransposeImage(env)
     
-    # Create evaluation environment
-    eval_env = DummyVecEnv([lambda: create_env(config, rank=1, seed=args.seed + 1000)])
-    if not obs_config.get('enabled', False):
-        eval_env = VecTransposeImage(eval_env)
+    # Create evaluation environment. Multi-agent torch eval defaults to a subprocess path,
+    # so we skip the extra in-process eval env unless explicitly needed.
+    eval_env = None
+    use_subprocess_eval = bool(training_config.get("eval_subprocess", trainer_backend == 'torch' and num_agents > 1))
+    if not (trainer_backend == 'torch' and use_subprocess_eval):
+        eval_vec_env_cls = MultiAgentDummyVecEnv if (trainer_backend == 'torch' and num_agents > 1) else DummyVecEnv
+        eval_env = eval_vec_env_cls([lambda: create_env(config, rank=1, seed=args.seed + 1000, training_mode=False)])
+        if not obs_config.get('enabled', False) and num_agents == 1:
+            eval_env = VecTransposeImage(eval_env)
     print("Environment created successfully!\n")
 
     if trainer_backend == 'torch':
@@ -1995,6 +3690,9 @@ def main():
             device=device,
             model_dir=model_dir,
             log_dir=log_dir,
+            results_dir=Path(config["paths"]["results_dir"]),
+            config_path=args.config,
+            seed=args.seed,
         )
         if args.resume:
             print(f"Loading torch checkpoint from {resume_path}")
@@ -2029,14 +3727,28 @@ def main():
         print("-"*70)
         print("TRAINING SETTINGS")
         print("-"*70)
+        step_streams = max(1, num_envs * num_agents)
+        eval_freq_steps = int(training_config['eval_freq'])
+        save_freq_steps = int(training_config['save_freq'])
         print(f"Configured total timesteps: {configured_total:,}")
         if args.timesteps_add is not None:
             print(f"Resume +N target timesteps: {target_total_timesteps:,}")
         else:
             print(f"Run target timesteps: {target_total_timesteps:,}")
-        print(f"Evaluation frequency: {training_config['eval_freq']:,} steps")
+        print(
+            f"Step accounting: {step_streams} agent-stream transitions per vectorized env step "
+            f"({num_envs} env x {num_agents} agent)."
+        )
+        print(f"Approx vectorized env steps to target: {target_total_timesteps / float(step_streams):,.0f}")
+        print(
+            f"Evaluation frequency: {eval_freq_steps:,} stream steps "
+            f"(~{eval_freq_steps / float(step_streams):,.0f} vectorized env steps)"
+        )
         print(f"Evaluation episodes: {training_config['n_eval_episodes']}")
-        print(f"Checkpoint frequency: {training_config['save_freq']:,} steps")
+        print(
+            f"Checkpoint frequency: {save_freq_steps:,} stream steps "
+            f"(~{save_freq_steps / float(step_streams):,.0f} vectorized env steps)"
+        )
         visual_cfg = training_config.get('visual_eval', {})
         print(
             f"Visual eval: enabled={bool(visual_cfg.get('enabled', True))}, "
@@ -2049,6 +3761,8 @@ def main():
             f"Torch policy variant: {trainer.policy_variant} | "
             f"log_std=[{ppo_config.get('min_log_std', -1.5)}, {ppo_config.get('max_log_std', 1.0)}]"
         )
+        if trainer.policy_surface_metadata.get("surface_source"):
+            print(f"Policy surface source: {trainer.policy_surface_metadata.get('surface_source')}")
         if trainer.policy_variant == 'autoresearch_run_008':
             print("Action mapping: tanh-squashed Gaussian PPO with tanh log-prob correction")
             print("Env transform: steer=tanh output, throttle/brake mapped from (-1, 1) to (0, 1)")
@@ -2059,12 +3773,18 @@ def main():
             f"stage1->2 gate: progress>={float(curr_cfg.get('promote_progress_threshold', 0.35)):.2f}, "
             f"speed>={float(curr_cfg.get('promote_speed_threshold', 8.0)):.2f}"
         )
+        print(
+            f"Training topology: paradigm={marl_paradigm}, "
+            f"num_agents={num_agents}, policy_sharing=shared"
+        )
         print(f"Model directory: {model_dir.resolve()}")
         print(f"  Best model (updated every eval that beats previous): {model_dir.resolve() / 'best_model_torch.pt'}")
         print(f"  Best copies (per step): {model_dir.resolve() / 'best_model_torch_step_<step>.pt'}")
         print(f"  Checkpoints: {model_dir.resolve() / 'torch_ppo_step_<step>.pt'}")
         print(f"Log directory: {log_dir}")
-        print(f"Eval history log: {log_dir / 'torch_eval_history.jsonl'}")
+        print(f"TensorBoard run directory: {trainer.tb_log_dir}")
+        print(f"Run results directory: {trainer.run_dir}")
+        print(f"Eval history log: {trainer.eval_history_path}")
         print("-"*70 + "\n")
 
         trainer.learn(
@@ -2078,6 +3798,9 @@ def main():
         )
         final_model_path = model_dir / 'final_model_torch.pt'
         trainer.save(final_model_path)
+        trainer.write_run_summary(final_model_path, model_dir / 'best_model_torch.pt')
+        if trainer.tb_writer is not None:
+            trainer.tb_writer.close()
 
         print("\n" + "="*70)
         print("TRAINING SUMMARY")
@@ -2085,11 +3808,13 @@ def main():
         print(f"Final model saved to: {final_model_path}")
         print(f"Best model saved to: {model_dir / 'best_model_torch.pt'}")
         print(f"Checkpoints saved to: {model_dir}")
-        print(f"TensorBoard logs: {log_dir}")
+        print(f"TensorBoard logs: {trainer.tb_log_dir}")
+        print(f"Run artifacts: {trainer.run_dir}")
         print("="*70 + "\n")
 
         env.close()
-        eval_env.close()
+        if eval_env is not None:
+            eval_env.close()
         print("Environments closed. Training complete!")
         return
     

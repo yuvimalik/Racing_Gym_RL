@@ -1,0 +1,124 @@
+{
+  "mean_reward": -15.840734282508492,
+  "std_reward": 0.20404047705233097,
+  "min_reward": -16.044774759560823,
+  "max_reward": -15.636693805456161,
+  "mean_length": 57.5,
+  "std_length": 0.5,
+  "mean_progress": 0.027905283961445093,
+  "std_progress": 0.00030788173899054527,
+  "mean_time": 0.0,
+  "std_time": 0.0,
+  "offtrack_rate": 1.0,
+  "mean_steer_variance": 0.00039499222673623194,
+  "mean_rank": 1.5,
+  "collision_rate": 0.0,
+  "contact_rate": 0.0,
+  "hook_contact_rate": 0.0,
+  "contact_termination_rate": 0.0,
+  "mean_max_contact_steps": 0.0,
+  "episode_rewards": [
+    -16.044774759560823,
+    -15.636693805456161
+  ],
+  "episode_lengths": [
+    57,
+    58
+  ],
+  "episode_progress": [
+    0.027597402222454548,
+    0.02821316570043564
+  ],
+  "episode_times": [
+    0.0,
+    0.0
+  ],
+  "episode_offtrack": [
+    1,
+    1
+  ],
+  "episode_steer_variance": [
+    0.00038768282641501664,
+    0.0004023016270574473
+  ],
+  "episode_mean_rank": [
+    1.5,
+    1.5
+  ],
+  "episode_collision": [
+    0,
+    0
+  ],
+  "episode_contact": [
+    0,
+    0
+  ],
+  "episode_hook_contact": [
+    0,
+    0
+  ],
+  "episode_contact_termination": [
+    0,
+    0
+  ],
+  "episode_max_contact_steps": [
+    0,
+    0
+  ],
+  "mean_speed": 20.63055182512933,
+  "mean_speed_std": 8.816887267502874,
+  "mean_throttle": 0.9846489617158194,
+  "mean_brake": 0.02775903276679953,
+  "mean_overtakes": 7.0,
+  "mean_front_gap": 17.10084874761227,
+  "min_front_gap": 5.88453483581543,
+  "mean_side_gap": 5.825234983664027,
+  "min_side_gap": 5.734328269958496,
+  "mean_front_closing_speed": 0.050125990935730225,
+  "episode_mean_speed": [
+    20.543305376119783,
+    20.71779827413888
+  ],
+  "episode_speed_std": [
+    8.805755684528485,
+    8.828018850477262
+  ],
+  "episode_mean_throttle": [
+    0.9846491233298653,
+    0.9846488001017735
+  ],
+  "episode_mean_brake": [
+    0.0277684770132366,
+    0.02774958852036246
+  ],
+  "episode_mean_overtakes": [
+    7,
+    7
+  ],
+  "episode_mean_front_gap": [
+    17.05751691784775,
+    17.144180577376794
+  ],
+  "episode_min_front_gap": [
+    5.886388301849365,
+    5.882681369781494
+  ],
+  "episode_mean_side_gap": [
+    5.866683382737009,
+    5.783786584591043
+  ],
+  "episode_min_side_gap": [
+    5.7798285484313965,
+    5.688827991485596
+  ],
+  "episode_mean_front_closing_speed": [
+    0.04969339969561828,
+    0.05055858217584218
+  ],
+  "model_path": "/workspace/Racing_Gym_RL/artifacts/prime_marl_2car_budget/results/torch_20260412_215107_seed42/evaluations/eval_checkpoint_step_53248.pt",
+  "config_path": "/workspace/Racing_Gym_RL/config/prime_marl_2car_budget.yaml",
+  "seed": 1042,
+  "episodes": 2,
+  "video_path": null,
+  "evaluated_at": "2026-04-12T21:58:16.923164"
+}

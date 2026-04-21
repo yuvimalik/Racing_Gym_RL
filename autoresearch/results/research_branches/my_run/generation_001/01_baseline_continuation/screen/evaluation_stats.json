@@ -1,0 +1,94 @@
+{
+  "mean_reward": 136.81290885433555,
+  "std_reward": 6.645651090890169,
+  "min_reward": 130.16725776344538,
+  "max_reward": 143.45855994522572,
+  "mean_length": 835.0,
+  "std_length": 66.0,
+  "mean_progress": 0.4899063855409622,
+  "std_progress": 0.044513896107673645,
+  "mean_time": 0.0,
+  "std_time": 0.0,
+  "offtrack_rate": 1.0,
+  "mean_steer_variance": 0.3538325506348342,
+  "mean_rank": 1.5,
+  "collision_rate": 0.0,
+  "contact_rate": 0.0,
+  "hook_contact_rate": 0.0,
+  "contact_termination_rate": 0.0,
+  "mean_max_contact_steps": 15.0,
+  "episode_rewards": [
+    143.45855994522572,
+    130.16725776344538
+  ],
+  "episode_lengths": [
+    769,
+    901
+  ],
+  "episode_progress": [
+    0.4453924894332886,
+    0.5344202816486359
+  ],
+  "episode_times": [
+    0.0,
+    0.0
+  ],
+  "episode_offtrack": [
+    1,
+    1
+  ],
+  "episode_steer_variance": [
+    0.3893789686117106,
+    0.3182861326579578
+  ],
+  "episode_mean_rank": [
+    1.5,
+    1.5
+  ],
+  "episode_collision": [
+    0,
+    0
+  ],
+  "episode_contact": [
+    0,
+    0
+  ],
+  "episode_hook_contact": [
+    0,
+    0
+  ],
+  "episode_contact_termination": [
+    0,
+    0
+  ],
+  "episode_max_contact_steps": [
+    15,
+    15
+  ],
+  "mean_speed": 28.264473381131108,
+  "mean_throttle": 0.9930948959053466,
+  "mean_brake": 0.002928953934789578,
+  "mean_overtakes": 110.5,
+  "episode_mean_speed": [
+    28.537192449768124,
+    27.99175431249409
+  ],
+  "episode_mean_throttle": [
+    0.992466124818601,
+    0.9937236669920922
+  ],
+  "episode_mean_brake": [
+    0.0029089230516021985,
+    0.002948984817976957
+  ],
+  "episode_mean_overtakes": [
+    95,
+    126
+  ],
+  "model_path": "/Users/epablo/Documents/UPenn/SophmoreSpring26/STAT4830/WedApr1_Work/Racing_Gym_RL/autoresearch/results/research_branches/my_run/generation_001/01_baseline_continuation/screen/models/final_model_torch.pt",
+  "config_path": "/Users/epablo/Documents/UPenn/SophmoreSpring26/STAT4830/WedApr1_Work/Racing_Gym_RL/autoresearch/results/research_branches/my_run/generation_001/01_baseline_continuation/screen/effective_config.yaml",
+  "seed": 10143,
+  "episodes": 2,
+  "video_path": null,
+  "evaluated_at": "2026-04-05T18:00:25.464758"
+}

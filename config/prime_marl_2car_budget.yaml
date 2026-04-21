@@ -1,0 +1,178 @@
+# Prime Intellect — 2-car MARL budget run (~$10–20 GPU-time when calibrated).
+#
+# Same reward / PPO / policy as prime_marl_2car_long.yaml, but **8M** stream
+# timesteps (1/4 of the 32M long run) with eval/save/visual_eval scaled the same
+# ratio so checkpoint and eval density matches the long config.
+#
+# Calibrate on your hardware: run 500k–1M steps, measure wall time, then set
+# total_timesteps = steps_per_hour * (budget_hours - margin) in a local copy if needed.
+# Paths: ./artifacts/prime_marl_2car_budget/ — mount persistent storage here on Prime.
+
+environment:
+  env_id: MultiCarRacing-v0
+  max_episode_steps: 2000
+  num_agents: 2
+  direction: CCW
+  use_random_direction: false
+  backwards_flag: true
+  h_ratio: 0.25
+  use_ego_color: false
+  render_mode: null
+
+ppo:
+  learning_rate: 2.5e-4
+  n_steps: 1024
+  batch_size: 1536
+  n_epochs: 3
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_range: 0.2
+  ent_coef: 0.05
+  vf_coef: 0.25
+  max_grad_norm: 0.5
+  min_log_std: -0.75
+  max_log_std: 0.5
+  steer_min_log_std: -0.5
+  steer_max_log_std: 0.0
+
+policy:
+  policy_type: CnnPolicy
+
+training:
+  trainer_backend: torch
+  marl_paradigm: shared_policy_ippo
+  torch_policy_variant: autoresearch_run_008
+  total_timesteps: 8000000
+  eval_freq: 25000
+  eval_subprocess: true
+  n_eval_episodes: 2
+  save_freq: 50000
+  log_interval: 5
+  num_envs: 1
+  fail_fast:
+    enabled: false
+  visual_eval:
+    enabled: false
+    freq: 50000
+    n_episodes: 1
+  success_gate:
+    enabled: true
+    mean_reward_threshold: 150.0
+    mean_progress_threshold: 0.60
+    max_offtrack_rate: 0.35
+    min_eval_episodes: 2
+
+paths:
+  model_dir: ./artifacts/prime_marl_2car_budget/models
+  log_dir: ./artifacts/prime_marl_2car_budget/logs
+  results_dir: ./artifacts/prime_marl_2car_budget/results
+
+device: cuda
+
+reward_shaping:
+  enabled: true
+  use_custom_reward: true
+  forward_progress_scale: 580.0
+  track_alignment_scale: 0.0
+  straight_speed_scale: 0.0
+  sharp_turn_threshold: 0.35
+  sharp_turn_lookahead: 6
+  corner_target_speed: 7.0
+  corner_overspeed_penalty_scale: 0.0
+  apex_decel_reward_scale: 0.2
+  apex_decel_reward_cap: 2.0
+  steer_smoothness_penalty: 0.03
+  steer_delta_cap: 0.5
+  steer_magnitude_penalty: 0.005
+  lateral_velocity_penalty: 0.0
+  time_penalty: -0.1
+  idle_speed_threshold: 1.0
+  idle_penalty: -0.3
+  throttle_bonus_scale: 0.0
+  brake_penalty_scale: 0.01
+  launch_boost_steps: 0
+  launch_speed_target: 5.0
+  launch_bonus_scale: 0.0
+  stuck_speed_threshold: 0.8
+  stuck_progress_epsilon: 0.001
+  stuck_max_steps: 200
+  stuck_terminal_penalty: -20.0
+  no_progress_max_steps: 900
+  no_progress_terminal_penalty: -10.0
+  yaw_rate_penalty: 0.05
+  off_track_mode: terminate
+  off_track_terminal_penalty: -50.0
+  off_track_step_penalty: -0.5
+
+  multi_agent:
+    enabled: true
+    rank_reward_scale: 0.05
+    relative_velocity_scale: 0.01
+    relative_velocity_cap: 6.0
+    nearest_opponent_max_distance: 12.0
+    overtake_bonus: 0.08
+    overtake_margin: 0.002
+    front_gap_hard_distance: 2.6
+    front_gap_soft_distance: 5.8
+    front_speed_penalty_scale: 0.12
+    front_throttle_penalty_scale: 0.22
+    open_space_distance: 7.5
+    open_space_accel_scale: 0.06
+    side_gap_threshold: 3.2
+    side_longitudinal_window: 3.0
+    side_clearance_penalty_scale: 0.55
+    side_closing_penalty_scale: 0.12
+    relative_velocity_gate_front_strength: 0.85
+    relative_velocity_gate_side_strength: 0.6
+    relative_velocity_positive_requires_open_front: true
+    collision_overlap_margin: 0.35
+    proximity_soft_penalty_scale: 0.42
+    proximity_soft_tangential_scale: 0.09
+    overtake_min_pairwise_distance: 3.0
+    overtake_spacing_soft_margin: 2.5
+    rank_unsafe_dampen_strength: 0.65
+    contact_forward_dampening_scale: 0.72
+    pre_hook_contact_steps: 2
+    pre_hook_rel_speed_threshold: 2.5
+    pre_hook_penalty: -5.5
+    stick_penalty_per_step: -0.45
+    stick_penalty_max_steps: 12
+    collision_distance_threshold: 3.5
+    collision_overlap_distance: 2.2
+    collision_min_closing_speed: 0.75
+    collision_low_speed_threshold: 1.5
+    collision_medium_speed_threshold: 4.0
+    collision_high_speed_threshold: 7.0
+    collision_low_penalty: -3.5
+    collision_medium_penalty: -10.0
+    collision_high_penalty: -22.0
+    contact_penalty: -2.5
+    sustained_contact_steps: 2
+    sustained_contact_penalty: -7.0
+    hook_contact_steps: 3
+    hook_contact_speed_threshold: 1.75
+    hook_contact_penalty: -20.0
+    contact_termination_mode: both
+    contact_terminate_steps: 1
+    terminate_on_hook_contact: true
+    severe_contact_speed_threshold: 4.2
+    contact_terminal_penalty: -75.0
+    shared_collision_penalty: 0.0
+    collision_rub_penalty: -1.2
+    overlap_step_penalty: -0.35
+    overlap_step_penalty_max_steps: 12
+    overtake_requires_clean_contact: true
+    overtake_contact_dampen: 0.0
+    rank_contact_dampen: 0.35
+
+  curriculum:
+    enabled: false
+
+observation:
+  enabled: false
+
+safety_governor:
+  enabled: true
+  speed_cap_ratio: 0.5
+  speed_cap_top_speed: 60.0
+  speed_cap_brake: 0.4

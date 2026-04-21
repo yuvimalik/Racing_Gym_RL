@@ -1,0 +1,10 @@
+Candidate dry_run_synthetic (pre-run)
+=====================================
+
+Rationale: plumbing test
+
+Config changes:
+No config overrides.
+
+Surface changes:
+No surface code changes.

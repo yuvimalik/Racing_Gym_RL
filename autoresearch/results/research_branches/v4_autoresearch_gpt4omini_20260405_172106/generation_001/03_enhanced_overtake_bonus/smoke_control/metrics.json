@@ -1,0 +1,8 @@
+{
+  "mean_reward": -999.0,
+  "error": "train.py failed before producing a checkpoint",
+  "train_return_code": -6,
+  "train_wall_clock_seconds": 9.351867914199829,
+  "effective_config_path": "/Users/epablo/Documents/UPenn/SophmoreSpring26/STAT4830/WedApr1_Work/Racing_Gym_RL/autoresearch/results/research_branches/v4_autoresearch_gpt4omini_20260405_172106/generation_001/03_enhanced_overtake_bonus/smoke_control/effective_config.yaml",
+  "run_summary_path": null
+}

@@ -1,0 +1,15 @@
+Candidate steer_smoothness_penalty_adjustment (post-screen)
+===========================================================
+
+Rationale: A higher steer smoothness penalty may lead to smoother steering and reduced contact issues.
+
+Config changes:
+- reward_shaping.steer_smoothness_penalty: 0.03 -> 0.1
+
+Surface changes:
+No surface code changes.
+
+Stage results:
+- screen: reward=-999.00, progress=0.000, offtrack=1.000, contact=0.000, hook=0.000, overtakes=0.00, score=-1239.00
+
+Gate reasons: ['experiment_failed', 'progress_too_low', 'offtrack_near_total', 'steering_variance_dead', 'smoke_control_offtrack']

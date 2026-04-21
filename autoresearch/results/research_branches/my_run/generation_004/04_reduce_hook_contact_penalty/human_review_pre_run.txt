@@ -1,0 +1,10 @@
+Candidate reduce_hook_contact_penalty (pre-run)
+===============================================
+
+Rationale: Minimizing penalties for hook contacts may reduce panic reactions leading to more consistent and stable behavior.
+
+Config changes:
+- reward_shaping.multi_agent.hook_contact_penalty: -10.0 -> -5.0
+
+Surface changes:
+No surface code changes.
