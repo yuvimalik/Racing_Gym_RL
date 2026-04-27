@@ -6,8 +6,15 @@ generating metrics and optionally recording videos.
 """
 
 import os
+
+if str(os.environ.get("RACING_HEADLESS_PYGLET", "")).strip().lower() in ("1", "true", "yes"):
+    import pyglet
+
+    pyglet.options["headless"] = True
+
 import yaml
 import argparse
+import json
 import numpy as np
 from pathlib import Path
 import gym
@@ -22,11 +29,25 @@ import torch
 
 # Import Torch policy and wrappers from training module for consistency
 try:
-    from train import CnnActorCritic, RewardShapingWrapper, TORCH_POLICY_VARIANTS
+    from train import (
+        CnnActorCritic,
+        MultiAgentSpaceWrapper,
+        RewardShapingWrapper,
+        TORCH_POLICY_VARIANTS,
+        mps_is_available,
+        set_reward_shaping_training_mode,
+        validate_agent_space_contract,
+    )
 except ImportError:
     CnnActorCritic = None
+    MultiAgentSpaceWrapper = None
     RewardShapingWrapper = None
     TORCH_POLICY_VARIANTS = {}
+    set_reward_shaping_training_mode = None
+    validate_agent_space_contract = None
+
+    def mps_is_available():
+        return False
 
 
 def load_config(config_path):
@@ -34,6 +55,119 @@ def load_config(config_path):
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
     return config
+
+
+def reward_to_scalar(reward):
+    """Collapse scalar or per-agent reward arrays into one comparable metric."""
+    reward_arr = np.asarray(reward, dtype=np.float32)
+    if reward_arr.ndim == 0:
+        return float(reward_arr)
+    return float(np.mean(reward_arr))
+
+
+def done_to_bool(done):
+    done_arr = np.asarray(done)
+    if done_arr.ndim == 0:
+        return bool(done_arr)
+    return bool(done_arr.reshape(-1).any())
+
+
+def first_agent_info(info):
+    if isinstance(info, dict):
+        return info
+    if isinstance(info, (list, tuple)) and len(info) > 0:
+        first = info[0]
+        if isinstance(first, dict):
+            return first
+    return {}
+
+
+def infer_image_space_layout(space_shape):
+    shape = tuple(space_shape)
+    if len(shape) == 3:
+        if shape[-1] in (1, 3, 4):
+            h, w, c = shape
+            return 1, (c, h, w), "hwc"
+        c, h, w = shape
+        return 1, (c, h, w), "chw"
+    if len(shape) == 4 and shape[-1] in (1, 3, 4):
+        n_agents, h, w, c = shape
+        return int(n_agents), (c, h, w), "agent_hwc"
+    if len(shape) == 4:
+        n_agents, c, h, w = shape
+        return int(n_agents), (c, h, w), "agent_chw"
+    raise ValueError(f"Unsupported observation space shape: {shape}")
+
+
+def obs_to_policy_batch(obs, obs_layout):
+    obs_arr = np.asarray(obs, dtype=np.float32)
+    if obs_layout == "chw":
+        if obs_arr.ndim == 3:
+            return obs_arr[None, ...]
+        return obs_arr.reshape(-1, *obs_arr.shape[-3:])
+    if obs_layout == "hwc":
+        if obs_arr.ndim == 3:
+            obs_arr = obs_arr[None, ...]
+        obs_arr = obs_arr.reshape(-1, *obs_arr.shape[-3:])
+        return np.transpose(obs_arr, (0, 3, 1, 2))
+    if obs_layout == "agent_hwc":
+        if obs_arr.ndim == 4:
+            obs_arr = obs_arr[None, ...]
+        obs_arr = obs_arr.reshape(-1, *obs_arr.shape[-3:])
+        return np.transpose(obs_arr, (0, 3, 1, 2))
+    if obs_layout == "agent_chw":
+        if obs_arr.ndim == 4:
+            obs_arr = obs_arr[None, ...]
+        return obs_arr.reshape(-1, *obs_arr.shape[-3:])
+    raise ValueError(f"Unknown observation layout: {obs_layout}")
+
+
+def action_batch_to_env(action_batch, n_envs, n_agents):
+    action_batch = np.asarray(action_batch, dtype=np.float64)
+    if n_agents <= 1:
+        return action_batch.reshape(n_envs, -1)
+    return action_batch.reshape(n_envs, n_agents, -1)
+
+
+def compose_render_frame(frame, camera_mode="tiled", reference_car=0):
+    """Convert render output into one RGB frame for tiled or broadcast camera modes."""
+    if frame is None:
+        return None
+    frame_arr = np.asarray(frame)
+    if frame_arr.ndim == 3:
+        return frame_arr
+    if frame_arr.ndim == 4:
+        # MultiCarRacing returns one frame per car: (num_agents, H, W, C).
+        # Tiled mode keeps all cars visible; broadcast mode follows one car.
+        if str(camera_mode).strip().lower() == "broadcast":
+            idx = int(np.clip(int(reference_car), 0, frame_arr.shape[0] - 1))
+            return frame_arr[idx]
+        return np.concatenate(list(frame_arr), axis=1)
+    raise ValueError(f"Unsupported render frame shape: {frame_arr.shape}")
+
+
+def seed_environment(env, seed):
+    """Seed the environment and spaces for reproducible evaluation rollouts."""
+    seed = int(seed)
+    if hasattr(env, "seed"):
+        env.seed(seed)
+    elif hasattr(env, "unwrapped") and hasattr(env.unwrapped, "seed"):
+        env.unwrapped.seed(seed)
+    if hasattr(env, "action_space") and hasattr(env.action_space, "seed"):
+        env.action_space.seed(seed)
+    if hasattr(env, "observation_space") and hasattr(env.observation_space, "seed"):
+        env.observation_space.seed(seed)
+
+
+def resolve_output_path(explicit_path, results_dir: Path, model_path, seed: int, suffix: str, extension: str) -> Path:
+    """Resolve explicit or deterministic default output artifact paths."""
+    if explicit_path:
+        path = Path(explicit_path)
+    else:
+        model_stem = Path(model_path).stem.replace(" ", "_")
+        path = results_dir / f"{model_stem}_seed{int(seed)}_{suffix}.{extension}"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 class SingleAgentWrapper(gym.Wrapper):
@@ -79,7 +213,9 @@ class SingleAgentWrapper(gym.Wrapper):
 
     def step(self, action):
         if hasattr(self.env.action_space, "shape") and len(self.env.action_space.shape) == 2:
-            action = action.reshape(1, -1)
+            action = np.asarray(action, dtype=np.float64).reshape(1, -1)
+        elif action is not None:
+            action = np.asarray(action, dtype=np.float64)
         obs, reward, done, info = self.env.step(action)
         # Extract single agent observation if multi-agent format (num_agents, H, W, C)
         if hasattr(obs, "shape") and len(obs.shape) == 4 and obs.shape[0] == 1:
@@ -112,18 +248,22 @@ class SafetyGovernorWrapper(gym.Wrapper):
         if self.enabled and action is not None:
             base_env = self.env.unwrapped
             if hasattr(base_env, "cars") and base_env.cars:
-                car = base_env.cars[0]
-                vel = car.hull.linearVelocity
-                speed = float(np.linalg.norm([vel[0], vel[1]]))
                 speed_cap = self.speed_cap_ratio * self.speed_cap_top_speed
-                if speed_cap > 0.0 and speed > speed_cap:
-                    action_arr = np.asarray(action).copy()
+                if speed_cap > 0.0:
+                    action_arr = np.asarray(action, dtype=np.float64).copy()
                     orig_shape = action_arr.shape
-                    action_arr = action_arr.reshape(-1)
-                    if action_arr.size >= 3:
-                        action_arr[1] = 0.0
-                        action_arr[2] = max(float(action_arr[2]), self.speed_cap_brake)
-                    action = action_arr.reshape(orig_shape)
+                    if action_arr.ndim == 1:
+                        action_matrix = action_arr.reshape(1, -1)
+                    else:
+                        action_matrix = action_arr.reshape(action_arr.shape[0], -1)
+                    for idx, car in enumerate(base_env.cars[:action_matrix.shape[0]]):
+                        vel = car.hull.linearVelocity
+                        speed = float(np.linalg.norm([vel[0], vel[1]]))
+                        if speed <= speed_cap or action_matrix.shape[1] < 3:
+                            continue
+                        action_matrix[idx, 1] = 0.0
+                        action_matrix[idx, 2] = max(float(action_matrix[idx, 2]), self.speed_cap_brake)
+                    action = action_matrix.reshape(orig_shape)
         return self.env.step(action)
 
 
@@ -202,7 +342,7 @@ class ObservationAugmentWrapper(gym.Wrapper):
         return {"image": image, "state": state}, reward, done, info
 
 
-def create_env(config, render_mode='rgb_array'):
+def create_env(config, render_mode='rgb_array', seed=None, training_mode=False):
     """Create evaluation environment with rendering."""
     env_config = config['environment']
     env_id = env_config.get('env_id', 'MultiCarRacing-v0')
@@ -224,40 +364,70 @@ def create_env(config, render_mode='rgb_array'):
 
     if env_config.get('num_agents', 1) == 1:
         env = SingleAgentWrapper(env)
+    elif env_config.get('num_agents', 1) > 1:
+        if MultiAgentSpaceWrapper is None:
+            raise RuntimeError("MultiAgentSpaceWrapper unavailable. Ensure train.py is importable.")
+        env = MultiAgentSpaceWrapper(env, env_config.get('num_agents', 1))
+    if validate_agent_space_contract is not None:
+        validate_agent_space_contract(env, int(env_config.get('num_agents', 1)), "evaluate.create_env")
+
+    governor_config = config.get('safety_governor', {})
+    if governor_config.get('enabled', False):
+        env = SafetyGovernorWrapper(env, governor_config)
 
     reward_config = config.get('reward_shaping', {})
     if reward_config.get('enabled', False):
         if RewardShapingWrapper is None:
             raise RuntimeError("RewardShapingWrapper unavailable. Ensure train.py is importable.")
         env = RewardShapingWrapper(env, reward_config)
-
-    governor_config = config.get('safety_governor', {})
-    if governor_config.get('enabled', False):
-        env = SafetyGovernorWrapper(env, governor_config)
+        if set_reward_shaping_training_mode is not None:
+            set_reward_shaping_training_mode(env, training_mode)
 
     obs_config = config.get('observation', {})
     if obs_config.get('enabled', False):
+        if int(env_config.get('num_agents', 1)) > 1:
+            raise ValueError("Observation augmentation evaluation is not supported for multi-agent image observations.")
         env = ObservationAugmentWrapper(env, obs_config)
+    if seed is not None:
+        seed_environment(env, seed)
     
     return env
 
 
-def evaluate_torch_model(model_path, config, n_episodes=10, record_video=True, seed=42):
-    """Evaluate a Torch .pt checkpoint with live window and optional video."""
+def evaluate_torch_model(
+    model_path,
+    config,
+    n_episodes=10,
+    record_video=True,
+    seed=42,
+    show_window=False,
+    video_path=None,
+    target_loops=None,
+    max_steps=50000,
+    camera_mode="tiled",
+    reference_car=0,
+):
+    """Evaluate a Torch .pt checkpoint with optional video and optional live window."""
     if CnnActorCritic is None:
         raise RuntimeError("Cannot load Torch model: train.py CnnActorCritic not available")
     model_path = Path(model_path)
     if not model_path.is_file():
         raise FileNotFoundError(f"Torch checkpoint not found: {model_path}")
     print(f"Loading Torch checkpoint from {model_path}")
-    payload = torch.load(str(model_path), map_location="cpu")
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    payload = torch.load(str(model_path), map_location="cpu", weights_only=False)
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+    elif mps_is_available():
+        device = torch.device("mps")
+    else:
+        device = torch.device("cpu")
 
-    base_env = create_env(config)
-    # Observation from env is (H, W, C); policy expects (C, H, W)
-    raw_shape = base_env.observation_space.shape
-    obs_shape = (raw_shape[2], raw_shape[0], raw_shape[1])  # (C, H, W)
-    action_dim = int(np.prod(base_env.action_space.shape))
+    np.random.seed(seed)
+    torch.manual_seed(int(seed))
+    base_env = create_env(config, seed=seed, training_mode=False)
+    num_agents, obs_shape, obs_layout = infer_image_space_layout(base_env.observation_space.shape)
+    action_shape = tuple(base_env.action_space.shape)
+    action_dim = int(action_shape[-1] if len(action_shape) >= 2 else action_shape[0])
     action_low = np.array(base_env.action_space.low, dtype=np.float32)
     action_high = np.array(base_env.action_space.high, dtype=np.float32)
     training_cfg = config.get("training", {}) or {}
@@ -291,14 +461,56 @@ def evaluate_torch_model(model_path, config, n_episodes=10, record_video=True, s
     episode_times = []
     episode_offtrack = []
     episode_steer_variance = []
+    episode_mean_rank = []
+    episode_collision = []
+    episode_contact = []
+    episode_hook_contact = []
+    episode_contact_termination = []
+    episode_max_contact_steps = []
+    episode_mean_speed = []
+    episode_speed_std = []
+    episode_mean_throttle = []
+    episode_mean_brake = []
+    episode_mean_overtakes = []
+    episode_mean_front_gap = []
+    episode_min_front_gap = []
+    episode_mean_side_gap = []
+    episode_min_side_gap = []
+    episode_mean_front_closing_speed = []
     results_dir = Path(config["paths"]["results_dir"])
     results_dir.mkdir(parents=True, exist_ok=True)
     video_writer = None
-    video_path = results_dir / f"evaluation_torch_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4" if record_video else None
+    if record_video:
+        video_path = resolve_output_path(video_path, results_dir, model_path, seed, "evaluation", "mp4")
+    else:
+        video_path = None
 
-    np.random.seed(seed)
-    print(f"Evaluating Torch model for {n_episodes} episodes (live window + {'video' if record_video else 'no video'})...")
-    for episode in range(n_episodes):
+    target_loops = int(target_loops) if target_loops is not None else None
+    max_steps = int(max_steps) if max_steps is not None else None
+    camera_mode = str(camera_mode).strip().lower()
+    if camera_mode not in {"tiled", "broadcast"}:
+        raise ValueError(f"Unknown camera mode: {camera_mode}")
+    if target_loops is not None and target_loops <= 0:
+        raise ValueError("--target-loops must be a positive integer when provided.")
+    if max_steps is not None and max_steps <= 0:
+        raise ValueError("--max-steps must be a positive integer when provided.")
+    if target_loops is not None:
+        rollout_count = 1
+        print(
+            f"Evaluating Torch model in continuous rollout mode until lap_count>={target_loops} "
+            f"(camera={camera_mode}, ref_car={reference_car}, max_steps={max_steps})..."
+        )
+    else:
+        rollout_count = int(n_episodes)
+        print(
+            f"Evaluating Torch model for {rollout_count} episodes "
+            f"({'video' if record_video else 'no video'}, {'live window' if show_window else 'headless window'}, "
+            f"camera={camera_mode}, ref_car={reference_car})..."
+        )
+
+    achieved_loops = 0
+    stop_reason = "episodes_complete"
+    for episode in range(rollout_count):
         obs = base_env.reset()
         done = False
         episode_reward = 0.0
@@ -306,35 +518,126 @@ def evaluate_torch_model(model_path, config, n_episodes=10, record_video=True, s
         start_time = None
         offtrack_seen = False
         steer_values = []
-        while not done:
-            # (H,W,C) -> (1,C,H,W), normalize to [0,1]
-            obs_t = torch.as_tensor(obs, dtype=torch.float32, device=device) / 255.0
-            obs_t = obs_t.permute(2, 0, 1).unsqueeze(0)  # HWC -> CHW, add batch
+        rank_values = []
+        collision_seen = False
+        contact_seen = False
+        hook_contact_seen = False
+        contact_termination_seen = False
+        max_contact_steps = 0
+        speed_values = []
+        throttle_values = []
+        brake_values = []
+        overtake_count = 0
+        front_gap_values = []
+        side_gap_values = []
+        front_closing_values = []
+        inferred_laps_from_progress = 0
+        inferred_lap_latched = False
+        prev_ref_progress = None
+        step_count = 0
+        while True:
+            obs_policy = obs_to_policy_batch(obs, obs_layout)
+            obs_t = torch.as_tensor(obs_policy, dtype=torch.float32, device=device) / 255.0
             with torch.no_grad():
                 raw_action, _, _ = policy.act(obs_t, deterministic=True)
-            env_action = policy_cls.raw_to_env_action(raw_action).cpu().numpy().squeeze(0)
+            env_action = policy_cls.raw_to_env_action(raw_action).cpu().numpy()
+            env_action = action_batch_to_env(env_action, n_envs=1, n_agents=num_agents)
             env_action = np.clip(env_action, action_low, action_high)
+            if num_agents <= 1:
+                env_action = env_action.reshape(-1)
+            else:
+                env_action = env_action.reshape(num_agents, action_dim)
             obs, reward, done, info = base_env.step(env_action)
-            episode_reward += float(reward)
+            episode_reward += reward_to_scalar(reward)
             episode_length += 1
-            steer_values.append(float(env_action[0]))
-            info = info if isinstance(info, dict) else {}
-            if int(info.get("events/offtrack", 0)) > 0:
-                offtrack_seen = True
-            if start_time is None and info.get("time") is not None:
-                start_time = info["time"]
+            step_count += 1
+            flat_actions = np.asarray(env_action).reshape(-1, action_dim)
+            steer_values.extend(flat_actions[:, 0].astype(np.float32).tolist())
+            if action_dim >= 2:
+                throttle_values.extend(flat_actions[:, 1].astype(np.float32).tolist())
+            if action_dim >= 3:
+                brake_values.extend(flat_actions[:, 2].astype(np.float32).tolist())
+            agent_infos = info if isinstance(info, (list, tuple)) else [info]
+            info0 = first_agent_info(info)
+            for agent_info in agent_infos:
+                if not isinstance(agent_info, dict):
+                    continue
+                offtrack_seen = offtrack_seen or int(agent_info.get("events/offtrack", 0)) > 0
+                collision_seen = collision_seen or int(agent_info.get("events/collision", 0)) > 0
+                contact_seen = contact_seen or int(agent_info.get("events/contact", 0)) > 0
+                hook_contact_seen = hook_contact_seen or int(agent_info.get("events/hook_contact", 0)) > 0
+                contact_termination_seen = contact_termination_seen or int(agent_info.get("events/contact_termination", 0)) > 0
+                speed_values.append(float(agent_info.get("telemetry/speed", 0.0)))
+                max_contact_steps = max(max_contact_steps, int(agent_info.get("telemetry/collision_contact_steps", 0)))
+                overtake_count += int(agent_info.get("events/overtake", 0))
+                front_gap = float(agent_info.get("telemetry/front_gap", -1.0))
+                if front_gap >= 0.0 and np.isfinite(front_gap):
+                    front_gap_values.append(front_gap)
+                side_gap = float(agent_info.get("telemetry/side_gap", -1.0))
+                if side_gap >= 0.0 and np.isfinite(side_gap):
+                    side_gap_values.append(side_gap)
+                front_closing_speed = float(agent_info.get("telemetry/front_closing_speed", -1.0))
+                if front_closing_speed >= 0.0 and np.isfinite(front_closing_speed):
+                    front_closing_values.append(front_closing_speed)
+                if "telemetry/rank" in agent_info:
+                    rank_values.append(float(agent_info.get("telemetry/rank", 0.0)))
+            if start_time is None and info0.get("time") is not None:
+                start_time = info0["time"]
+            if target_loops is not None:
+                lap_counts = [
+                    int(agent_info.get("lap_count", 0))
+                    for agent_info in agent_infos
+                    if isinstance(agent_info, dict)
+                ]
+                if lap_counts:
+                    achieved_loops = max(achieved_loops, max(lap_counts))
+                ref_info = (
+                    agent_infos[int(np.clip(int(reference_car), 0, max(len(agent_infos) - 1, 0)))]
+                    if len(agent_infos) > 0 and isinstance(agent_infos[0], dict)
+                    else info0
+                )
+                ref_progress = ref_info.get("progress") if isinstance(ref_info, dict) else None
+                if ref_progress is not None:
+                    ref_progress = float(ref_progress)
+                    if prev_ref_progress is not None and ref_progress < (prev_ref_progress - 0.5):
+                        inferred_laps_from_progress += 1
+                    if ref_progress >= 0.999 and not inferred_lap_latched:
+                        inferred_laps_from_progress += 1
+                        inferred_lap_latched = True
+                    if ref_progress < 0.2:
+                        inferred_lap_latched = False
+                    prev_ref_progress = ref_progress
+                achieved_loops = max(achieved_loops, inferred_laps_from_progress)
             frame = base_env.render(mode="rgb_array")
             if frame is not None:
+                frame = compose_render_frame(frame, camera_mode=camera_mode, reference_car=reference_car)
                 if record_video:
                     if video_writer is None:
                         h, w = frame.shape[:2]
                         video_writer = cv2.VideoWriter(str(video_path), cv2.VideoWriter_fourcc(*"mp4v"), 30.0, (w, h))
                     video_writer.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
-                frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-                cv2.imshow("Racecar Gym (Torch policy)", frame_bgr)
-                cv2.waitKey(1)
-        progress = info.get("progress", 0.0)
-        final_time = info.get("time", 0.0)
+                if show_window:
+                    frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                    cv2.imshow("Racecar Gym (Torch policy)", frame_bgr)
+                    cv2.waitKey(1)
+            if done_to_bool(done):
+                stop_reason = "env_done"
+                break
+            if target_loops is not None and achieved_loops >= target_loops:
+                stop_reason = f"target_loops_{target_loops}"
+                print(f"Reached target loops: {achieved_loops}/{target_loops} at step {step_count}")
+                break
+            if target_loops is not None and max_steps is not None and step_count >= max_steps:
+                stop_reason = f"max_steps_{max_steps}"
+                print(f"Reached max_steps={max_steps} before target loops (achieved_loops={achieved_loops})")
+                break
+        progress_values = [
+            float(agent_info.get("progress", 0.0))
+            for agent_info in (info if isinstance(info, (list, tuple)) else [info])
+            if isinstance(agent_info, dict)
+        ]
+        progress = float(np.mean(progress_values)) if progress_values else 0.0
+        final_time = info0.get("time", 0.0)
         episode_time = final_time - start_time if start_time is not None else 0.0
         episode_rewards.append(episode_reward)
         episode_lengths.append(episode_length)
@@ -342,12 +645,37 @@ def evaluate_torch_model(model_path, config, n_episodes=10, record_video=True, s
         episode_times.append(episode_time)
         episode_offtrack.append(int(offtrack_seen))
         episode_steer_variance.append(float(np.var(steer_values)) if len(steer_values) > 1 else 0.0)
-        print(f"Episode {episode + 1}/{n_episodes}: Reward={episode_reward:.2f}, Length={episode_length}, Progress={progress:.2%}, Time={episode_time:.2f}s")
+        episode_mean_rank.append(float(np.mean(rank_values)) if rank_values else 1.0)
+        episode_collision.append(int(collision_seen))
+        episode_contact.append(int(contact_seen))
+        episode_hook_contact.append(int(hook_contact_seen))
+        episode_contact_termination.append(int(contact_termination_seen))
+        episode_max_contact_steps.append(int(max_contact_steps))
+        episode_mean_speed.append(float(np.mean(speed_values)) if speed_values else 0.0)
+        episode_speed_std.append(float(np.std(speed_values)) if len(speed_values) > 1 else 0.0)
+        episode_mean_throttle.append(float(np.mean(throttle_values)) if throttle_values else 0.0)
+        episode_mean_brake.append(float(np.mean(brake_values)) if brake_values else 0.0)
+        episode_mean_overtakes.append(int(overtake_count))
+        episode_mean_front_gap.append(float(np.mean(front_gap_values)) if front_gap_values else 0.0)
+        episode_min_front_gap.append(float(np.min(front_gap_values)) if front_gap_values else 0.0)
+        episode_mean_side_gap.append(float(np.mean(side_gap_values)) if side_gap_values else 0.0)
+        episode_min_side_gap.append(float(np.min(side_gap_values)) if side_gap_values else 0.0)
+        episode_mean_front_closing_speed.append(float(np.mean(front_closing_values)) if front_closing_values else 0.0)
+        print(
+            f"Episode {episode + 1}/{rollout_count}: Reward={episode_reward:.2f}, "
+            f"Length={episode_length}, Progress={progress:.2%}, Time={episode_time:.2f}s, "
+            f"MeanRank={np.mean(rank_values) if rank_values else 1.0:.2f}, "
+            f"Collision={int(collision_seen)}, Hook={int(hook_contact_seen)}, "
+            f"ContactTerminate={int(contact_termination_seen)}"
+        )
+        if target_loops is not None:
+            break
     if video_writer is not None:
         video_writer.release()
         print(f"Video saved to {video_path}")
     base_env.close()
-    cv2.destroyAllWindows()
+    if show_window:
+        cv2.destroyAllWindows()
     stats = {
         "mean_reward": float(np.mean(episode_rewards)),
         "std_reward": float(np.std(episode_rewards)),
@@ -361,25 +689,68 @@ def evaluate_torch_model(model_path, config, n_episodes=10, record_video=True, s
         "std_time": float(np.std(episode_times)),
         "offtrack_rate": float(np.mean(episode_offtrack)),
         "mean_steer_variance": float(np.mean(episode_steer_variance)),
+        "mean_rank": float(np.mean(episode_mean_rank)),
+        "collision_rate": float(np.mean(episode_collision)),
+        "contact_rate": float(np.mean(episode_contact)),
+        "hook_contact_rate": float(np.mean(episode_hook_contact)),
+        "contact_termination_rate": float(np.mean(episode_contact_termination)),
+        "mean_max_contact_steps": float(np.mean(episode_max_contact_steps)),
+        "mean_speed": float(np.mean(episode_mean_speed)),
+        "mean_speed_std": float(np.mean(episode_speed_std)),
+        "mean_throttle": float(np.mean(episode_mean_throttle)),
+        "mean_brake": float(np.mean(episode_mean_brake)),
+        "mean_overtakes": float(np.mean(episode_mean_overtakes)),
+        "mean_front_gap": float(np.mean(episode_mean_front_gap)),
+        "min_front_gap": float(np.mean(episode_min_front_gap)),
+        "mean_side_gap": float(np.mean(episode_mean_side_gap)),
+        "min_side_gap": float(np.mean(episode_min_side_gap)),
+        "mean_front_closing_speed": float(np.mean(episode_mean_front_closing_speed)),
         "episode_rewards": episode_rewards,
         "episode_lengths": episode_lengths,
         "episode_progress": episode_progress,
         "episode_times": episode_times,
         "episode_offtrack": episode_offtrack,
         "episode_steer_variance": episode_steer_variance,
+        "episode_mean_rank": episode_mean_rank,
+        "episode_collision": episode_collision,
+        "episode_contact": episode_contact,
+        "episode_hook_contact": episode_hook_contact,
+        "episode_contact_termination": episode_contact_termination,
+        "episode_max_contact_steps": episode_max_contact_steps,
+        "episode_mean_speed": episode_mean_speed,
+        "episode_speed_std": episode_speed_std,
+        "episode_mean_throttle": episode_mean_throttle,
+        "episode_mean_brake": episode_mean_brake,
+        "episode_mean_overtakes": episode_mean_overtakes,
+        "episode_mean_front_gap": episode_mean_front_gap,
+        "episode_min_front_gap": episode_min_front_gap,
+        "episode_mean_side_gap": episode_mean_side_gap,
+        "episode_min_side_gap": episode_min_side_gap,
+        "episode_mean_front_closing_speed": episode_mean_front_closing_speed,
+        "target_loops": int(target_loops) if target_loops is not None else None,
+        "achieved_loops": int(achieved_loops),
+        "camera_mode": camera_mode,
+        "reference_car": int(reference_car),
+        "max_steps": int(max_steps) if max_steps is not None else None,
+        "stop_reason": stop_reason,
     }
     return stats, str(video_path) if video_path else None
 
 
-def evaluate_model(model_path, config, n_episodes=10, record_video=True, seed=42):
+def evaluate_model(model_path, config, n_episodes=10, record_video=True, seed=42,
+                   show_window=False, video_path=None):
     """Evaluate a trained SB3 model."""
+    if int(config.get('environment', {}).get('num_agents', 1)) > 1:
+        raise ValueError("SB3 evaluation is not supported for multi-agent configs in this repo.")
     print(f"Loading model from {model_path}")
     model = PPO.load(model_path)
+    np.random.seed(seed)
+    torch.manual_seed(int(seed))
     
     # Create environment
     # Note: render_mode parameter is ignored in create_env for Gym 0.17.3 compatibility
     # Rendering is handled via env.render() calls
-    base_env = create_env(config, render_mode='rgb_array' if record_video else None)
+    base_env = create_env(config, render_mode='rgb_array' if record_video else None, seed=seed)
     env = DummyVecEnv([lambda: base_env])
     if not config.get('observation', {}).get('enabled', False):
         env = VecTransposeImage(env)
@@ -397,10 +768,10 @@ def evaluate_model(model_path, config, n_episodes=10, record_video=True, seed=42
     
     # Create video writer lazily after first frame
     video_writer = None
-    video_path = None
     if record_video:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        video_path = results_dir / f'evaluation_{timestamp}.mp4'
+        video_path = resolve_output_path(video_path, results_dir, model_path, seed, "evaluation", "mp4")
+    else:
+        video_path = None
     
     print(f"Evaluating model for {n_episodes} episodes...")
     
@@ -413,24 +784,25 @@ def evaluate_model(model_path, config, n_episodes=10, record_video=True, seed=42
         offtrack_seen = False
         steer_values = []
         
-        while not done:
+        while not done_to_bool(done):
             action, _ = model.predict(obs, deterministic=True)
             steer_values.append(float(np.asarray(action).reshape(-1)[0]))
             
             obs, reward, done, info = env.step(action)
             
-            episode_reward += float(reward[0])
+            episode_reward += reward_to_scalar(reward)
             episode_length += 1
             
             # Record first frame time
-            info0 = info[0] if isinstance(info, (list, tuple)) else info
+            info_env = info[0] if isinstance(info, (list, tuple)) else info
+            info0 = first_agent_info(info_env)
             if start_time is None and isinstance(info0, dict) and 'time' in info0:
                 start_time = info0['time']
             if isinstance(info0, dict) and int(info0.get("events/offtrack", 0)) > 0:
                 offtrack_seen = True
             
             # Get frame for video or live view
-            frame = base_env.render(mode='rgb_array')
+            frame = compose_render_frame(base_env.render(mode='rgb_array'))
             
             # Record video frame
             if record_video:
@@ -443,7 +815,7 @@ def evaluate_model(model_path, config, n_episodes=10, record_video=True, seed=42
                     video_writer.write(frame_bgr)
             
             # Show live window
-            if frame is not None:
+            if frame is not None and show_window:
                 # Convert if not already done
                 if 'frame_bgr' not in locals():
                      frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
@@ -476,7 +848,8 @@ def evaluate_model(model_path, config, n_episodes=10, record_video=True, seed=42
     
     env.close()
     base_env.close()
-    cv2.destroyAllWindows()
+    if show_window:
+        cv2.destroyAllWindows()
     
     # Calculate statistics
     stats = {
@@ -517,13 +890,49 @@ def print_stats(stats):
         print(f"Off-track Rate: {stats['offtrack_rate']:.2%}")
     if 'mean_steer_variance' in stats:
         print(f"Mean Steering Variance: {stats['mean_steer_variance']:.5f}")
+    if 'mean_rank' in stats:
+        print(f"Mean Rank: {stats['mean_rank']:.2f}")
+    if 'collision_rate' in stats:
+        print(f"Collision Rate: {stats['collision_rate']:.2%}")
+    if 'contact_rate' in stats:
+        print(f"Contact Rate: {stats['contact_rate']:.2%}")
+    if 'hook_contact_rate' in stats:
+        print(f"Hook-Contact Rate: {stats['hook_contact_rate']:.2%}")
+    if 'contact_termination_rate' in stats:
+        print(f"Contact-Termination Rate: {stats['contact_termination_rate']:.2%}")
+    if 'mean_max_contact_steps' in stats:
+        print(f"Mean Max Contact Steps: {stats['mean_max_contact_steps']:.2f}")
+    if 'mean_speed' in stats:
+        print(f"Mean Speed: {stats['mean_speed']:.2f}")
+    if 'mean_speed_std' in stats:
+        print(f"Mean Speed Std: {stats['mean_speed_std']:.2f}")
+    if 'mean_throttle' in stats:
+        print(f"Mean Throttle: {stats['mean_throttle']:.2f}")
+    if 'mean_brake' in stats:
+        print(f"Mean Brake: {stats['mean_brake']:.2f}")
+    if 'mean_overtakes' in stats:
+        print(f"Mean Overtakes: {stats['mean_overtakes']:.2f}")
+    if 'mean_front_gap' in stats:
+        print(f"Mean Front Gap: {stats['mean_front_gap']:.2f}")
+    if 'min_front_gap' in stats:
+        print(f"Min Front Gap (mean across episodes): {stats['min_front_gap']:.2f}")
+    if 'mean_side_gap' in stats:
+        print(f"Mean Side Gap: {stats['mean_side_gap']:.2f}")
+    if 'min_side_gap' in stats:
+        print(f"Min Side Gap (mean across episodes): {stats['min_side_gap']:.2f}")
+    if 'mean_front_closing_speed' in stats:
+        print(f"Mean Front Closing Speed: {stats['mean_front_closing_speed']:.2f}")
+    if stats.get('target_loops') is not None:
+        print(f"Loop Target: {int(stats['target_loops'])} | Achieved: {int(stats.get('achieved_loops', 0))}")
+    if stats.get('camera_mode') is not None:
+        print(f"Camera Mode: {stats.get('camera_mode')} | Reference Car: {int(stats.get('reference_car', 0))}")
+    if stats.get('stop_reason') is not None:
+        print(f"Stop Reason: {stats.get('stop_reason')}")
     print("="*50)
 
 
 def save_stats(stats, output_path):
     """Save statistics to file."""
-    import json
-    
     # Convert numpy arrays to lists for JSON serialization
     stats_json = {
         'mean_reward': float(stats['mean_reward']),
@@ -538,12 +947,56 @@ def save_stats(stats, output_path):
         'std_time': float(stats['std_time']),
         'offtrack_rate': float(stats.get('offtrack_rate', 0.0)),
         'mean_steer_variance': float(stats.get('mean_steer_variance', 0.0)),
+        'mean_rank': float(stats.get('mean_rank', 1.0)),
+        'collision_rate': float(stats.get('collision_rate', 0.0)),
+        'contact_rate': float(stats.get('contact_rate', 0.0)),
+        'hook_contact_rate': float(stats.get('hook_contact_rate', 0.0)),
+        'contact_termination_rate': float(stats.get('contact_termination_rate', 0.0)),
+        'mean_max_contact_steps': float(stats.get('mean_max_contact_steps', 0.0)),
         'episode_rewards': [float(r) for r in stats['episode_rewards']],
         'episode_lengths': [int(l) for l in stats['episode_lengths']],
         'episode_progress': [float(p) for p in stats['episode_progress']],
         'episode_times': [float(t) for t in stats['episode_times']],
         'episode_offtrack': [int(v) for v in stats.get('episode_offtrack', [])],
         'episode_steer_variance': [float(v) for v in stats.get('episode_steer_variance', [])],
+        'episode_mean_rank': [float(v) for v in stats.get('episode_mean_rank', [])],
+        'episode_collision': [int(v) for v in stats.get('episode_collision', [])],
+        'episode_contact': [int(v) for v in stats.get('episode_contact', [])],
+        'episode_hook_contact': [int(v) for v in stats.get('episode_hook_contact', [])],
+        'episode_contact_termination': [int(v) for v in stats.get('episode_contact_termination', [])],
+        'episode_max_contact_steps': [int(v) for v in stats.get('episode_max_contact_steps', [])],
+        'mean_speed': float(stats.get('mean_speed', 0.0)),
+        'mean_speed_std': float(stats.get('mean_speed_std', 0.0)),
+        'mean_throttle': float(stats.get('mean_throttle', 0.0)),
+        'mean_brake': float(stats.get('mean_brake', 0.0)),
+        'mean_overtakes': float(stats.get('mean_overtakes', 0.0)),
+        'mean_front_gap': float(stats.get('mean_front_gap', 0.0)),
+        'min_front_gap': float(stats.get('min_front_gap', 0.0)),
+        'mean_side_gap': float(stats.get('mean_side_gap', 0.0)),
+        'min_side_gap': float(stats.get('min_side_gap', 0.0)),
+        'mean_front_closing_speed': float(stats.get('mean_front_closing_speed', 0.0)),
+        'episode_mean_speed': [float(v) for v in stats.get('episode_mean_speed', [])],
+        'episode_speed_std': [float(v) for v in stats.get('episode_speed_std', [])],
+        'episode_mean_throttle': [float(v) for v in stats.get('episode_mean_throttle', [])],
+        'episode_mean_brake': [float(v) for v in stats.get('episode_mean_brake', [])],
+        'episode_mean_overtakes': [int(v) for v in stats.get('episode_mean_overtakes', [])],
+        'episode_mean_front_gap': [float(v) for v in stats.get('episode_mean_front_gap', [])],
+        'episode_min_front_gap': [float(v) for v in stats.get('episode_min_front_gap', [])],
+        'episode_mean_side_gap': [float(v) for v in stats.get('episode_mean_side_gap', [])],
+        'episode_min_side_gap': [float(v) for v in stats.get('episode_min_side_gap', [])],
+        'episode_mean_front_closing_speed': [float(v) for v in stats.get('episode_mean_front_closing_speed', [])],
+        'target_loops': (int(stats['target_loops']) if stats.get('target_loops') is not None else None),
+        'achieved_loops': int(stats.get('achieved_loops', 0)),
+        'camera_mode': stats.get('camera_mode'),
+        'reference_car': int(stats.get('reference_car', 0)),
+        'max_steps': (int(stats['max_steps']) if stats.get('max_steps') is not None else None),
+        'stop_reason': stats.get('stop_reason'),
+        'model_path': stats.get('model_path'),
+        'config_path': stats.get('config_path'),
+        'seed': int(stats.get('seed', 0)),
+        'episodes': int(stats.get('episodes', len(stats.get('episode_rewards', [])))),
+        'video_path': stats.get('video_path'),
+        'evaluated_at': stats.get('evaluated_at'),
     }
     
     with open(output_path, 'w') as f:
@@ -583,6 +1036,48 @@ def main():
         default=42,
         help='Random seed for evaluation'
     )
+    parser.add_argument(
+        '--output-json',
+        type=str,
+        default=None,
+        help='Optional explicit path for the saved JSON summary'
+    )
+    parser.add_argument(
+        '--output-video',
+        type=str,
+        default=None,
+        help='Optional explicit path for the saved evaluation video'
+    )
+    parser.add_argument(
+        '--show-window',
+        action='store_true',
+        help='Display the OpenCV live window during evaluation'
+    )
+    parser.add_argument(
+        '--target-loops',
+        type=int,
+        default=None,
+        help='Optional loop target for a single continuous rollout (Torch evaluation only).'
+    )
+    parser.add_argument(
+        '--camera-mode',
+        type=str,
+        default='tiled',
+        choices=['tiled', 'broadcast'],
+        help='Video camera mode: tiled (all cars) or broadcast (single reference car).'
+    )
+    parser.add_argument(
+        '--reference-car',
+        type=int,
+        default=0,
+        help='Reference car index for broadcast camera mode (Torch evaluation only).'
+    )
+    parser.add_argument(
+        '--max-steps',
+        type=int,
+        default=50000,
+        help='Safety cap on rollout steps for target-loops mode (Torch evaluation only).'
+    )
     
     args = parser.parse_args()
     
@@ -598,6 +1093,12 @@ def main():
             n_episodes=args.episodes,
             record_video=not args.no_video,
             seed=args.seed,
+            show_window=args.show_window,
+            video_path=args.output_video,
+            target_loops=args.target_loops,
+            max_steps=args.max_steps,
+            camera_mode=args.camera_mode,
+            reference_car=args.reference_car,
         )
     else:
         stats, video_path = evaluate_model(
@@ -606,15 +1107,26 @@ def main():
             n_episodes=args.episodes,
             record_video=not args.no_video,
             seed=args.seed,
+            show_window=args.show_window,
+            video_path=args.output_video,
         )
+    stats["model_path"] = str(model_path.resolve())
+    stats["config_path"] = str(Path(args.config).resolve())
+    stats["seed"] = int(args.seed)
+    stats["episodes"] = int(args.episodes)
+    stats["video_path"] = str(video_path) if video_path else None
+    stats["evaluated_at"] = datetime.now().isoformat()
     
     # Print statistics
     print_stats(stats)
     
     # Save statistics
-    results_dir = Path(config['paths']['results_dir'])
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    stats_path = results_dir / f'evaluation_stats_{timestamp}.json'
+    if args.output_json:
+        stats_path = Path(args.output_json)
+        stats_path.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        results_dir = Path(config['paths']['results_dir'])
+        stats_path = resolve_output_path(None, results_dir, model_path, args.seed, "evaluation_stats", "json")
     save_stats(stats, stats_path)
 
 

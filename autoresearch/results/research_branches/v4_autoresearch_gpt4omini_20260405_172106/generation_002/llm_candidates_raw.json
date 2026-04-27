@@ -1,0 +1,22 @@
+{
+  "candidates": [
+    {
+      "name": "increase_overtake_bonus",
+      "rationale": "Encourage clean overtakes to improve race interaction.",
+      "config_overrides": {
+        "reward_shaping.multi_agent.overtake_bonus": 0.3
+      },
+      "code_change": "keep_parent",
+      "resume_policy": "inherit_parent"
+    },
+    {
+      "name": "reduce_contact_penalty",
+      "rationale": "Lower contact penalties to promote riskier interactions while racing.",
+      "config_overrides": {
+        "reward_shaping.multi_agent.collision_high_penalty": -8.0
+      },
+      "code_change": "keep_parent",
+      "resume_policy": "inherit_parent"
+    }
+  ]
+}

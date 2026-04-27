@@ -1,0 +1,4 @@
+Generation 1
+Promoted candidate: none
+
+- baseline_continuation: stage=smoke_control, reward=-999.00, progress=0.000, offtrack=1.000, contact=0.000, hook=0.000, overtakes=0.00, score=-1239.00, promoted=False, gate=['experiment_failed', 'progress_too_low', 'offtrack_near_total', 'steering_variance_dead', 'smoke_control_offtrack']

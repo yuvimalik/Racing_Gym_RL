@@ -1,0 +1,61 @@
+{
+  "generation": 1,
+  "candidate_index": 4,
+  "candidate_name": "steer_smoothness_penalty_adjustment",
+  "hypothesis": "Increasing the steer smoothness penalty will help agents maintain better control over corners.",
+  "rationale": "A higher steer smoothness penalty may lead to smoother steering and reduced contact issues.",
+  "source": "llm",
+  "config_overrides": {
+    "reward_shaping.steer_smoothness_penalty": 0.1
+  },
+  "candidate_config_path": "/Users/epablo/Documents/UPenn/SophmoreSpring26/STAT4830/WedApr1_Work/Racing_Gym_RL/autoresearch/results/research_branches/my_run/generation_001/04_steer_smoothness_penalty_adjustment/candidate_config.yaml",
+  "candidate_surface_path": "/Users/epablo/Documents/UPenn/SophmoreSpring26/STAT4830/WedApr1_Work/Racing_Gym_RL/autoresearch/results/research_branches/my_run/generation_001/04_steer_smoothness_penalty_adjustment/candidate_surface.py",
+  "stage_records": [
+    {
+      "stage": "screen",
+      "screen_substage": "smoke_control",
+      "timesteps": 100000,
+      "passed_gate": false,
+      "gate_reasons": [
+        "experiment_failed",
+        "progress_too_low",
+        "offtrack_near_total",
+        "steering_variance_dead",
+        "smoke_control_offtrack"
+      ],
+      "score": -1239.0,
+      "patterns": [
+        "speed_collapse"
+      ],
+      "mean_reward": -999.0,
+      "error": "train.py failed before producing a checkpoint",
+      "train_return_code": 1,
+      "train_wall_clock_seconds": 3.9112319946289062,
+      "effective_config_path": "/Users/epablo/Documents/UPenn/SophmoreSpring26/STAT4830/WedApr1_Work/Racing_Gym_RL/autoresearch/results/research_branches/my_run/generation_001/04_steer_smoothness_penalty_adjustment/screen/effective_config.yaml",
+      "run_summary_path": null,
+      "return_code": 0
+    }
+  ],
+  "passed_gate": false,
+  "gate_reasons": [
+    "experiment_failed",
+    "progress_too_low",
+    "offtrack_near_total",
+    "steering_variance_dead",
+    "smoke_control_offtrack"
+  ],
+  "score": -1239.0,
+  "patterns": [
+    "speed_collapse"
+  ],
+  "mean_reward": -999.0,
+  "mean_progress": 0.0,
+  "offtrack_rate": null,
+  "contact_rate": null,
+  "hook_contact_rate": null,
+  "contact_termination_rate": null,
+  "mean_speed": null,
+  "mean_overtakes": null,
+  "checkpoint_path": null,
+  "error": "train.py failed before producing a checkpoint"
+}

@@ -1,0 +1,8 @@
+{
+  "mean_reward": -999.0,
+  "error": "train.py failed before producing a checkpoint",
+  "train_return_code": 1,
+  "train_wall_clock_seconds": 3.9112319946289062,
+  "effective_config_path": "/Users/epablo/Documents/UPenn/SophmoreSpring26/STAT4830/WedApr1_Work/Racing_Gym_RL/autoresearch/results/research_branches/my_run/generation_001/04_steer_smoothness_penalty_adjustment/screen/effective_config.yaml",
+  "run_summary_path": null
+}

@@ -1,0 +1,27 @@
+Candidate reduce_action_exploration_steer_general (post-run)
+============================================================
+
+Rationale: Reducing the maximum allowed standard deviation for steering and general actions (throttle/brake) to encourage more stable and less erratic policy exploration, addressing instability and off-track patterns.
+Parent patterns: []
+
+Config changes:
+- ppo.max_log_std: 0.5 -> 0.0
+- ppo.steer_max_log_std: 0.0 -> -0.5
+
+Code changes:
+No code changes.
+
+Metrics:
+- mean_reward: -301.47
+- mean_progress: 0.2010
+- offtrack_rate: 0.7707
+- mean_speed: 19.90
+- mean_throttle: 0.98
+- mean_brake: 0.00
+- mean_steer_variance: 0.04233
+- mean_episode_length: 1122.0
+- steps_per_second: 160.7
+
+Inferred patterns: ['throttle_saturation_no_brake']
+Gate reasons: ['offtrack>0.600']
+Promoted: False

@@ -1,0 +1,10 @@
+{
+  "generation": 1,
+  "candidate_index": 1,
+  "candidate_name": "baseline_continuation",
+  "rationale": "Continue training the current parent unchanged as the control candidate.",
+  "source": "baseline",
+  "config_overrides": {},
+  "code_change": "keep_parent",
+  "parent_checkpoint": "C:\\Users\\yuv05\\OneDrive\\Documents\\GitHub\\Racing_Gym_RL\\models\\v2_ceiling_cap100\\best_model_torch.pt"
+}

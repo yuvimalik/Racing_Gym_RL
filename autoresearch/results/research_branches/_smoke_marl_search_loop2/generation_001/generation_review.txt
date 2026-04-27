@@ -1,0 +1,5 @@
+Generation 1
+Promoted: baseline_continuation
+
+- baseline_continuation: score=36.00, gate=[], err=None
+- dry_run_synthetic: score=36.00, gate=[], err=None

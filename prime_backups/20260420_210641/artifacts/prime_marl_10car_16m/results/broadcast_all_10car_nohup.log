@@ -1,0 +1,411 @@
+Exporting broadcast 5-loop video (reference car 0)...
+/workspace/Racing_Gym_RL/venv/lib/python3.11/site-packages/gym/logger.py:30: UserWarning: [33mWARN: Box bound precision lowered by casting to float32[0m
+  warnings.warn(colorize('%s: %s'%('WARN', msg % args), 'yellow'))
+Loading Torch checkpoint from artifacts/prime_marl_10car_16m/models/best_model_torch.pt
+Using torch policy variant: autoresearch_run_008
+Evaluating Torch model in continuous rollout mode until lap_count>=5 (camera=broadcast, ref_car=0, max_steps=120000)...
+Track generation: 1208..1514 -> 306-tiles track
+Episode 1/1: Reward=342.53, Length=1370, Progress=75.57%, Time=0.00s, MeanRank=5.50, Collision=0, Hook=0, ContactTerminate=0
+Video saved to artifacts/prime_marl_10car_16m/results/5loop_videos_per_car/ten_car_5loops_broadcast_seed42_car0.mp4
+
+==================================================
+EVALUATION RESULTS
+==================================================
+Mean Reward: 342.53 +/- 0.00
+Reward Range: [342.53, 342.53]
+Mean Episode Length: 1370.0 +/- 0.0
+Mean Progress: 75.57% +/- 0.00%
+Mean Episode Time: 0.00s +/- 0.00s
+Off-track Rate: 100.00%
+Mean Steering Variance: 0.09655
+Mean Rank: 5.50
+Collision Rate: 0.00%
+Contact Rate: 0.00%
+Hook-Contact Rate: 0.00%
+Contact-Termination Rate: 0.00%
+Mean Max Contact Steps: 2.00
+Mean Speed: 28.59
+Mean Speed Std: 2.51
+Mean Throttle: 0.98
+Mean Brake: 0.00
+Mean Overtakes: 2965.00
+Mean Front Gap: 12.63
+Min Front Gap (mean across episodes): 3.38
+Mean Side Gap: 8.10
+Min Side Gap (mean across episodes): 2.14
+Mean Front Closing Speed: 0.64
+Loop Target: 5 | Achieved: 0
+Camera Mode: broadcast | Reference Car: 0
+Stop Reason: env_done
+==================================================
+Statistics saved to artifacts/prime_marl_10car_16m/results/5loop_videos_per_car/ten_car_5loops_broadcast_seed42_car0.json
+Exporting broadcast 5-loop video (reference car 1)...
+/workspace/Racing_Gym_RL/venv/lib/python3.11/site-packages/gym/logger.py:30: UserWarning: [33mWARN: Box bound precision lowered by casting to float32[0m
+  warnings.warn(colorize('%s: %s'%('WARN', msg % args), 'yellow'))
+Loading Torch checkpoint from artifacts/prime_marl_10car_16m/models/best_model_torch.pt
+Using torch policy variant: autoresearch_run_008
+Evaluating Torch model in continuous rollout mode until lap_count>=5 (camera=broadcast, ref_car=1, max_steps=120000)...
+Track generation: 1208..1514 -> 306-tiles track
+Episode 1/1: Reward=342.53, Length=1370, Progress=75.57%, Time=0.00s, MeanRank=5.50, Collision=0, Hook=0, ContactTerminate=0
+Video saved to artifacts/prime_marl_10car_16m/results/5loop_videos_per_car/ten_car_5loops_broadcast_seed42_car1.mp4
+
+==================================================
+EVALUATION RESULTS
+==================================================
+Mean Reward: 342.53 +/- 0.00
+Reward Range: [342.53, 342.53]
+Mean Episode Length: 1370.0 +/- 0.0
+Mean Progress: 75.57% +/- 0.00%
+Mean Episode Time: 0.00s +/- 0.00s
+Off-track Rate: 100.00%
+Mean Steering Variance: 0.09655
+Mean Rank: 5.50
+Collision Rate: 0.00%
+Contact Rate: 0.00%
+Hook-Contact Rate: 0.00%
+Contact-Termination Rate: 0.00%
+Mean Max Contact Steps: 2.00
+Mean Speed: 28.59
+Mean Speed Std: 2.51
+Mean Throttle: 0.98
+Mean Brake: 0.00
+Mean Overtakes: 2965.00
+Mean Front Gap: 12.63
+Min Front Gap (mean across episodes): 3.38
+Mean Side Gap: 8.10
+Min Side Gap (mean across episodes): 2.14
+Mean Front Closing Speed: 0.64
+Loop Target: 5 | Achieved: 0
+Camera Mode: broadcast | Reference Car: 1
+Stop Reason: env_done
+==================================================
+Statistics saved to artifacts/prime_marl_10car_16m/results/5loop_videos_per_car/ten_car_5loops_broadcast_seed42_car1.json
+Exporting broadcast 5-loop video (reference car 2)...
+/workspace/Racing_Gym_RL/venv/lib/python3.11/site-packages/gym/logger.py:30: UserWarning: [33mWARN: Box bound precision lowered by casting to float32[0m
+  warnings.warn(colorize('%s: %s'%('WARN', msg % args), 'yellow'))
+Loading Torch checkpoint from artifacts/prime_marl_10car_16m/models/best_model_torch.pt
+Using torch policy variant: autoresearch_run_008
+Evaluating Torch model in continuous rollout mode until lap_count>=5 (camera=broadcast, ref_car=2, max_steps=120000)...
+Track generation: 1208..1514 -> 306-tiles track
+Episode 1/1: Reward=342.53, Length=1370, Progress=75.57%, Time=0.00s, MeanRank=5.50, Collision=0, Hook=0, ContactTerminate=0
+Video saved to artifacts/prime_marl_10car_16m/results/5loop_videos_per_car/ten_car_5loops_broadcast_seed42_car2.mp4
+
+==================================================
+EVALUATION RESULTS
+==================================================
+Mean Reward: 342.53 +/- 0.00
+Reward Range: [342.53, 342.53]
+Mean Episode Length: 1370.0 +/- 0.0
+Mean Progress: 75.57% +/- 0.00%
+Mean Episode Time: 0.00s +/- 0.00s
+Off-track Rate: 100.00%
+Mean Steering Variance: 0.09655
+Mean Rank: 5.50
+Collision Rate: 0.00%
+Contact Rate: 0.00%
+Hook-Contact Rate: 0.00%
+Contact-Termination Rate: 0.00%
+Mean Max Contact Steps: 2.00
+Mean Speed: 28.59
+Mean Speed Std: 2.51
+Mean Throttle: 0.98
+Mean Brake: 0.00
+Mean Overtakes: 2965.00
+Mean Front Gap: 12.63
+Min Front Gap (mean across episodes): 3.38
+Mean Side Gap: 8.10
+Min Side Gap (mean across episodes): 2.14
+Mean Front Closing Speed: 0.64
+Loop Target: 5 | Achieved: 0
+Camera Mode: broadcast | Reference Car: 2
+Stop Reason: env_done
+==================================================
+Statistics saved to artifacts/prime_marl_10car_16m/results/5loop_videos_per_car/ten_car_5loops_broadcast_seed42_car2.json
+Exporting broadcast 5-loop video (reference car 3)...
+/workspace/Racing_Gym_RL/venv/lib/python3.11/site-packages/gym/logger.py:30: UserWarning: [33mWARN: Box bound precision lowered by casting to float32[0m
+  warnings.warn(colorize('%s: %s'%('WARN', msg % args), 'yellow'))
+Loading Torch checkpoint from artifacts/prime_marl_10car_16m/models/best_model_torch.pt
+Using torch policy variant: autoresearch_run_008
+Evaluating Torch model in continuous rollout mode until lap_count>=5 (camera=broadcast, ref_car=3, max_steps=120000)...
+Track generation: 1208..1514 -> 306-tiles track
+Episode 1/1: Reward=342.53, Length=1370, Progress=75.57%, Time=0.00s, MeanRank=5.50, Collision=0, Hook=0, ContactTerminate=0
+Video saved to artifacts/prime_marl_10car_16m/results/5loop_videos_per_car/ten_car_5loops_broadcast_seed42_car3.mp4
+
+==================================================
+EVALUATION RESULTS
+==================================================
+Mean Reward: 342.53 +/- 0.00
+Reward Range: [342.53, 342.53]
+Mean Episode Length: 1370.0 +/- 0.0
+Mean Progress: 75.57% +/- 0.00%
+Mean Episode Time: 0.00s +/- 0.00s
+Off-track Rate: 100.00%
+Mean Steering Variance: 0.09655
+Mean Rank: 5.50
+Collision Rate: 0.00%
+Contact Rate: 0.00%
+Hook-Contact Rate: 0.00%
+Contact-Termination Rate: 0.00%
+Mean Max Contact Steps: 2.00
+Mean Speed: 28.59
+Mean Speed Std: 2.51
+Mean Throttle: 0.98
+Mean Brake: 0.00
+Mean Overtakes: 2965.00
+Mean Front Gap: 12.63
+Min Front Gap (mean across episodes): 3.38
+Mean Side Gap: 8.10
+Min Side Gap (mean across episodes): 2.14
+Mean Front Closing Speed: 0.64
+Loop Target: 5 | Achieved: 0
+Camera Mode: broadcast | Reference Car: 3
+Stop Reason: env_done
+==================================================
+Statistics saved to artifacts/prime_marl_10car_16m/results/5loop_videos_per_car/ten_car_5loops_broadcast_seed42_car3.json
+Exporting broadcast 5-loop video (reference car 4)...
+/workspace/Racing_Gym_RL/venv/lib/python3.11/site-packages/gym/logger.py:30: UserWarning: [33mWARN: Box bound precision lowered by casting to float32[0m
+  warnings.warn(colorize('%s: %s'%('WARN', msg % args), 'yellow'))
+Loading Torch checkpoint from artifacts/prime_marl_10car_16m/models/best_model_torch.pt
+Using torch policy variant: autoresearch_run_008
+Evaluating Torch model in continuous rollout mode until lap_count>=5 (camera=broadcast, ref_car=4, max_steps=120000)...
+Track generation: 1208..1514 -> 306-tiles track
+Episode 1/1: Reward=342.53, Length=1370, Progress=75.57%, Time=0.00s, MeanRank=5.50, Collision=0, Hook=0, ContactTerminate=0
+Video saved to artifacts/prime_marl_10car_16m/results/5loop_videos_per_car/ten_car_5loops_broadcast_seed42_car4.mp4
+
+==================================================
+EVALUATION RESULTS
+==================================================
+Mean Reward: 342.53 +/- 0.00
+Reward Range: [342.53, 342.53]
+Mean Episode Length: 1370.0 +/- 0.0
+Mean Progress: 75.57% +/- 0.00%
+Mean Episode Time: 0.00s +/- 0.00s
+Off-track Rate: 100.00%
+Mean Steering Variance: 0.09655
+Mean Rank: 5.50
+Collision Rate: 0.00%
+Contact Rate: 0.00%
+Hook-Contact Rate: 0.00%
+Contact-Termination Rate: 0.00%
+Mean Max Contact Steps: 2.00
+Mean Speed: 28.59
+Mean Speed Std: 2.51
+Mean Throttle: 0.98
+Mean Brake: 0.00
+Mean Overtakes: 2965.00
+Mean Front Gap: 12.63
+Min Front Gap (mean across episodes): 3.38
+Mean Side Gap: 8.10
+Min Side Gap (mean across episodes): 2.14
+Mean Front Closing Speed: 0.64
+Loop Target: 5 | Achieved: 0
+Camera Mode: broadcast | Reference Car: 4
+Stop Reason: env_done
+==================================================
+Statistics saved to artifacts/prime_marl_10car_16m/results/5loop_videos_per_car/ten_car_5loops_broadcast_seed42_car4.json
+Exporting broadcast 5-loop video (reference car 5)...
+/workspace/Racing_Gym_RL/venv/lib/python3.11/site-packages/gym/logger.py:30: UserWarning: [33mWARN: Box bound precision lowered by casting to float32[0m
+  warnings.warn(colorize('%s: %s'%('WARN', msg % args), 'yellow'))
+Loading Torch checkpoint from artifacts/prime_marl_10car_16m/models/best_model_torch.pt
+Using torch policy variant: autoresearch_run_008
+Evaluating Torch model in continuous rollout mode until lap_count>=5 (camera=broadcast, ref_car=5, max_steps=120000)...
+Track generation: 1208..1514 -> 306-tiles track
+Episode 1/1: Reward=342.53, Length=1370, Progress=75.57%, Time=0.00s, MeanRank=5.50, Collision=0, Hook=0, ContactTerminate=0
+Video saved to artifacts/prime_marl_10car_16m/results/5loop_videos_per_car/ten_car_5loops_broadcast_seed42_car5.mp4
+
+==================================================
+EVALUATION RESULTS
+==================================================
+Mean Reward: 342.53 +/- 0.00
+Reward Range: [342.53, 342.53]
+Mean Episode Length: 1370.0 +/- 0.0
+Mean Progress: 75.57% +/- 0.00%
+Mean Episode Time: 0.00s +/- 0.00s
+Off-track Rate: 100.00%
+Mean Steering Variance: 0.09655
+Mean Rank: 5.50
+Collision Rate: 0.00%
+Contact Rate: 0.00%
+Hook-Contact Rate: 0.00%
+Contact-Termination Rate: 0.00%
+Mean Max Contact Steps: 2.00
+Mean Speed: 28.59
+Mean Speed Std: 2.51
+Mean Throttle: 0.98
+Mean Brake: 0.00
+Mean Overtakes: 2965.00
+Mean Front Gap: 12.63
+Min Front Gap (mean across episodes): 3.38
+Mean Side Gap: 8.10
+Min Side Gap (mean across episodes): 2.14
+Mean Front Closing Speed: 0.64
+Loop Target: 5 | Achieved: 0
+Camera Mode: broadcast | Reference Car: 5
+Stop Reason: env_done
+==================================================
+Statistics saved to artifacts/prime_marl_10car_16m/results/5loop_videos_per_car/ten_car_5loops_broadcast_seed42_car5.json
+Exporting broadcast 5-loop video (reference car 6)...
+/workspace/Racing_Gym_RL/venv/lib/python3.11/site-packages/gym/logger.py:30: UserWarning: [33mWARN: Box bound precision lowered by casting to float32[0m
+  warnings.warn(colorize('%s: %s'%('WARN', msg % args), 'yellow'))
+Loading Torch checkpoint from artifacts/prime_marl_10car_16m/models/best_model_torch.pt
+Using torch policy variant: autoresearch_run_008
+Evaluating Torch model in continuous rollout mode until lap_count>=5 (camera=broadcast, ref_car=6, max_steps=120000)...
+Track generation: 1208..1514 -> 306-tiles track
+Episode 1/1: Reward=342.53, Length=1370, Progress=75.57%, Time=0.00s, MeanRank=5.50, Collision=0, Hook=0, ContactTerminate=0
+Video saved to artifacts/prime_marl_10car_16m/results/5loop_videos_per_car/ten_car_5loops_broadcast_seed42_car6.mp4
+
+==================================================
+EVALUATION RESULTS
+==================================================
+Mean Reward: 342.53 +/- 0.00
+Reward Range: [342.53, 342.53]
+Mean Episode Length: 1370.0 +/- 0.0
+Mean Progress: 75.57% +/- 0.00%
+Mean Episode Time: 0.00s +/- 0.00s
+Off-track Rate: 100.00%
+Mean Steering Variance: 0.09655
+Mean Rank: 5.50
+Collision Rate: 0.00%
+Contact Rate: 0.00%
+Hook-Contact Rate: 0.00%
+Contact-Termination Rate: 0.00%
+Mean Max Contact Steps: 2.00
+Mean Speed: 28.59
+Mean Speed Std: 2.51
+Mean Throttle: 0.98
+Mean Brake: 0.00
+Mean Overtakes: 2965.00
+Mean Front Gap: 12.63
+Min Front Gap (mean across episodes): 3.38
+Mean Side Gap: 8.10
+Min Side Gap (mean across episodes): 2.14
+Mean Front Closing Speed: 0.64
+Loop Target: 5 | Achieved: 0
+Camera Mode: broadcast | Reference Car: 6
+Stop Reason: env_done
+==================================================
+Statistics saved to artifacts/prime_marl_10car_16m/results/5loop_videos_per_car/ten_car_5loops_broadcast_seed42_car6.json
+Exporting broadcast 5-loop video (reference car 7)...
+/workspace/Racing_Gym_RL/venv/lib/python3.11/site-packages/gym/logger.py:30: UserWarning: [33mWARN: Box bound precision lowered by casting to float32[0m
+  warnings.warn(colorize('%s: %s'%('WARN', msg % args), 'yellow'))
+Loading Torch checkpoint from artifacts/prime_marl_10car_16m/models/best_model_torch.pt
+Using torch policy variant: autoresearch_run_008
+Evaluating Torch model in continuous rollout mode until lap_count>=5 (camera=broadcast, ref_car=7, max_steps=120000)...
+Track generation: 1208..1514 -> 306-tiles track
+Episode 1/1: Reward=342.53, Length=1370, Progress=75.57%, Time=0.00s, MeanRank=5.50, Collision=0, Hook=0, ContactTerminate=0
+Video saved to artifacts/prime_marl_10car_16m/results/5loop_videos_per_car/ten_car_5loops_broadcast_seed42_car7.mp4
+
+==================================================
+EVALUATION RESULTS
+==================================================
+Mean Reward: 342.53 +/- 0.00
+Reward Range: [342.53, 342.53]
+Mean Episode Length: 1370.0 +/- 0.0
+Mean Progress: 75.57% +/- 0.00%
+Mean Episode Time: 0.00s +/- 0.00s
+Off-track Rate: 100.00%
+Mean Steering Variance: 0.09655
+Mean Rank: 5.50
+Collision Rate: 0.00%
+Contact Rate: 0.00%
+Hook-Contact Rate: 0.00%
+Contact-Termination Rate: 0.00%
+Mean Max Contact Steps: 2.00
+Mean Speed: 28.59
+Mean Speed Std: 2.51
+Mean Throttle: 0.98
+Mean Brake: 0.00
+Mean Overtakes: 2965.00
+Mean Front Gap: 12.63
+Min Front Gap (mean across episodes): 3.38
+Mean Side Gap: 8.10
+Min Side Gap (mean across episodes): 2.14
+Mean Front Closing Speed: 0.64
+Loop Target: 5 | Achieved: 0
+Camera Mode: broadcast | Reference Car: 7
+Stop Reason: env_done
+==================================================
+Statistics saved to artifacts/prime_marl_10car_16m/results/5loop_videos_per_car/ten_car_5loops_broadcast_seed42_car7.json
+Exporting broadcast 5-loop video (reference car 8)...
+/workspace/Racing_Gym_RL/venv/lib/python3.11/site-packages/gym/logger.py:30: UserWarning: [33mWARN: Box bound precision lowered by casting to float32[0m
+  warnings.warn(colorize('%s: %s'%('WARN', msg % args), 'yellow'))
+Loading Torch checkpoint from artifacts/prime_marl_10car_16m/models/best_model_torch.pt
+Using torch policy variant: autoresearch_run_008
+Evaluating Torch model in continuous rollout mode until lap_count>=5 (camera=broadcast, ref_car=8, max_steps=120000)...
+Track generation: 1208..1514 -> 306-tiles track
+Episode 1/1: Reward=342.53, Length=1370, Progress=75.57%, Time=0.00s, MeanRank=5.50, Collision=0, Hook=0, ContactTerminate=0
+Video saved to artifacts/prime_marl_10car_16m/results/5loop_videos_per_car/ten_car_5loops_broadcast_seed42_car8.mp4
+
+==================================================
+EVALUATION RESULTS
+==================================================
+Mean Reward: 342.53 +/- 0.00
+Reward Range: [342.53, 342.53]
+Mean Episode Length: 1370.0 +/- 0.0
+Mean Progress: 75.57% +/- 0.00%
+Mean Episode Time: 0.00s +/- 0.00s
+Off-track Rate: 100.00%
+Mean Steering Variance: 0.09655
+Mean Rank: 5.50
+Collision Rate: 0.00%
+Contact Rate: 0.00%
+Hook-Contact Rate: 0.00%
+Contact-Termination Rate: 0.00%
+Mean Max Contact Steps: 2.00
+Mean Speed: 28.59
+Mean Speed Std: 2.51
+Mean Throttle: 0.98
+Mean Brake: 0.00
+Mean Overtakes: 2965.00
+Mean Front Gap: 12.63
+Min Front Gap (mean across episodes): 3.38
+Mean Side Gap: 8.10
+Min Side Gap (mean across episodes): 2.14
+Mean Front Closing Speed: 0.64
+Loop Target: 5 | Achieved: 0
+Camera Mode: broadcast | Reference Car: 8
+Stop Reason: env_done
+==================================================
+Statistics saved to artifacts/prime_marl_10car_16m/results/5loop_videos_per_car/ten_car_5loops_broadcast_seed42_car8.json
+Exporting broadcast 5-loop video (reference car 9)...
+/workspace/Racing_Gym_RL/venv/lib/python3.11/site-packages/gym/logger.py:30: UserWarning: [33mWARN: Box bound precision lowered by casting to float32[0m
+  warnings.warn(colorize('%s: %s'%('WARN', msg % args), 'yellow'))
+Loading Torch checkpoint from artifacts/prime_marl_10car_16m/models/best_model_torch.pt
+Using torch policy variant: autoresearch_run_008
+Evaluating Torch model in continuous rollout mode until lap_count>=5 (camera=broadcast, ref_car=9, max_steps=120000)...
+Track generation: 1208..1514 -> 306-tiles track
+Episode 1/1: Reward=342.53, Length=1370, Progress=75.57%, Time=0.00s, MeanRank=5.50, Collision=0, Hook=0, ContactTerminate=0
+Video saved to artifacts/prime_marl_10car_16m/results/5loop_videos_per_car/ten_car_5loops_broadcast_seed42_car9.mp4
+
+==================================================
+EVALUATION RESULTS
+==================================================
+Mean Reward: 342.53 +/- 0.00
+Reward Range: [342.53, 342.53]
+Mean Episode Length: 1370.0 +/- 0.0
+Mean Progress: 75.57% +/- 0.00%
+Mean Episode Time: 0.00s +/- 0.00s
+Off-track Rate: 100.00%
+Mean Steering Variance: 0.09655
+Mean Rank: 5.50
+Collision Rate: 0.00%
+Contact Rate: 0.00%
+Hook-Contact Rate: 0.00%
+Contact-Termination Rate: 0.00%
+Mean Max Contact Steps: 2.00
+Mean Speed: 28.59
+Mean Speed Std: 2.51
+Mean Throttle: 0.98
+Mean Brake: 0.00
+Mean Overtakes: 2965.00
+Mean Front Gap: 12.63
+Min Front Gap (mean across episodes): 3.38
+Mean Side Gap: 8.10
+Min Side Gap (mean across episodes): 2.14
+Mean Front Closing Speed: 0.64
+Loop Target: 5 | Achieved: 0
+Camera Mode: broadcast | Reference Car: 9
+Stop Reason: env_done
+==================================================
+Statistics saved to artifacts/prime_marl_10car_16m/results/5loop_videos_per_car/ten_car_5loops_broadcast_seed42_car9.json
+Done. Ten videos + JSON summaries saved under: artifacts/prime_marl_10car_16m/results/5loop_videos_per_car

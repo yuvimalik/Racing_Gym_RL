@@ -1,0 +1,34 @@
+{
+  "candidates": [
+    {
+      "name": "enhanced_braking_apex_decel",
+      "rationale": "Directly addresses the 'throttle_saturation_no_brake' pattern by reducing the penalty for braking and significantly increasing the reward for deceleration at corner apices, encouraging proactive speed management.",
+      "config_overrides": {
+        "reward_shaping.brake_penalty_scale": 0.005,
+        "reward_shaping.apex_decel_reward_scale": 0.35,
+        "reward_shaping.apex_decel_reward_cap": 3.0
+      },
+      "code_change": "keep_parent"
+    },
+    {
+      "name": "proactive_corner_speed_steer_smoothness",
+      "rationale": "Aims to improve corner entry by introducing a penalty for overspeeding, slightly lowering the target corner speed, and modestly increasing the penalty for abrupt steering to promote smoother lines and better control.",
+      "config_overrides": {
+        "reward_shaping.corner_overspeed_penalty_scale": 0.1,
+        "reward_shaping.corner_target_speed": 6.0,
+        "reward_shaping.steer_smoothness_penalty": 0.04
+      },
+      "code_change": "keep_parent"
+    },
+    {
+      "name": "calibrated_exploration_stability",
+      "rationale": "Refines exploration for throttle/brake actions based on prior success, slightly increases overall policy entropy, and introduces a minor penalty for lateral velocity to encourage more stable vehicle control and better line adherence.",
+      "config_overrides": {
+        "ppo.min_log_std": -0.6,
+        "ppo.ent_coef": 0.06,
+        "reward_shaping.lateral_velocity_penalty": 0.01
+      },
+      "code_change": "keep_parent"
+    }
+  ]
+}

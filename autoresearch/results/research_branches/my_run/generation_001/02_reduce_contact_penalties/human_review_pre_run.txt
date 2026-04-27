@@ -1,0 +1,10 @@
+Candidate reduce_contact_penalties (pre-run)
+============================================
+
+Rationale: By increasing the collision high penalty, agents will be more likely to avoid contacts, thereby improving race quality.
+
+Config changes:
+- reward_shaping.multi_agent.collision_high_penalty: -12.0 -> -30.0
+
+Surface changes:
+No surface code changes.

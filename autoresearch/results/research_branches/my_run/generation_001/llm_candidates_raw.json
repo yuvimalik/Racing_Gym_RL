@@ -1,0 +1,31 @@
+{
+  "candidates": [
+    {
+      "name": "reduce_contact_penalties",
+      "hypothesis": "Increasing the collision high penalty will discourage aggressive driving.",
+      "rationale": "By increasing the collision high penalty, agents will be more likely to avoid contacts, thereby improving race quality.",
+      "config_overrides": {
+        "reward_shaping.multi_agent.collision_high_penalty": -30.0
+      },
+      "code_change": "keep_parent"
+    },
+    {
+      "name": "increase_overtake_bonus",
+      "hypothesis": "Increasing the overtake bonus will promote cleaner overtaking behavior.",
+      "rationale": "A higher overtake bonus encourages agents to execute overtakes more systematically, leading to fewer collisions.",
+      "config_overrides": {
+        "reward_shaping.multi_agent.overtake_bonus": 0.25
+      },
+      "code_change": "keep_parent"
+    },
+    {
+      "name": "steer_smoothness_penalty_adjustment",
+      "hypothesis": "Increasing the steer smoothness penalty will help agents maintain better control over corners.",
+      "rationale": "A higher steer smoothness penalty may lead to smoother steering and reduced contact issues.",
+      "config_overrides": {
+        "reward_shaping.steer_smoothness_penalty": 0.1
+      },
+      "code_change": "keep_parent"
+    }
+  ]
+}

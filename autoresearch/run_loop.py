@@ -2,7 +2,7 @@
 LOCKED - Autoresearch orchestration loop (Karpathy-style).
 
 Iteratively:
-  1. Calls Gemini API with experiment history + program.md + current train_ppo.py
+  1. Calls the configured LLM provider with experiment history + program.md + current train_ppo.py
   2. Writes new train_ppo.py
   3. Runs experiment as subprocess (with timeout)
   4. Compares to best and promotes result artifacts
@@ -11,6 +11,8 @@ Iteratively:
 Usage:
     python -m autoresearch.run_loop --config config/multi_car_config.yaml --max-experiments 20
 """
+
+from __future__ import annotations
 
 import argparse
 import json
@@ -22,13 +24,15 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 try:
-    from dotenv import load_dotenv
-    load_dotenv(PROJECT_ROOT / ".env")
+    from autoresearch.load_env import load_project_env
+
+    load_project_env()
 except ImportError:
     pass
 
@@ -36,6 +40,13 @@ AUTORESEARCH_DIR = Path(__file__).resolve().parent
 TRAIN_PPO_PATH = AUTORESEARCH_DIR / "train_ppo.py"
 PROGRAM_PATH = AUTORESEARCH_DIR / "program.md"
 RESULTS_DIR = AUTORESEARCH_DIR / "results"
+
+from autoresearch.llm_client import (
+    LlmProviderError,
+    default_model_for_provider,
+    generate_text,
+    infer_provider_from_model,
+)
 
 
 def log(message: str) -> None:
@@ -74,7 +85,7 @@ def load_experiment_history(experiments_log: Path, max_recent: int = 10) -> list
     return history[-max_recent:]
 
 
-def get_best_entry(history: list) -> dict | None:
+def get_best_entry(history: list) -> Optional[dict]:
     best_entry = None
     best_reward = -float("inf")
     for entry in history:
@@ -85,18 +96,13 @@ def get_best_entry(history: list) -> dict | None:
     return best_entry
 
 
-def call_llm_api(history: list, program: str, current_code: str, model: str = "gemini-2.5-flash") -> str:
-    try:
-        from google import genai
-    except ImportError:
-        print(
-            "[run_loop] ERROR: Gemini SDK not installed. Run: pip install google-genai",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-    client = genai.Client()
-
+def call_llm_api(
+    history: list,
+    program: str,
+    current_code: str,
+    provider: str,
+    model: str,
+) -> str:
     history_text = ""
     if history:
         history_text = "## Recent Experiment Results (most recent last)\n\n"
@@ -157,11 +163,14 @@ Common improvements to try:
 
 Produce an improved train_ppo.py. Output ONLY the Python code, nothing else."""
 
-    response = client.models.generate_content(
+    code = generate_text(
+        provider=provider,
         model=model,
-        contents=f"{system_prompt}\n\n{user_message}",
+        system_prompt=system_prompt,
+        user_prompt=user_message,
+        json_mode=False,
     )
-    code = (response.text or "").strip()
+    code = code.strip()
     if code.startswith("```python"):
         code = code[len("```python"):].strip()
     if code.startswith("```"):
@@ -169,7 +178,7 @@ Produce an improved train_ppo.py. Output ONLY the Python code, nothing else."""
     if code.endswith("```"):
         code = code[:-3].strip()
     if not code:
-        raise RuntimeError("Gemini returned empty content")
+        raise RuntimeError("LLM returned empty content")
     return code
 
 
@@ -365,7 +374,8 @@ def main():
     parser.add_argument("--eval-episodes", type=int, default=20)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--timeout", type=int, default=600, help="Per-experiment timeout in seconds")
-    parser.add_argument("--model", type=str, default="gemini-2.5-flash", help="Gemini model for code generation")
+    parser.add_argument("--provider", type=str, default=None, choices=["gemini", "openai", "codex"], help="LLM provider for code generation.")
+    parser.add_argument("--model", type=str, default=None, help="Model name override for the selected provider.")
     parser.add_argument("--skip-first-edit", action="store_true",
                         help="Run first experiment with current train_ppo.py (baseline)")
     parser.add_argument("--resume", type=str, default=None,
@@ -377,6 +387,13 @@ def main():
     parser.add_argument("--bootstrap-code", type=str, default=None,
                         help="Optional starting train_ppo.py snapshot for a fresh branch")
     args = parser.parse_args()
+
+    provider = (
+        "openai"
+        if str(args.provider).strip().lower() == "codex"
+        else str(args.provider).strip().lower()
+    ) if args.provider else infer_provider_from_model(args.model, fallback="gemini")
+    model = args.model or default_model_for_provider(provider)
 
     branch_results_dir = RESULTS_DIR / args.results_subdir if args.results_subdir else RESULTS_DIR
     experiments_log = branch_results_dir / "experiments.jsonl"
@@ -414,6 +431,7 @@ def main():
     log(f"[run_loop] num_envs={args.num_envs} | eval_episodes={args.eval_episodes}")
     log(f"[run_loop] results_dir={branch_results_dir}")
     log(f"[run_loop] program={program_path}")
+    log(f"[run_loop] provider={provider} | model={model}")
     log(f"[run_loop] starting_best_reward={best_reward:.2f}")
     log(f"[run_loop] best_checkpoint={(best_dir / 'final.pt') if (best_dir / 'final.pt').exists() else 'none'}")
     log("#" * 72)
@@ -438,9 +456,9 @@ def main():
         log(f"[run_loop] Estimated runtime: {estimate_runtime(history, args.timesteps)}")
 
         if not is_baseline:
-            log(f"[run_loop] Calling Gemini API for experiment {experiment_id}...")
+            log(f"[run_loop] Calling {provider} for experiment {experiment_id}...")
             try:
-                new_code = call_llm_api(history, program, current_code, model=args.model)
+                new_code = call_llm_api(history, program, current_code, provider=provider, model=model)
                 compile(new_code, "train_ppo.py", "exec")
                 TRAIN_PPO_PATH.write_text(new_code, encoding="utf-8")
                 changes_description = "LLM-generated changes"
@@ -449,8 +467,8 @@ def main():
             except SyntaxError as exc:
                 log(f"[run_loop] LLM produced invalid code: {exc}")
                 continue
-            except Exception as exc:
-                log(f"[run_loop] Gemini API error: {exc}")
+            except (LlmProviderError, Exception) as exc:
+                log(f"[run_loop] LLM provider error: {exc}")
                 continue
 
         candidate_code_path = run_dir / "candidate_train_ppo.py"

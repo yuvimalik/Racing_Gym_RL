@@ -1,0 +1,69 @@
+{
+  "generation": 4,
+  "candidate_index": 2,
+  "candidate_name": "increase_brake_penalty",
+  "rationale": "Increasing the brake penalty may encourage earlier braking behavior to prevent throttle saturation.",
+  "source": "llm",
+  "config_overrides": {
+    "reward_shaping.brake_penalty_scale": 0.1
+  },
+  "code_change": "keep_parent",
+  "resume_policy": "inherit_parent",
+  "candidate_config_path": "/Users/epablo/Documents/UPenn/SophmoreSpring26/STAT4830/WedApr1_Work/Racing_Gym_RL/autoresearch/results/research_branches/v4_autoresearch_gpt4omini_20260405_172106/generation_004/02_increase_brake_penalty/candidate_config.yaml",
+  "candidate_surface_path": "/Users/epablo/Documents/UPenn/SophmoreSpring26/STAT4830/WedApr1_Work/Racing_Gym_RL/autoresearch/results/research_branches/v4_autoresearch_gpt4omini_20260405_172106/generation_004/02_increase_brake_penalty/candidate_surface.py",
+  "checkpoint_path": null,
+  "passed_gate": false,
+  "gate_reasons": [
+    "experiment_failed",
+    "progress_too_low",
+    "offtrack_near_total",
+    "steering_variance_dead",
+    "smoke_control_offtrack"
+  ],
+  "patterns": [
+    "speed_collapse"
+  ],
+  "deepest_stage": "smoke_control",
+  "score": -1239.0,
+  "stage_records": [
+    {
+      "stage": "smoke_control",
+      "timesteps": 100000,
+      "eval_episodes": 2,
+      "resume_from": "/Users/epablo/Documents/UPenn/SophmoreSpring26/STAT4830/WedApr1_Work/Racing_Gym_RL/autoresearch/results/research_branches/v4_autoresearch_gpt4omini_20260405_172106/bootstrap/best_model_torch.pt",
+      "patterns": [
+        "speed_collapse"
+      ],
+      "passed_gate": false,
+      "gate_reasons": [
+        "experiment_failed",
+        "progress_too_low",
+        "offtrack_near_total",
+        "steering_variance_dead",
+        "smoke_control_offtrack"
+      ],
+      "score": -1239.0,
+      "mean_reward": -999.0,
+      "error": "train.py failed before producing a checkpoint",
+      "train_return_code": -6,
+      "train_wall_clock_seconds": 8.383759260177612,
+      "effective_config_path": "/Users/epablo/Documents/UPenn/SophmoreSpring26/STAT4830/WedApr1_Work/Racing_Gym_RL/autoresearch/results/research_branches/v4_autoresearch_gpt4omini_20260405_172106/generation_004/02_increase_brake_penalty/smoke_control/effective_config.yaml",
+      "run_summary_path": null,
+      "return_code": 0
+    }
+  ],
+  "stderr_tail": [],
+  "stdout_tail": [],
+  "promoted": false,
+  "stage": "smoke_control",
+  "timesteps": 100000,
+  "eval_episodes": 2,
+  "resume_from": "/Users/epablo/Documents/UPenn/SophmoreSpring26/STAT4830/WedApr1_Work/Racing_Gym_RL/autoresearch/results/research_branches/v4_autoresearch_gpt4omini_20260405_172106/bootstrap/best_model_torch.pt",
+  "mean_reward": -999.0,
+  "error": "train.py failed before producing a checkpoint",
+  "train_return_code": -6,
+  "train_wall_clock_seconds": 8.383759260177612,
+  "effective_config_path": "/Users/epablo/Documents/UPenn/SophmoreSpring26/STAT4830/WedApr1_Work/Racing_Gym_RL/autoresearch/results/research_branches/v4_autoresearch_gpt4omini_20260405_172106/generation_004/02_increase_brake_penalty/smoke_control/effective_config.yaml",
+  "run_summary_path": null,
+  "return_code": 0
+}

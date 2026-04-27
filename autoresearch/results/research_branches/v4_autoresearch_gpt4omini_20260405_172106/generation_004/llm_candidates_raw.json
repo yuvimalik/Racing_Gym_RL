@@ -1,0 +1,22 @@
+{
+  "candidates": [
+    {
+      "name": "increase_brake_penalty",
+      "rationale": "Increasing the brake penalty may encourage earlier braking behavior to prevent throttle saturation.",
+      "config_overrides": {
+        "reward_shaping.brake_penalty_scale": 0.1
+      },
+      "code_change": "keep_parent",
+      "resume_policy": "inherit_parent"
+    },
+    {
+      "name": "enhance_overtake_bonus",
+      "rationale": "Boosting the overtake bonus can incentivize cleaner passing behavior among agents.",
+      "config_overrides": {
+        "reward_shaping.multi_agent.overtake_bonus": 0.2
+      },
+      "code_change": "keep_parent",
+      "resume_policy": "inherit_parent"
+    }
+  ]
+}

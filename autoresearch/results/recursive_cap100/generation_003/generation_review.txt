@@ -1,0 +1,9 @@
+Generation 3
+Mode: fully_autonomous
+Parent checkpoint: C:\Users\yuv05\OneDrive\Documents\GitHub\Racing_Gym_RL\autoresearch\results\recursive_cap100\generation_002\03_enhance_braking_cornering_rewards\final.pt
+Promoted candidate: explore_brake_and_lower_corner_speed
+
+- baseline_continuation: reward=-61.62, progress=0.461, speed=31.42, offtrack=0.546, patterns=['throttle_saturation_no_brake'], gate=['progress<0.533'], promoted=False
+- aggressive_brake_and_corner_penalties: reward=-363.04, progress=0.021, speed=13.65, offtrack=0.960, patterns=['early_offtrack', 'throttle_saturation_no_brake', 'low_steer_variance_circling_or_understeer', 'instability_collapse', 'same_length_failure_signature', 'late_or_missing_brake'], gate=['reward<-227.93', 'progress<0.533', 'offtrack>0.600', 'speed<28.40', 'throttle_saturated_without_progress'], promoted=False
+- explore_brake_and_lower_corner_speed: reward=232.58, progress=0.738, speed=44.52, offtrack=0.268, patterns=['throttle_saturation_no_brake'], gate=[], promoted=True
+- ppo_fast_learning_more_epochs: reward=-327.82, progress=0.175, speed=29.14, offtrack=0.843, patterns=['throttle_saturation_no_brake', 'low_steer_variance_circling_or_understeer', 'late_or_missing_brake'], gate=['reward<-227.93', 'progress<0.533', 'offtrack>0.600', 'throttle_saturated_without_progress'], promoted=False

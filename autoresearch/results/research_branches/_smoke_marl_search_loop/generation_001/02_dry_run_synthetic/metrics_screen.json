@@ -1,0 +1,50 @@
+{
+  "generation": 1,
+  "candidate_index": 2,
+  "candidate_name": "dry_run_synthetic",
+  "hypothesis": "dry run",
+  "rationale": "plumbing test",
+  "source": "dry_run",
+  "config_overrides": {},
+  "candidate_config_path": "/Users/epablo/Documents/UPenn/SophmoreSpring26/STAT4830/WedApr1_Work/Racing_Gym_RL/autoresearch/results/research_branches/_smoke_marl_search_loop/generation_001/02_dry_run_synthetic/candidate_config.yaml",
+  "candidate_surface_path": "/Users/epablo/Documents/UPenn/SophmoreSpring26/STAT4830/WedApr1_Work/Racing_Gym_RL/autoresearch/results/research_branches/_smoke_marl_search_loop/generation_001/02_dry_run_synthetic/candidate_surface.py",
+  "stage_records": [
+    {
+      "stage": "screen",
+      "screen_substage": "smoke_control",
+      "timesteps": 100000,
+      "passed_gate": false,
+      "gate_reasons": [
+        "steering_variance_dead"
+      ],
+      "score": 4.0,
+      "patterns": [],
+      "mean_reward": 0.0,
+      "mean_progress": 0.1,
+      "offtrack_rate": 0.2,
+      "contact_rate": 0.15,
+      "hook_contact_rate": 0.05,
+      "contact_termination_rate": 0.0,
+      "mean_speed": 10.0,
+      "mean_overtakes": 0.0,
+      "checkpoint_path": "/private/tmp/dummy_marl_warm.pt",
+      "dry_run": true
+    }
+  ],
+  "passed_gate": false,
+  "gate_reasons": [
+    "steering_variance_dead"
+  ],
+  "score": 4.0,
+  "patterns": [],
+  "mean_reward": 0.0,
+  "mean_progress": 0.1,
+  "offtrack_rate": 0.2,
+  "contact_rate": 0.15,
+  "hook_contact_rate": 0.05,
+  "contact_termination_rate": 0.0,
+  "mean_speed": 10.0,
+  "mean_overtakes": 0.0,
+  "checkpoint_path": "/private/tmp/dummy_marl_warm.pt",
+  "error": null
+}

@@ -1,0 +1,22 @@
+{
+  "candidates": [
+    {
+      "name": "hairpin_anticipation_overspeed_penalty",
+      "rationale": "This experiment aims to encourage earlier braking and prevent overspeeding into sharp turns by increasing the lookahead for sharp turns and introducing a small penalty for exceeding target corner speeds, directly targeting full-throttle-into-hairpin behavior.",
+      "config_overrides": {
+        "reward_shaping.sharp_turn_lookahead": 9,
+        "reward_shaping.corner_overspeed_penalty_scale": 0.05
+      },
+      "code_change": "keep_parent"
+    },
+    {
+      "name": "apex_decel_stronger_lower_target_speed",
+      "rationale": "This experiment focuses on improving apex setup and promoting earlier deceleration by increasing the reward for decelerating when approaching apexes and slightly lowering the target speed for corners, building on a recently successful pattern.",
+      "config_overrides": {
+        "reward_shaping.apex_decel_reward_scale": 0.35,
+        "reward_shaping.corner_target_speed": 6.0
+      },
+      "code_change": "keep_parent"
+    }
+  ]
+}

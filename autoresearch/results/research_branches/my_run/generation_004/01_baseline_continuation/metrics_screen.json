@@ -1,0 +1,59 @@
+{
+  "generation": 4,
+  "candidate_index": 1,
+  "candidate_name": "baseline_continuation",
+  "hypothesis": "Control: same config as parent, fine-tune from warm start.",
+  "rationale": "Baseline for comparison against LLM candidates.",
+  "source": "baseline",
+  "config_overrides": {},
+  "candidate_config_path": "/Users/epablo/Documents/UPenn/SophmoreSpring26/STAT4830/WedApr1_Work/Racing_Gym_RL/autoresearch/results/research_branches/my_run/generation_004/01_baseline_continuation/candidate_config.yaml",
+  "candidate_surface_path": "/Users/epablo/Documents/UPenn/SophmoreSpring26/STAT4830/WedApr1_Work/Racing_Gym_RL/autoresearch/results/research_branches/my_run/generation_004/01_baseline_continuation/candidate_surface.py",
+  "stage_records": [
+    {
+      "stage": "screen",
+      "screen_substage": "smoke_control",
+      "timesteps": 100000,
+      "passed_gate": false,
+      "gate_reasons": [
+        "experiment_failed",
+        "progress_too_low",
+        "offtrack_near_total",
+        "steering_variance_dead",
+        "smoke_control_offtrack"
+      ],
+      "score": -1239.0,
+      "patterns": [
+        "speed_collapse"
+      ],
+      "mean_reward": -999.0,
+      "error": "train.py failed before producing a checkpoint",
+      "train_return_code": 1,
+      "train_wall_clock_seconds": 1.9830191135406494,
+      "effective_config_path": "/Users/epablo/Documents/UPenn/SophmoreSpring26/STAT4830/WedApr1_Work/Racing_Gym_RL/autoresearch/results/research_branches/my_run/generation_004/01_baseline_continuation/screen/effective_config.yaml",
+      "run_summary_path": null,
+      "return_code": 0
+    }
+  ],
+  "passed_gate": false,
+  "gate_reasons": [
+    "experiment_failed",
+    "progress_too_low",
+    "offtrack_near_total",
+    "steering_variance_dead",
+    "smoke_control_offtrack"
+  ],
+  "score": -1239.0,
+  "patterns": [
+    "speed_collapse"
+  ],
+  "mean_reward": -999.0,
+  "mean_progress": 0.0,
+  "offtrack_rate": null,
+  "contact_rate": null,
+  "hook_contact_rate": null,
+  "contact_termination_rate": null,
+  "mean_speed": null,
+  "mean_overtakes": null,
+  "checkpoint_path": null,
+  "error": "train.py failed before producing a checkpoint"
+}

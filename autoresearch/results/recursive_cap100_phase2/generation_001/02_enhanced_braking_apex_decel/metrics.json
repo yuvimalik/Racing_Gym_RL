@@ -1,0 +1,57 @@
+{
+  "generation": 1,
+  "candidate_index": 2,
+  "candidate_id": "g001_c02",
+  "candidate_name": "enhanced_braking_apex_decel",
+  "rationale": "Directly addresses the 'throttle_saturation_no_brake' pattern by reducing the penalty for braking and significantly increasing the reward for deceleration at corner apices, encouraging proactive speed management.",
+  "source": "llm",
+  "config_overrides": {
+    "reward_shaping.brake_penalty_scale": 0.005,
+    "reward_shaping.apex_decel_reward_scale": 0.35,
+    "reward_shaping.apex_decel_reward_cap": 3.0
+  },
+  "code_change": "keep_parent",
+  "candidate_config_path": "C:\\Users\\yuv05\\OneDrive\\Documents\\GitHub\\Racing_Gym_RL\\autoresearch\\results\\recursive_cap100_phase2\\generation_001\\02_enhanced_braking_apex_decel\\candidate_config.yaml",
+  "candidate_code_path": "C:\\Users\\yuv05\\OneDrive\\Documents\\GitHub\\Racing_Gym_RL\\autoresearch\\results\\recursive_cap100_phase2\\generation_001\\02_enhanced_braking_apex_decel\\candidate_train_ppo.py",
+  "checkpoint_path": "C:\\Users\\yuv05\\OneDrive\\Documents\\GitHub\\Racing_Gym_RL\\autoresearch\\results\\recursive_cap100_phase2\\generation_001\\02_enhanced_braking_apex_decel\\final.pt",
+  "passed_gate": false,
+  "gate_reasons": [
+    "reward<-500.00",
+    "progress<0.050",
+    "offtrack>0.600",
+    "speed<5.00"
+  ],
+  "patterns": [
+    "speed_collapse"
+  ],
+  "score": -1199.0,
+  "resume_mode": "policy_only",
+  "num_envs": 8,
+  "stderr_tail": [
+    "[experiment] Progress | iter=2/36 |   5.5% | steps=16,384/300,000 | sps=85.2 | recent_sps=76.7 | elapsed=3.2m | eta=55.5m | rollout_s=104.32 | update_s=0.00 | rollout_reward=-381.09 | pg=0.0071 vf=12.2703 ent=3.1940",
+    "[experiment] Progress | iter=3/36 |   8.2% | steps=24,576/300,000 | sps=75.3 | recent_sps=61.1 | elapsed=5.4m | eta=1.0h | rollout_s=131.54 | update_s=0.00 | rollout_reward=-377.39 | pg=0.0001 vf=7.6715 ent=3.1968",
+    "[experiment] Progress | iter=4/36 |  10.9% | steps=32,768/300,000 | sps=71.9 | recent_sps=63.4 | elapsed=7.6m | eta=1.0h | rollout_s=127.06 | update_s=0.00 | rollout_reward=-375.51 | pg=-0.0027 vf=6.4865 ent=3.2009",
+    "[experiment] Progress | iter=5/36 |  13.7% | steps=40,960/300,000 | sps=70.5 | recent_sps=65.5 | elapsed=9.7m | eta=1.0h | rollout_s=122.40 | update_s=0.00 | rollout_reward=-381.07 | pg=0.0066 vf=8.0378 ent=3.2058",
+    "[experiment] Progress | iter=6/36 |  16.4% | steps=49,152/300,000 | sps=68.7 | recent_sps=60.6 | elapsed=11.9m | eta=1.0h | rollout_s=133.39 | update_s=0.00 | rollout_reward=-372.41 | pg=0.0004 vf=8.7578 ent=3.2094",
+    "[experiment] Progress | iter=7/36 |  19.1% | steps=57,344/300,000 | sps=66.1 | recent_sps=54.2 | elapsed=14.5m | eta=1.0h | rollout_s=148.69 | update_s=0.00 | rollout_reward=-381.41 | pg=-0.0027 vf=7.2492 ent=3.2125",
+    "[experiment] Progress | iter=8/36 |  21.8% | steps=65,536/300,000 | sps=65.3 | recent_sps=60.0 | elapsed=16.7m | eta=59.8m | rollout_s=133.87 | update_s=0.00 | rollout_reward=-377.05 | pg=0.0029 vf=6.7087 ent=3.2156",
+    "[experiment] Progress | iter=9/36 |  24.6% | steps=73,728/300,000 | sps=64.9 | recent_sps=62.1 | elapsed=18.9m | eta=58.1m | rollout_s=129.57 | update_s=0.00 | rollout_reward=-383.17 | pg=0.0006 vf=6.6652 ent=3.2185",
+    "[experiment] Progress | iter=10/36 |  27.3% | steps=81,920/300,000 | sps=65.2 | recent_sps=67.8 | elapsed=20.9m | eta=55.7m | rollout_s=118.38 | update_s=0.00 | rollout_reward=-398.83 | pg=-0.0005 vf=6.6035 ent=3.2216",
+    "[experiment] Progress | iter=11/36 |  30.0% | steps=90,112/300,000 | sps=64.7 | recent_sps=60.3 | elapsed=23.2m | eta=54.0m | rollout_s=132.68 | update_s=0.00 | rollout_reward=-376.39 | pg=0.0014 vf=8.1379 ent=3.2253",
+    "[experiment] Progress | iter=12/36 |  32.8% | steps=98,304/300,000 | sps=64.3 | recent_sps=59.9 | elapsed=25.5m | eta=52.3m | rollout_s=133.62 | update_s=0.00 | rollout_reward=-386.09 | pg=0.0069 vf=7.3482 ent=3.2299",
+    "[experiment] Progress | iter=13/36 |  35.5% | steps=106,496/300,000 | sps=63.4 | recent_sps=53.9 | elapsed=28.0m | eta=50.9m | rollout_s=149.75 | update_s=0.00 | rollout_reward=-383.83 | pg=0.0081 vf=6.1355 ent=3.2346",
+    "[experiment] Progress | iter=14/36 |  38.2% | steps=114,688/300,000 | sps=61.3 | recent_sps=43.0 | elapsed=31.2m | eta=50.4m | rollout_s=188.23 | update_s=0.00 | rollout_reward=-388.36 | pg=-0.0007 vf=7.5525 ent=3.2390",
+    "[experiment] Progress | iter=15/36 |  41.0% | steps=122,880/300,000 | sps=59.3 | recent_sps=40.7 | elapsed=34.5m | eta=49.8m | rollout_s=194.59 | update_s=0.00 | rollout_reward=-382.23 | pg=0.0072 vf=6.7835 ent=3.2414",
+    "[experiment] Progress | iter=16/36 |  43.7% | steps=131,072/300,000 | sps=59.0 | recent_sps=55.6 | elapsed=37.0m | eta=47.7m | rollout_s=144.99 | update_s=0.00 | rollout_reward=-376.86 | pg=0.0036 vf=7.0949 ent=3.2434",
+    "[experiment] Progress | iter=17/36 |  46.4% | steps=139,264/300,000 | sps=58.6 | recent_sps=51.9 | elapsed=39.6m | eta=45.7m | rollout_s=149.02 | update_s=0.00 | rollout_reward=-354.02 | pg=0.0128 vf=9.6177 ent=3.2453",
+    "[experiment] Progress | iter=18/36 |  49.2% | steps=147,456/300,000 | sps=57.6 | recent_sps=45.5 | elapsed=42.6m | eta=44.1m | rollout_s=177.91 | update_s=0.00 | rollout_reward=-376.05 | pg=0.0077 vf=6.8505 ent=3.2479",
+    "[experiment] Progress | iter=19/36 |  51.9% | steps=155,648/300,000 | sps=22.4 | recent_sps=1.9 | elapsed=1.9h | eta=1.8h | rollout_s=4378.08 | update_s=0.00 | rollout_reward=-375.52 | pg=0.0073 vf=8.2906 ent=3.2523",
+    "[experiment] Progress | iter=20/36 |  54.6% | steps=163,840/300,000 | sps=23.3 | recent_sps=87.7 | elapsed=2.0h | eta=1.6h | rollout_s=91.81 | update_s=0.00 | rollout_reward=-378.57 | pg=0.0263 vf=7.7229 ent=3.2563",
+    "[experiment] Progress | iter=21/36 |  57.3% | steps=172,032/300,000 | sps=24.2 | recent_sps=94.1 | elapsed=2.0h | eta=1.5h | rollout_s=85.32 | update_s=0.00 | rollout_reward=-382.40 | pg=-0.0044 vf=5.6638 ent=3.2590"
+  ],
+  "stdout_tail": [],
+  "promoted": false,
+  "mean_reward": -999.0,
+  "error": "Timeout after 7200s",
+  "return_code": 1
+}

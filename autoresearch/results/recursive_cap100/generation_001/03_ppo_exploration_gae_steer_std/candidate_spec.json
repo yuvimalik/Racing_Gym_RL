@@ -1,0 +1,14 @@
+{
+  "generation": 1,
+  "candidate_index": 3,
+  "candidate_name": "ppo_exploration_gae_steer_std",
+  "rationale": "Increasing the entropy coefficient promotes more exploration, a higher GAE lambda prioritizes long-term rewards, and a wider steer standard deviation allows for more diverse steering actions.",
+  "source": "llm",
+  "config_overrides": {
+    "ppo.ent_coef": 0.15,
+    "ppo.gae_lambda": 0.98,
+    "ppo.steer_max_log_std": 0.2
+  },
+  "code_change": "keep_parent",
+  "parent_checkpoint": "C:\\Users\\yuv05\\OneDrive\\Documents\\GitHub\\Racing_Gym_RL\\models\\v2_ceiling_cap100\\best_model_torch.pt"
+}

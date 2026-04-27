@@ -1,0 +1,13 @@
+Candidate ppo_exploration_gae_steer_std (pre-run)
+=================================================
+
+Rationale: Increasing the entropy coefficient promotes more exploration, a higher GAE lambda prioritizes long-term rewards, and a wider steer standard deviation allows for more diverse steering actions.
+Parent patterns: []
+
+Config changes:
+- ppo.ent_coef: 0.05 -> 0.15
+- ppo.gae_lambda: 0.95 -> 0.98
+- ppo.steer_max_log_std: 0.0 -> 0.2
+
+Code changes:
+No code changes.

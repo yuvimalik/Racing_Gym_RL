@@ -1,0 +1,10 @@
+Candidate baseline_continuation (pre-run)
+=========================================
+
+Rationale: Baseline for comparison against LLM candidates.
+
+Config changes:
+No config overrides.
+
+Surface changes:
+No surface code changes.

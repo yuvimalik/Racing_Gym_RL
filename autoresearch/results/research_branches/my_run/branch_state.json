@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "branch_dir": "/Users/epablo/Documents/UPenn/SophmoreSpring26/STAT4830/WedApr1_Work/Racing_Gym_RL/autoresearch/results/research_branches/my_run",
+  "warm_start_ckpt": "/Users/epablo/Documents/UPenn/SophmoreSpring26/STAT4830/WedApr1_Work/Racing_Gym_RL/autoresearch/results/research_branches/openai_v4_warmstart_20260405_162125/bootstrap/best_model_torch.pt",
+  "created_at": "2026-04-05T17:49:43.353157",
+  "updated_at": "2026-04-05T18:27:40.846796",
+  "provider": "openai",
+  "model": "gpt-4o-mini",
+  "current_generation": 5,
+  "max_generations": 5,
+  "candidates_per_batch": 4,
+  "reference_metrics": null,
+  "parent": {
+    "config_path": "/Users/epablo/Documents/UPenn/SophmoreSpring26/STAT4830/WedApr1_Work/Racing_Gym_RL/autoresearch/results/research_branches/my_run/bootstrap/config.yaml",
+    "surface_path": "/Users/epablo/Documents/UPenn/SophmoreSpring26/STAT4830/WedApr1_Work/Racing_Gym_RL/autoresearch/results/research_branches/my_run/bootstrap/surface.py",
+    "metrics": null,
+    "patterns": []
+  }
+}

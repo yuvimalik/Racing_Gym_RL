@@ -358,7 +358,6 @@ Artifacts:
 - latent-control metrics: `results/world_model/control/<run_name>/`
 
 See `WORLD_MODEL_PROGRESS.md` for a concise progress log and next-step roadmap.
-
 ## Observation and Action Spaces
 
 ### Observation Space

@@ -1,0 +1,11 @@
+Candidate increase_collision_penalty_scale (pre-run)
+====================================================
+
+Rationale: Higher penalties for collisions should discourage aggressive interactions that lead to contact.
+
+Config changes:
+- reward_shaping.multi_agent.collision_high_penalty: -12.0 -> -20.0
+- reward_shaping.multi_agent.collision_medium_penalty: -6.0 -> -12.0
+
+Surface changes:
+No surface code changes.

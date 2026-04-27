@@ -1,0 +1,64 @@
+{
+  "branch_dir": "/Users/epablo/Documents/UPenn/SophmoreSpring26/STAT4830/WedApr1_Work/Racing_Gym_RL/autoresearch/results/research_branches/openai_v4_warmstart_20260405_162125",
+  "created_at": "2026-04-05T16:21:26.029019",
+  "updated_at": "2026-04-05T16:33:07.186702",
+  "provider": "openai",
+  "model": "gpt-5-mini",
+  "max_generations": 1,
+  "candidates_per_batch": 3,
+  "current_generation": 1,
+  "validation_ladder": [
+    {
+      "name": "smoke_control",
+      "timesteps": 100000,
+      "eval_episodes": 2,
+      "score_weights": {
+        "reward": 1.0,
+        "progress": 320.0,
+        "offtrack": -240.0,
+        "contact": -40.0,
+        "hook_contact": -80.0,
+        "contact_termination": -80.0,
+        "speed": 3.0,
+        "overtakes": 1.0
+      }
+    },
+    {
+      "name": "smoke_balanced_racing",
+      "timesteps": 200000,
+      "eval_episodes": 3,
+      "score_weights": {
+        "reward": 1.0,
+        "progress": 360.0,
+        "offtrack": -220.0,
+        "contact": -110.0,
+        "hook_contact": -180.0,
+        "contact_termination": -140.0,
+        "speed": 4.0,
+        "overtakes": 6.0
+      }
+    },
+    {
+      "name": "long_confirm",
+      "timesteps": 400000,
+      "eval_episodes": 5,
+      "score_weights": {
+        "reward": 1.0,
+        "progress": 420.0,
+        "offtrack": -250.0,
+        "contact": -150.0,
+        "hook_contact": -240.0,
+        "contact_termination": -180.0,
+        "speed": 4.0,
+        "overtakes": 8.0
+      }
+    }
+  ],
+  "parent": {
+    "config_path": "/Users/epablo/Documents/UPenn/SophmoreSpring26/STAT4830/WedApr1_Work/Racing_Gym_RL/autoresearch/results/research_branches/openai_v4_warmstart_20260405_162125/bootstrap/config.yaml",
+    "surface_path": "/Users/epablo/Documents/UPenn/SophmoreSpring26/STAT4830/WedApr1_Work/Racing_Gym_RL/autoresearch/results/research_branches/openai_v4_warmstart_20260405_162125/bootstrap/surface.py",
+    "checkpoint_path": "/Users/epablo/Documents/UPenn/SophmoreSpring26/STAT4830/WedApr1_Work/Racing_Gym_RL/autoresearch/results/research_branches/openai_v4_warmstart_20260405_162125/bootstrap/best_model_torch.pt",
+    "metrics": null,
+    "patterns": []
+  }
+}

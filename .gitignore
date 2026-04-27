@@ -35,6 +35,10 @@ logs/
 *.log
 tensorboard/
 
+# Prime / long-run local artifacts (checkpoints under ./artifacts)
+artifacts/
+artifacts_prime_intellect_pull/
+
 # Results
 results/
 videos/
@@ -61,6 +65,9 @@ autoresearch/results/probe/
 # OS
 .DS_Store
 Thumbs.db
+
+# Matplotlib font cache (local)
+.mplconfig/
 
 # Jupyter
 .ipynb_checkpoints/

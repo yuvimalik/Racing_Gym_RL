@@ -1,0 +1,274 @@
+{
+  "generation": 6,
+  "candidate_index": 1,
+  "candidate_name": "baseline_continuation",
+  "rationale": "Continue the current parent through the validation ladder as the control branch.",
+  "source": "baseline",
+  "config_overrides": {},
+  "code_change": "keep_parent",
+  "resume_policy": "inherit_parent",
+  "candidate_config_path": "/Users/epablo/Documents/UPenn/SophmoreSpring26/STAT4830/WedApr1_Work/Racing_Gym_RL/autoresearch/results/research_branches/control_recovery/generation_006/01_baseline_continuation/candidate_config.yaml",
+  "candidate_surface_path": "/Users/epablo/Documents/UPenn/SophmoreSpring26/STAT4830/WedApr1_Work/Racing_Gym_RL/autoresearch/results/research_branches/control_recovery/generation_006/01_baseline_continuation/candidate_surface.py",
+  "checkpoint_path": "/Users/epablo/Documents/UPenn/SophmoreSpring26/STAT4830/WedApr1_Work/Racing_Gym_RL/autoresearch/results/research_branches/control_recovery/generation_006/01_baseline_continuation/smoke_control/models/best_model_torch.pt",
+  "passed_gate": false,
+  "gate_reasons": [
+    "progress_too_low",
+    "offtrack_near_total",
+    "steering_variance_dead",
+    "smoke_control_offtrack"
+  ],
+  "patterns": [
+    "control_collapse",
+    "dead_steering"
+  ],
+  "deepest_stage": "smoke_control",
+  "score": -198.00038066857002,
+  "stage_records": [
+    {
+      "stage": "smoke_control",
+      "timesteps": 100000,
+      "eval_episodes": 2,
+      "resume_from": null,
+      "patterns": [
+        "control_collapse",
+        "dead_steering"
+      ],
+      "passed_gate": false,
+      "gate_reasons": [
+        "progress_too_low",
+        "offtrack_near_total",
+        "steering_variance_dead",
+        "smoke_control_offtrack"
+      ],
+      "score": -198.00038066857002,
+      "mean_reward": -19.763339012861252,
+      "std_reward": 0.7241504266858101,
+      "min_reward": -20.487489439547062,
+      "max_reward": -19.03918858617544,
+      "mean_length": 51.0,
+      "std_length": 0.0,
+      "mean_progress": 0.02479012869298458,
+      "std_progress": 0.0017404835671186447,
+      "mean_time": 0.0,
+      "std_time": 0.0,
+      "offtrack_rate": 1.0,
+      "mean_steer_variance": 0.000341342329112242,
+      "mean_rank": 1.5,
+      "collision_rate": 0.0,
+      "contact_rate": 0.0,
+      "hook_contact_rate": 0.0,
+      "contact_termination_rate": 0.0,
+      "mean_max_contact_steps": 0.0,
+      "episode_rewards": [
+        -19.03918858617544,
+        -20.487489439547062
+      ],
+      "episode_lengths": [
+        51,
+        51
+      ],
+      "episode_progress": [
+        0.026530612260103226,
+        0.023049645125865936
+      ],
+      "episode_times": [
+        0.0,
+        0.0
+      ],
+      "episode_offtrack": [
+        1,
+        1
+      ],
+      "episode_steer_variance": [
+        0.00034094867340622465,
+        0.0003417359848182593
+      ],
+      "episode_mean_rank": [
+        1.5,
+        1.5
+      ],
+      "episode_collision": [
+        0,
+        0
+      ],
+      "episode_contact": [
+        0,
+        0
+      ],
+      "episode_hook_contact": [
+        0,
+        0
+      ],
+      "episode_contact_termination": [
+        0,
+        0
+      ],
+      "episode_max_contact_steps": [
+        0,
+        0
+      ],
+      "mean_speed": 16.276705720845392,
+      "mean_throttle": 0.8627622761562759,
+      "mean_brake": 0.0693897146402913,
+      "mean_overtakes": 5.0,
+      "episode_mean_speed": [
+        16.278405409233244,
+        16.27500603245754
+      ],
+      "episode_mean_throttle": [
+        0.862756224823933,
+        0.8627683274886188
+      ],
+      "episode_mean_brake": [
+        0.06938220315850248,
+        0.06939722612208012
+      ],
+      "episode_mean_overtakes": [
+        5,
+        5
+      ],
+      "model_path": "/Users/epablo/Documents/UPenn/SophmoreSpring26/STAT4830/WedApr1_Work/Racing_Gym_RL/autoresearch/results/research_branches/control_recovery/generation_006/01_baseline_continuation/smoke_control/models/best_model_torch.pt",
+      "config_path": "/Users/epablo/Documents/UPenn/SophmoreSpring26/STAT4830/WedApr1_Work/Racing_Gym_RL/autoresearch/results/research_branches/control_recovery/generation_006/01_baseline_continuation/smoke_control/effective_config.yaml",
+      "seed": 10653,
+      "episodes": 2,
+      "video_path": null,
+      "evaluated_at": "2026-04-05T14:52:12.119382",
+      "train_return_code": 0,
+      "eval_return_code": 0,
+      "train_wall_clock_seconds": 715.026221036911,
+      "eval_wall_clock_seconds": 9.788399934768677,
+      "total_wall_clock_seconds": 724.8202219009399,
+      "timesteps_requested": 100000,
+      "effective_config_path": "/Users/epablo/Documents/UPenn/SophmoreSpring26/STAT4830/WedApr1_Work/Racing_Gym_RL/autoresearch/results/research_branches/control_recovery/generation_006/01_baseline_continuation/smoke_control/effective_config.yaml",
+      "base_config_path": "/Users/epablo/Documents/UPenn/SophmoreSpring26/STAT4830/WedApr1_Work/Racing_Gym_RL/autoresearch/results/research_branches/control_recovery/generation_006/01_baseline_continuation/candidate_config.yaml",
+      "checkpoint_path": "/Users/epablo/Documents/UPenn/SophmoreSpring26/STAT4830/WedApr1_Work/Racing_Gym_RL/autoresearch/results/research_branches/control_recovery/generation_006/01_baseline_continuation/smoke_control/models/best_model_torch.pt",
+      "checkpoint_dir": "/Users/epablo/Documents/UPenn/SophmoreSpring26/STAT4830/WedApr1_Work/Racing_Gym_RL/autoresearch/results/research_branches/control_recovery/generation_006/01_baseline_continuation/smoke_control",
+      "model_dir": "/Users/epablo/Documents/UPenn/SophmoreSpring26/STAT4830/WedApr1_Work/Racing_Gym_RL/autoresearch/results/research_branches/control_recovery/generation_006/01_baseline_continuation/smoke_control/models",
+      "results_dir": "/Users/epablo/Documents/UPenn/SophmoreSpring26/STAT4830/WedApr1_Work/Racing_Gym_RL/autoresearch/results/research_branches/control_recovery/generation_006/01_baseline_continuation/smoke_control/results",
+      "run_summary_path": "/Users/epablo/Documents/UPenn/SophmoreSpring26/STAT4830/WedApr1_Work/Racing_Gym_RL/autoresearch/results/research_branches/control_recovery/generation_006/01_baseline_continuation/smoke_control/results/torch_20260405_144008_seed653/run_summary.json",
+      "train_stdout_path": "/Users/epablo/Documents/UPenn/SophmoreSpring26/STAT4830/WedApr1_Work/Racing_Gym_RL/autoresearch/results/research_branches/control_recovery/generation_006/01_baseline_continuation/smoke_control/train_stdout.log",
+      "train_stderr_path": "/Users/epablo/Documents/UPenn/SophmoreSpring26/STAT4830/WedApr1_Work/Racing_Gym_RL/autoresearch/results/research_branches/control_recovery/generation_006/01_baseline_continuation/smoke_control/train_stderr.log",
+      "eval_stdout_path": "/Users/epablo/Documents/UPenn/SophmoreSpring26/STAT4830/WedApr1_Work/Racing_Gym_RL/autoresearch/results/research_branches/control_recovery/generation_006/01_baseline_continuation/smoke_control/eval_stdout.log",
+      "eval_stderr_path": "/Users/epablo/Documents/UPenn/SophmoreSpring26/STAT4830/WedApr1_Work/Racing_Gym_RL/autoresearch/results/research_branches/control_recovery/generation_006/01_baseline_continuation/smoke_control/eval_stderr.log",
+      "experiment_id": "g006_c01_smoke_control",
+      "return_code": 0
+    }
+  ],
+  "stderr_tail": [],
+  "stdout_tail": [],
+  "promoted": false,
+  "stage": "smoke_control",
+  "timesteps": 100000,
+  "eval_episodes": 2,
+  "resume_from": null,
+  "mean_reward": -19.763339012861252,
+  "std_reward": 0.7241504266858101,
+  "min_reward": -20.487489439547062,
+  "max_reward": -19.03918858617544,
+  "mean_length": 51.0,
+  "std_length": 0.0,
+  "mean_progress": 0.02479012869298458,
+  "std_progress": 0.0017404835671186447,
+  "mean_time": 0.0,
+  "std_time": 0.0,
+  "offtrack_rate": 1.0,
+  "mean_steer_variance": 0.000341342329112242,
+  "mean_rank": 1.5,
+  "collision_rate": 0.0,
+  "contact_rate": 0.0,
+  "hook_contact_rate": 0.0,
+  "contact_termination_rate": 0.0,
+  "mean_max_contact_steps": 0.0,
+  "episode_rewards": [
+    -19.03918858617544,
+    -20.487489439547062
+  ],
+  "episode_lengths": [
+    51,
+    51
+  ],
+  "episode_progress": [
+    0.026530612260103226,
+    0.023049645125865936
+  ],
+  "episode_times": [
+    0.0,
+    0.0
+  ],
+  "episode_offtrack": [
+    1,
+    1
+  ],
+  "episode_steer_variance": [
+    0.00034094867340622465,
+    0.0003417359848182593
+  ],
+  "episode_mean_rank": [
+    1.5,
+    1.5
+  ],
+  "episode_collision": [
+    0,
+    0
+  ],
+  "episode_contact": [
+    0,
+    0
+  ],
+  "episode_hook_contact": [
+    0,
+    0
+  ],
+  "episode_contact_termination": [
+    0,
+    0
+  ],
+  "episode_max_contact_steps": [
+    0,
+    0
+  ],
+  "mean_speed": 16.276705720845392,
+  "mean_throttle": 0.8627622761562759,
+  "mean_brake": 0.0693897146402913,
+  "mean_overtakes": 5.0,
+  "episode_mean_speed": [
+    16.278405409233244,
+    16.27500603245754
+  ],
+  "episode_mean_throttle": [
+    0.862756224823933,
+    0.8627683274886188
+  ],
+  "episode_mean_brake": [
+    0.06938220315850248,
+    0.06939722612208012
+  ],
+  "episode_mean_overtakes": [
+    5,
+    5
+  ],
+  "model_path": "/Users/epablo/Documents/UPenn/SophmoreSpring26/STAT4830/WedApr1_Work/Racing_Gym_RL/autoresearch/results/research_branches/control_recovery/generation_006/01_baseline_continuation/smoke_control/models/best_model_torch.pt",
+  "config_path": "/Users/epablo/Documents/UPenn/SophmoreSpring26/STAT4830/WedApr1_Work/Racing_Gym_RL/autoresearch/results/research_branches/control_recovery/generation_006/01_baseline_continuation/smoke_control/effective_config.yaml",
+  "seed": 10653,
+  "episodes": 2,
+  "video_path": null,
+  "evaluated_at": "2026-04-05T14:52:12.119382",
+  "train_return_code": 0,
+  "eval_return_code": 0,
+  "train_wall_clock_seconds": 715.026221036911,
+  "eval_wall_clock_seconds": 9.788399934768677,
+  "total_wall_clock_seconds": 724.8202219009399,
+  "timesteps_requested": 100000,
+  "effective_config_path": "/Users/epablo/Documents/UPenn/SophmoreSpring26/STAT4830/WedApr1_Work/Racing_Gym_RL/autoresearch/results/research_branches/control_recovery/generation_006/01_baseline_continuation/smoke_control/effective_config.yaml",
+  "base_config_path": "/Users/epablo/Documents/UPenn/SophmoreSpring26/STAT4830/WedApr1_Work/Racing_Gym_RL/autoresearch/results/research_branches/control_recovery/generation_006/01_baseline_continuation/candidate_config.yaml",
+  "checkpoint_dir": "/Users/epablo/Documents/UPenn/SophmoreSpring26/STAT4830/WedApr1_Work/Racing_Gym_RL/autoresearch/results/research_branches/control_recovery/generation_006/01_baseline_continuation/smoke_control",
+  "model_dir": "/Users/epablo/Documents/UPenn/SophmoreSpring26/STAT4830/WedApr1_Work/Racing_Gym_RL/autoresearch/results/research_branches/control_recovery/generation_006/01_baseline_continuation/smoke_control/models",
+  "results_dir": "/Users/epablo/Documents/UPenn/SophmoreSpring26/STAT4830/WedApr1_Work/Racing_Gym_RL/autoresearch/results/research_branches/control_recovery/generation_006/01_baseline_continuation/smoke_control/results",
+  "run_summary_path": "/Users/epablo/Documents/UPenn/SophmoreSpring26/STAT4830/WedApr1_Work/Racing_Gym_RL/autoresearch/results/research_branches/control_recovery/generation_006/01_baseline_continuation/smoke_control/results/torch_20260405_144008_seed653/run_summary.json",
+  "train_stdout_path": "/Users/epablo/Documents/UPenn/SophmoreSpring26/STAT4830/WedApr1_Work/Racing_Gym_RL/autoresearch/results/research_branches/control_recovery/generation_006/01_baseline_continuation/smoke_control/train_stdout.log",
+  "train_stderr_path": "/Users/epablo/Documents/UPenn/SophmoreSpring26/STAT4830/WedApr1_Work/Racing_Gym_RL/autoresearch/results/research_branches/control_recovery/generation_006/01_baseline_continuation/smoke_control/train_stderr.log",
+  "eval_stdout_path": "/Users/epablo/Documents/UPenn/SophmoreSpring26/STAT4830/WedApr1_Work/Racing_Gym_RL/autoresearch/results/research_branches/control_recovery/generation_006/01_baseline_continuation/smoke_control/eval_stdout.log",
+  "eval_stderr_path": "/Users/epablo/Documents/UPenn/SophmoreSpring26/STAT4830/WedApr1_Work/Racing_Gym_RL/autoresearch/results/research_branches/control_recovery/generation_006/01_baseline_continuation/smoke_control/eval_stderr.log",
+  "experiment_id": "g006_c01_smoke_control",
+  "return_code": 0
+}

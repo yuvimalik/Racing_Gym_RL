@@ -1,0 +1,13 @@
+Candidate ppo_lr_bs_epochs (pre-run)
+====================================
+
+Rationale: Decreasing the learning rate, increasing the batch size, and slightly increasing epochs per update can lead to more stable and robust policy updates, potentially improving convergence.
+Parent patterns: []
+
+Config changes:
+- ppo.batch_size: 1536 -> 3072
+- ppo.learning_rate: 0.00025 -> 0.0001
+- ppo.n_epochs: 3 -> 4
+
+Code changes:
+No code changes.

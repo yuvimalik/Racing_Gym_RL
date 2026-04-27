@@ -16,15 +16,24 @@ import time
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 import yaml
+
+from autoresearch.llm_client import (
+    LlmProviderError,
+    default_model_for_provider,
+    generate_text,
+    infer_provider_from_model,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 try:
-    from dotenv import load_dotenv
-    load_dotenv(PROJECT_ROOT / ".env")
+    from autoresearch.load_env import load_project_env
+
+    load_project_env()
 except ImportError:
     pass
 
@@ -292,10 +301,10 @@ def write_human_review(
     parent_patterns: list[str],
     override_summary: str,
     code_diff_text: str,
-    metrics: dict | None = None,
-    patterns: list[str] | None = None,
-    gate_reasons: list[str] | None = None,
-    promoted: bool | None = None,
+    metrics: Optional[dict] = None,
+    patterns: Optional[list[str]] = None,
+    gate_reasons: Optional[list[str]] = None,
+    promoted: Optional[bool] = None,
 ) -> None:
     lines = [
         title,
@@ -413,7 +422,7 @@ def summarize_recent_winners_and_failures(history: list[dict], max_promoted: int
     return "\n".join(lines) if lines else "No prior recursive winners/failures recorded."
 
 
-def validate_overrides(overrides: dict, profile: dict | None = None) -> tuple[bool, list[str], dict]:
+def validate_overrides(overrides: dict, profile: Optional[dict] = None) -> tuple[bool, list[str], dict]:
     errors: list[str] = []
     cleaned: dict = {}
     for key, value in (overrides or {}).items():
@@ -472,7 +481,7 @@ def infer_patterns(metrics: dict) -> list[str]:
     return patterns
 
 
-def gate_candidate(metrics: dict, parent_metrics: dict | None) -> tuple[bool, list[str], float]:
+def gate_candidate(metrics: dict, parent_metrics: Optional[dict]) -> tuple[bool, list[str], float]:
     reasons: list[str] = []
     reward = safe_float(metrics.get("mean_reward"), -999.0)
     progress = safe_float(metrics.get("mean_progress"), 0.0)
@@ -539,23 +548,29 @@ def summarize_history(history: list[dict], max_items: int = 8) -> str:
     return "\n".join(lines)
 
 
+def resolve_provider_model(branch_state: dict, cli_provider: Optional[str], cli_model: Optional[str]) -> tuple[str, str]:
+    stored_provider = branch_state.get("provider")
+    stored_model = branch_state.get("model")
+    if cli_provider:
+        provider = "openai" if str(cli_provider).strip().lower() == "codex" else str(cli_provider).strip().lower()
+        model = str(cli_model or default_model_for_provider(provider)).strip()
+    else:
+        provider = infer_provider_from_model(stored_model, fallback="gemini" if not stored_provider else stored_provider)
+        model = str(cli_model or stored_model or default_model_for_provider(provider)).strip()
+    return provider, model
+
+
 def call_llm_for_candidates(
-    parent_metrics: dict | None,
+    parent_metrics: Optional[dict],
     parent_patterns: list[str],
     recent_history: list[dict],
     parent_config: dict,
     parent_code: str,
     candidates_to_generate: int,
+    provider: str,
     model: str,
     search_profile: dict,
 ) -> tuple[list[dict], str]:
-    try:
-        from google import genai
-    except ImportError:
-        print("[run_recursive] ERROR: Gemini SDK not installed. Run: pip install google-genai", file=sys.stderr)
-        sys.exit(1)
-
-    client = genai.Client()
     parent_summary = json.dumps(parent_metrics or {}, indent=2)
     tracked_keys = sorted(key for key in ALLOWLIST.keys() if is_key_allowed_for_profile(key, search_profile))
     parent_key_values = {key: get_nested(parent_config, key) for key in tracked_keys if get_nested(parent_config, key) is not None}
@@ -609,17 +624,21 @@ Output JSON with this shape:
   ]
 }}
 """
-    response = client.models.generate_content(
-        model=model,
-        contents=f"{system_prompt}\n\n{user_prompt}",
+    raw_text = strip_fences(
+        generate_text(
+            provider=provider,
+            model=model,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            json_mode=True,
+        )
     )
-    raw_text = strip_fences(response.text or "")
     if not raw_text:
-        raise RuntimeError("Gemini returned empty candidate JSON")
+        raise RuntimeError("LLM returned empty candidate JSON")
     payload = json.loads(raw_text)
     candidates = payload.get("candidates")
     if not isinstance(candidates, list):
-        raise ValueError("Gemini output missing candidates list")
+        raise ValueError("LLM output missing candidates list")
     return candidates, raw_text
 
 
@@ -652,7 +671,7 @@ def run_candidate_experiment(
     candidate_id: str,
     run_dir: Path,
     timeout: int,
-    resume: Path | None,
+    resume: Optional[Path],
     resume_mode: str,
 ) -> dict:
     stdout_log_path = run_dir / "stdout.log"
@@ -776,6 +795,7 @@ def build_branch_state(
     timesteps_per_candidate: int,
     eval_episodes: int,
     generations: int,
+    provider: str,
     model: str,
     search_profile: str,
     throughput_mode: str,
@@ -789,6 +809,7 @@ def build_branch_state(
         "timesteps_per_candidate": timesteps_per_candidate,
         "eval_episodes": eval_episodes,
         "max_generations": generations,
+        "provider": provider,
         "model": model,
         "search_profile": search_profile,
         "throughput_mode": throughput_mode,
@@ -817,7 +838,8 @@ def main() -> None:
     parser.add_argument("--num-envs", type=int, default=None)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--timeout", type=int, default=7200)
-    parser.add_argument("--model", type=str, default="gemini-2.5-flash")
+    parser.add_argument("--provider", type=str, default=None, choices=["gemini", "openai", "codex"])
+    parser.add_argument("--model", type=str, default=None)
     parser.add_argument("--search-profile", type=str, default="default", choices=sorted(SEARCH_PROFILES.keys()))
     parser.add_argument("--throughput-mode", type=str, default="experiments_per_day")
     args = parser.parse_args()
@@ -848,6 +870,11 @@ def main() -> None:
         branch_state = json.loads(branch_state_path.read_text(encoding="utf-8"))
         log(f"[run_recursive] Resuming existing branch: {branch_dir}")
     else:
+        if args.provider:
+            provider = "openai" if str(args.provider).strip().lower() == "codex" else str(args.provider).strip().lower()
+        else:
+            provider = infer_provider_from_model(args.model, fallback="gemini")
+        model = str(args.model or default_model_for_provider(provider)).strip()
         branch_state = build_branch_state(
             branch_dir=branch_dir,
             base_config_path=base_config_path,
@@ -858,12 +885,16 @@ def main() -> None:
             timesteps_per_candidate=args.timesteps,
             eval_episodes=args.eval_episodes,
             generations=args.generations,
-            model=args.model,
+            provider=provider,
+            model=model,
             search_profile=args.search_profile,
             throughput_mode=args.throughput_mode,
         )
         branch_state_path.write_text(json.dumps(branch_state, indent=2), encoding="utf-8")
 
+    provider, model = resolve_provider_model(branch_state, args.provider, args.model)
+    branch_state["provider"] = provider
+    branch_state["model"] = model
     branch_state["num_envs"] = resolved_num_envs
     branch_state["search_profile"] = args.search_profile
     branch_state["throughput_mode"] = args.throughput_mode
@@ -896,6 +927,7 @@ def main() -> None:
         log(f"[run_recursive] Num envs: {resolved_num_envs}")
         log(f"[run_recursive] Search profile: {args.search_profile}")
         log(f"[run_recursive] Throughput mode: {args.throughput_mode}")
+        log(f"[run_recursive] Provider/model: {provider}/{model}")
 
         candidates: list[dict] = [make_baseline_candidate(parent_code)]
         llm_needed = max(0, args.candidates_per_batch - 1)
@@ -908,12 +940,13 @@ def main() -> None:
                     parent_config=parent_config,
                     parent_code=parent_code,
                     candidates_to_generate=llm_needed,
-                    model=args.model,
+                    provider=provider,
+                    model=model,
                     search_profile=search_profile,
                 )
                 (gen_dir / "llm_candidates_raw.json").write_text(llm_raw_text + "\n", encoding="utf-8")
                 candidates.extend(llm_candidates[:llm_needed])
-            except Exception as exc:
+            except (LlmProviderError, Exception) as exc:
                 log(f"[run_recursive] Candidate generation failed: {exc}")
 
         generation_records: list[dict] = []
@@ -1102,6 +1135,8 @@ def main() -> None:
             "timestamp": datetime.now().isoformat(),
             "generation": generation_index,
             "mode": args.mode,
+            "provider": provider,
+            "model": model,
             "search_profile": args.search_profile,
             "throughput_mode": args.throughput_mode,
             "parent_checkpoint_before": str(parent_checkpoint_path),

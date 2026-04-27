@@ -1,0 +1,32 @@
+{
+  "candidates": [
+    {
+      "name": "reduce_action_exploration_steer_general",
+      "rationale": "Reducing the maximum allowed standard deviation for steering and general actions (throttle/brake) to encourage more stable and less erratic policy exploration, addressing instability and off-track patterns.",
+      "config_overrides": {
+        "ppo.max_log_std": 0.0,
+        "ppo.steer_max_log_std": -0.5
+      },
+      "code_change": "keep_parent"
+    },
+    {
+      "name": "enhance_braking_cornering_rewards",
+      "rationale": "Introduce a small general brake penalty and a significant reward for decelerating at the apex to encourage more precise and effective braking behavior, addressing 'no_brake' and 'late_or_missing_brake' patterns.",
+      "config_overrides": {
+        "reward_shaping.brake_penalty_scale": 0.01,
+        "reward_shaping.apex_decel_reward_scale": 0.2,
+        "reward_shaping.apex_decel_reward_cap": 2.0
+      },
+      "code_change": "keep_parent"
+    },
+    {
+      "name": "ppo_stability_gae_clip",
+      "rationale": "Lowering the PPO clip range to reduce the magnitude of policy updates and adjusting GAE lambda to rely more on immediate rewards, aiming for more stable training and mitigating early instability.",
+      "config_overrides": {
+        "ppo.clip_range": 0.1,
+        "ppo.gae_lambda": 0.90
+      },
+      "code_change": "keep_parent"
+    }
+  ]
+}

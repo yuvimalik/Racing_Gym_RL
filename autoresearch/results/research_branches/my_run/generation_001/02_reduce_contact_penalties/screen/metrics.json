@@ -1,0 +1,11 @@
+{
+  "mean_reward": -999.0,
+  "error": "evaluate.py failed after training",
+  "train_return_code": 0,
+  "eval_return_code": 1,
+  "train_wall_clock_seconds": 1565.11918592453,
+  "eval_wall_clock_seconds": 1.9632461071014404,
+  "effective_config_path": "/Users/epablo/Documents/UPenn/SophmoreSpring26/STAT4830/WedApr1_Work/Racing_Gym_RL/autoresearch/results/research_branches/my_run/generation_001/02_reduce_contact_penalties/screen/effective_config.yaml",
+  "checkpoint_path": "/Users/epablo/Documents/UPenn/SophmoreSpring26/STAT4830/WedApr1_Work/Racing_Gym_RL/autoresearch/results/research_branches/my_run/generation_001/02_reduce_contact_penalties/screen/models/best_model_torch.pt",
+  "run_summary_path": "/Users/epablo/Documents/UPenn/SophmoreSpring26/STAT4830/WedApr1_Work/Racing_Gym_RL/autoresearch/results/research_branches/my_run/generation_001/02_reduce_contact_penalties/screen/results/torch_20260405_180027_seed144/run_summary.json"
+}

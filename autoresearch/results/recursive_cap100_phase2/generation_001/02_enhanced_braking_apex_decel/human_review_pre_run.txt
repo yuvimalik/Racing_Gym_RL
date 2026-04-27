@@ -1,0 +1,13 @@
+Candidate enhanced_braking_apex_decel (pre-run)
+===============================================
+
+Rationale: Directly addresses the 'throttle_saturation_no_brake' pattern by reducing the penalty for braking and significantly increasing the reward for deceleration at corner apices, encouraging proactive speed management.
+Parent patterns: []
+
+Config changes:
+- reward_shaping.apex_decel_reward_cap: 2.0 -> 3.0
+- reward_shaping.apex_decel_reward_scale: 0.2 -> 0.35
+- reward_shaping.brake_penalty_scale: 0.01 -> 0.005
+
+Code changes:
+No code changes.

@@ -1,0 +1,4 @@
+# Install AFTER requirements.txt so gym==0.17.3 wins (multi_car_racing / legacy env).
+# PyPI metadata pins gym==0.21; we override at runtime — use --no-deps:
+#   pip install -r requirements_sb3.txt --no-deps
+stable-baselines3[extra]==1.8.0

@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "branch_dir": "/Users/epablo/Documents/UPenn/SophmoreSpring26/STAT4830/WedApr1_Work/Racing_Gym_RL/autoresearch/results/research_branches/_smoke_marl_search_loop",
+  "warm_start_ckpt": "/private/tmp/dummy_marl_warm.pt",
+  "created_at": "2026-04-05T17:40:26.005223",
+  "updated_at": "2026-04-05T17:40:26.019768",
+  "provider": "openai",
+  "model": "gpt-4o-mini",
+  "current_generation": 1,
+  "max_generations": 1,
+  "candidates_per_batch": 2,
+  "reference_metrics": null,
+  "parent": {
+    "config_path": "/Users/epablo/Documents/UPenn/SophmoreSpring26/STAT4830/WedApr1_Work/Racing_Gym_RL/autoresearch/results/research_branches/_smoke_marl_search_loop/bootstrap/config.yaml",
+    "surface_path": "/Users/epablo/Documents/UPenn/SophmoreSpring26/STAT4830/WedApr1_Work/Racing_Gym_RL/autoresearch/results/research_branches/_smoke_marl_search_loop/bootstrap/surface.py",
+    "metrics": null,
+    "patterns": []
+  }
+}

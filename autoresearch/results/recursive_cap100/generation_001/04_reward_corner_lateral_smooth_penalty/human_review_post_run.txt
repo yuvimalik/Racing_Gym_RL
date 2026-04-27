@@ -1,0 +1,28 @@
+Candidate reward_corner_lateral_smooth_penalty (post-run)
+=========================================================
+
+Rationale: Introducing a penalty for corner overspeed and lateral velocity encourages the agent to maintain a clean racing line, while a higher steer smoothness penalty discourages jerky movements.
+Parent patterns: []
+
+Config changes:
+- reward_shaping.corner_overspeed_penalty_scale: 0.0 -> 0.1
+- reward_shaping.lateral_velocity_penalty: 0.0 -> 0.1
+- reward_shaping.steer_smoothness_penalty: 0.03 -> 0.05
+
+Code changes:
+No code changes.
+
+Metrics:
+- mean_reward: -1061.35
+- mean_progress: 0.0164
+- offtrack_rate: 0.9627
+- mean_speed: 11.55
+- mean_throttle: 0.99
+- mean_brake: 0.00
+- mean_steer_variance: 0.04880
+- mean_episode_length: 930.0
+- steps_per_second: 160.6
+
+Inferred patterns: ['early_offtrack', 'throttle_saturation_no_brake', 'instability_collapse', 'same_length_failure_signature', 'late_or_missing_brake']
+Gate reasons: ['reward<-500.00', 'progress<0.050', 'offtrack>0.600', 'throttle_saturated_without_progress']
+Promoted: False

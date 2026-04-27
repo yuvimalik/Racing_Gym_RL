@@ -1,0 +1,10 @@
+Candidate enhanced_overtake_bonus (pre-run)
+===========================================
+
+Rationale: Encourage cleaner overtakes by increasing the overtaking bonus.
+
+Config changes:
+- reward_shaping.multi_agent.overtake_bonus: 0.1 -> 0.2
+
+Surface changes:
+No surface code changes.

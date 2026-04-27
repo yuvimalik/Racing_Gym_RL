@@ -1,0 +1,94 @@
+{
+  "mean_reward": -19.763339012861252,
+  "std_reward": 0.7241504266858101,
+  "min_reward": -20.487489439547062,
+  "max_reward": -19.03918858617544,
+  "mean_length": 51.0,
+  "std_length": 0.0,
+  "mean_progress": 0.02479012869298458,
+  "std_progress": 0.0017404835671186447,
+  "mean_time": 0.0,
+  "std_time": 0.0,
+  "offtrack_rate": 1.0,
+  "mean_steer_variance": 0.000341342329112242,
+  "mean_rank": 1.5,
+  "collision_rate": 0.0,
+  "contact_rate": 0.0,
+  "hook_contact_rate": 0.0,
+  "contact_termination_rate": 0.0,
+  "mean_max_contact_steps": 0.0,
+  "episode_rewards": [
+    -19.03918858617544,
+    -20.487489439547062
+  ],
+  "episode_lengths": [
+    51,
+    51
+  ],
+  "episode_progress": [
+    0.026530612260103226,
+    0.023049645125865936
+  ],
+  "episode_times": [
+    0.0,
+    0.0
+  ],
+  "episode_offtrack": [
+    1,
+    1
+  ],
+  "episode_steer_variance": [
+    0.00034094867340622465,
+    0.0003417359848182593
+  ],
+  "episode_mean_rank": [
+    1.5,
+    1.5
+  ],
+  "episode_collision": [
+    0,
+    0
+  ],
+  "episode_contact": [
+    0,
+    0
+  ],
+  "episode_hook_contact": [
+    0,
+    0
+  ],
+  "episode_contact_termination": [
+    0,
+    0
+  ],
+  "episode_max_contact_steps": [
+    0,
+    0
+  ],
+  "mean_speed": 16.276705720845392,
+  "mean_throttle": 0.8627622761562759,
+  "mean_brake": 0.0693897146402913,
+  "mean_overtakes": 5.0,
+  "episode_mean_speed": [
+    16.278405409233244,
+    16.27500603245754
+  ],
+  "episode_mean_throttle": [
+    0.862756224823933,
+    0.8627683274886188
+  ],
+  "episode_mean_brake": [
+    0.06938220315850248,
+    0.06939722612208012
+  ],
+  "episode_mean_overtakes": [
+    5,
+    5
+  ],
+  "model_path": "/Users/epablo/Documents/UPenn/SophmoreSpring26/STAT4830/WedApr1_Work/Racing_Gym_RL/autoresearch/results/research_branches/control_recovery/generation_006/01_baseline_continuation/smoke_control/models/best_model_torch.pt",
+  "config_path": "/Users/epablo/Documents/UPenn/SophmoreSpring26/STAT4830/WedApr1_Work/Racing_Gym_RL/autoresearch/results/research_branches/control_recovery/generation_006/01_baseline_continuation/smoke_control/effective_config.yaml",
+  "seed": 10653,
+  "episodes": 2,
+  "video_path": null,
+  "evaluated_at": "2026-04-05T14:52:12.119382"
+}

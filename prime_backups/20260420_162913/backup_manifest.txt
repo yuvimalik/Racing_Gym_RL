@@ -1,0 +1,30 @@
+Prime backup manifest
+=====================
+created_utc: 2026-04-20T21:01:29.231964+00:00
+source_host: root@64.247.196.128
+source_port: 15489
+source_run_path: /workspace/Racing_Gym_RL/artifacts/prime_marl_10car_16m
+local_backup_root: /Users/epablo/prime_backups/20260420_162913
+
+verified_counts:
+- models_files: 27
+- results_files: 59
+- results_mp4_count: 3
+- results_json_count: 29
+- five_loop_files: 4
+- five_loop_mp4_count: 2
+- five_loop_json_count: 2
+- explicit_videos_dir_mp4_count: 3
+
+verified_sizes_bytes:
+- models_size: 726817680
+- results_size: 799961241
+- five_loop_size: 98151202
+- explicit_videos_dir_mp4_size: 180430256
+
+key_files:
+- prime_marl_10car_16m/models/best_model_torch.pt
+- prime_marl_10car_16m/models/final_model_torch.pt
+- prime_marl_10car_16m/results/best_model_torch_seed42_evaluation.mp4
+- prime_marl_10car_16m/results/5loop_videos/ten_car_5loops_tiled_seed42.mp4
+- prime_marl_10car_16m/results/5loop_videos/ten_car_5loops_broadcast_seed42_car0.mp4

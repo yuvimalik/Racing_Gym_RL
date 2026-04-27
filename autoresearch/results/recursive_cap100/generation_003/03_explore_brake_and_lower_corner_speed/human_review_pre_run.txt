@@ -1,0 +1,12 @@
+Candidate explore_brake_and_lower_corner_speed (pre-run)
+========================================================
+
+Rationale: Given the persistent 'throttle_saturation_no_brake' and very low mean_brake, increasing the minimum exploration for non-steer actions (including brake) may help the agent discover more effective braking timings. A slightly lower corner target speed will encourage a more controlled entry into turns.
+Parent patterns: ['throttle_saturation_no_brake']
+
+Config changes:
+- ppo.min_log_std: -1.0 -> -0.75
+- reward_shaping.corner_target_speed: 8.0 -> 7.0
+
+Code changes:
+No code changes.
