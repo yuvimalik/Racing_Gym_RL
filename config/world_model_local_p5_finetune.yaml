@@ -1,0 +1,73 @@
+base_config_path: config/multi_car_config.yaml
+
+paths:
+  replay_dir: ./results/world_model/replay
+  artifacts_dir: ./results/world_model/artifacts
+  checkpoints_dir: ./models/world_model
+
+collector:
+  automatic:
+    seed: 42
+    render: false
+    record_video: false
+    video_fps: 30.0
+    splits:
+      train_frames: 500
+      val_frames: 100
+    directions:
+      - CCW
+      - CW
+    regimes:
+      slow:
+        throttle_scale: 0.50
+        steering_scale: 0.85
+        brake_scale: 1.00
+        transition_steps: 4
+        config_overrides:
+          safety_governor:
+            enabled: true
+            speed_cap_ratio: 0.30
+
+autoencoder:
+  batch_size: 16
+  epochs: 100
+  learning_rate: 0.001
+
+rssm:
+  action_dim: 3
+  hidden_dim: 512
+  stochastic_dim: 32
+  embedding_dim: 512
+  min_std: 0.1
+  max_std: 2.0
+
+offline_training:
+  sequence_length: 100
+  batch_size: 24
+  learning_rate: 0.0001
+  free_nats: 1.0
+  kl_scale: 1.0
+  reward_scale: 1.0
+  telemetry_loss_scale: 0.25
+  telemetry_weights:
+    speed: 1.0
+    progress_delta: 1.0
+    steer: 0.5
+    corner_angle: 0.5
+    offtrack: 2.0
+  hallucination_context: 50
+  hallucination_horizon: 150
+  hallucination_video_fps: 8.0
+  window_stride: 4
+  num_workers: 4
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 2
+  use_amp: true
+  curated_eval_clips:
+    - name: sharp_turn
+      clip_type: sharp_turn
+      episode_path: ./results/world_model/replay/d5_manual_hard_turns_ccw_fast/episode_000002.npz
+      start_index: 840
+      context_length: 50
+      horizon: 100

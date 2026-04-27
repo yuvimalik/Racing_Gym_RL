@@ -13,15 +13,274 @@ from train import create_env, load_config
 from world_model.replay import EpisodeReplay, ReplayWriter
 
 
+def _extract_step_telemetry(info: dict[str, Any], action: np.ndarray, prev_progress: float) -> dict[str, float | int]:
+    progress = float(info.get("progress", prev_progress))
+    return {
+        "progress": progress,
+        "progress_delta": float(progress - prev_progress),
+        "speed": float(info.get("telemetry/speed", 0.0)),
+        "steer": float(info.get("telemetry/steer", float(action[0]) if action.size > 0 else 0.0)),
+        "corner_angle": float(info.get("telemetry/corner_angle", 0.0)),
+        "offtrack": float(int(info.get("events/offtrack", 0) > 0)),
+        "track_index": int(info.get("_track_index", -1)),
+        "telemetry_valid": 1.0,
+    }
+
+
+def _load_torch_policy(checkpoint_path: str | Path, policy_variant: str, obs_shape: tuple, action_dim: int, device: str = "cpu"):
+    """Load a custom PyTorch PPO policy from a .pt checkpoint.
+
+    How it works: the .pt file stores a payload dict with 'policy_state_dict'.
+    We instantiate the correct policy class (based on policy_variant) and load
+    the weights. The policy is returned in eval mode so dropout/batchnorm are
+    frozen and actions are deterministic at inference time.
+    """
+    import torch
+    from train import TORCH_POLICY_VARIANTS
+
+    policy_cls = TORCH_POLICY_VARIANTS.get(policy_variant)
+    if policy_cls is None:
+        raise ValueError(f"Unknown policy_variant '{policy_variant}'. Choose from: {list(TORCH_POLICY_VARIANTS.keys())}")
+
+    policy = policy_cls(obs_shape=obs_shape, action_dim=action_dim)
+    payload = torch.load(str(checkpoint_path), map_location=device)
+    state_dict = payload.get("policy_state_dict", payload)  # fallback if saved as raw state dict
+    policy.load_state_dict(state_dict)
+    policy.to(device)
+    policy.eval()
+    return policy
+
+
+def _load_sb3_policy(checkpoint_path: str | Path):
+    """Load a Stable-Baselines3 PPO policy from a .zip checkpoint.
+
+    How it works: SB3 packages the policy + config inside a zip archive.
+    We load the full SB3 model then use its .predict() method which handles
+    observation preprocessing internally.
+    """
+    try:
+        from stable_baselines3 import PPO as SB3PPO
+    except ImportError as exc:
+        raise RuntimeError("stable-baselines3 is required for SB3 checkpoints. Install with: pip install stable-baselines3") from exc
+    model = SB3PPO.load(str(checkpoint_path))
+    return model
+
+
+def _obs_to_tensor(obs: np.ndarray, device: str = "cpu"):
+    """Convert (H, W, C) uint8 observation to (1, C, H, W) float tensor in [0, 1]."""
+    import torch
+    obs_t = torch.from_numpy(obs).float().permute(2, 0, 1).unsqueeze(0) / 255.0
+    return obs_t.to(device)
+
+
+def collect_ppo_policy_dataset(
+    base_config_path: str | Path,
+    output_dir: str | Path,
+    split: str,
+    target_frames: int,
+    seed: int,
+    policy_checkpoint: str | Path,
+    policy_variant: str = "autoresearch_run_008",
+    deterministic: bool = True,
+    render: bool = False,
+    record_video: bool = False,
+    video_fps: float = 30.0,
+    config_overrides: dict[str, Any] | None = None,
+    device: str = "cpu",
+) -> CollectionResult:
+    """Collect replay data by running a trained PPO policy in the environment.
+
+    Why use a PPO policy instead of scripted maneuvers?
+    - The scripted heuristic covers pre-defined motion families but misses the
+      natural action correlations a trained agent produces (e.g. smoothly
+      accelerating out of a corner apex with appropriate steering).
+    - A mid-training PPO checkpoint (e.g. 300k steps) drives well enough to
+      stay on track most of the time, but still makes mistakes — this gives the
+      world model diverse recovery and correction sequences to learn from.
+    - Expert laps (v2_progress) provide clean, consistent geometry the model
+      can anchor its predictions on.
+
+    Supports both custom .pt checkpoints and SB3 .zip checkpoints.
+
+    Args:
+        policy_checkpoint: Path to .pt (custom) or .zip (SB3) checkpoint.
+        policy_variant: For .pt files — 'legacy' or 'autoresearch_run_008'.
+        deterministic: If True, use policy mean (no sampling noise). If False,
+            sample from the policy distribution for more diverse trajectories.
+    """
+    import torch
+
+    config = load_config(base_config_path)
+    if config_overrides:
+        config = _deep_update(copy.deepcopy(config), config_overrides)
+
+    env = create_env(config, rank=0, seed=seed)
+    action_low = np.array(env.action_space.low, dtype=np.float32)
+    action_high = np.array(env.action_space.high, dtype=np.float32)
+    obs_shape = (3, 96, 96)  # (C, H, W) — consistent with training setup
+    action_dim = int(env.action_space.shape[0])
+    direction = str(config["environment"].get("direction", "CCW")).upper()
+
+    checkpoint_path = Path(policy_checkpoint)
+    use_sb3 = checkpoint_path.suffix == ".zip"
+
+    if use_sb3:
+        sb3_model = _load_sb3_policy(checkpoint_path)
+        torch_policy = None
+    else:
+        torch_policy = _load_torch_policy(checkpoint_path, policy_variant, obs_shape, action_dim, device)
+        sb3_model = None
+
+    writer = ReplayWriter(output_dir, split=split)
+    saved_paths: list[Path] = []
+    episode_rewards: list[float] = []
+    episode_lengths: list[int] = []
+    episode_progress: list[float] = []
+    episode_offtrack: list[int] = []
+    frames_collected = 0
+    episode_id = 0
+    video_writer: cv2.VideoWriter | None = None
+    video_path: Path | None = None
+
+    try:
+        while frames_collected < target_frames:
+            obs = env.reset()
+            done = False
+            observations = []
+            actions = []
+            rewards = []
+            dones = []
+            truncated = []
+            telemetry = {
+                "progress": [],
+                "progress_delta": [],
+                "speed": [],
+                "steer": [],
+                "corner_angle": [],
+                "offtrack": [],
+                "track_index": [],
+                "telemetry_valid": [],
+            }
+            episode_reward = 0.0
+            offtrack_seen = False
+            info: dict = {}
+            prev_progress = 0.0
+
+            while not done and frames_collected < target_frames:
+                if use_sb3:
+                    action_np, _ = sb3_model.predict(obs, deterministic=deterministic)
+                    action_np = action_np.astype(np.float32)
+                else:
+                    with torch.no_grad():
+                        obs_t = _obs_to_tensor(obs, device)
+                        raw_action, _, _ = torch_policy.act(obs_t, deterministic=deterministic)
+                        # Apply env-space mapping (tanh for steer, sigmoid for throttle/brake)
+                        env_action_t = torch_policy.raw_to_env_action(raw_action)
+                        action_np = env_action_t.squeeze(0).cpu().numpy().astype(np.float32)
+
+                env_action = _clip_action(action_np, action_low, action_high)
+                next_obs, reward, done, info = env.step(env_action)
+                info = info if isinstance(info, dict) else {}
+
+                observations.append(obs.astype(np.uint8))
+                actions.append(env_action)
+                rewards.append(float(reward))
+                dones.append(bool(done))
+                truncated.append(bool(info.get("TimeLimit.truncated", False)))
+                step_telemetry = _extract_step_telemetry(info, env_action, prev_progress)
+                prev_progress = float(step_telemetry["progress"])
+                for key, value in step_telemetry.items():
+                    telemetry[key].append(value)
+                episode_reward += float(reward)
+                if int(info.get("events/offtrack", 0)) > 0:
+                    offtrack_seen = True
+                frames_collected += 1
+
+                if render or record_video:
+                    frame = env.render(mode="rgb_array")
+                    if frame is not None:
+                        overlay = _render_overlay(
+                            frame,
+                            [
+                                f"source=ppo_policy split={split}",
+                                f"checkpoint={checkpoint_path.name} direction={direction}",
+                                f"action=[{env_action[0]:+.2f}, {env_action[1]:.2f}, {env_action[2]:.2f}]",
+                                f"frames={frames_collected}/{target_frames}",
+                            ],
+                        )
+                        frame_bgr = cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR)
+                        if record_video:
+                            if video_writer is None:
+                                video_writer, video_path = _init_video_writer(
+                                    Path(output_dir) / "videos", split=split, frame_shape=overlay.shape, fps=video_fps
+                                )
+                            video_writer.write(frame_bgr)
+                        if render:
+                            cv2.imshow(f"PPO Collector: {split}", frame_bgr)
+                            cv2.waitKey(1)
+
+                obs = next_obs
+
+            if not observations:
+                continue
+
+            final_info = info if isinstance(info, dict) else {}
+            metadata = {
+                "collection_source": "ppo_policy",
+                "policy_checkpoint": str(checkpoint_path),
+                "policy_variant": policy_variant if not use_sb3 else "sb3",
+                "deterministic": deterministic,
+                "direction": direction,
+                "seed": seed + episode_id,
+                "config_overrides": config_overrides or {},
+                "num_steps": len(observations),
+            }
+            saved_paths.append(
+                _finalize_episode(
+                    writer=writer,
+                    split=split,
+                    episode_id=episode_id,
+                    observations=observations,
+                    actions=actions,
+                    rewards=rewards,
+                    dones=dones,
+                    truncated=truncated,
+                    telemetry=telemetry,
+                    metadata=metadata,
+                )
+            )
+            episode_rewards.append(episode_reward)
+            episode_lengths.append(len(observations))
+            episode_progress.append(float(final_info.get("progress", 0.0)))
+            episode_offtrack.append(int(offtrack_seen))
+            print(
+                f"[PPOCollector:{split}] episode={episode_id} steps={len(observations)} "
+                f"reward={episode_reward:.2f} progress={float(final_info.get('progress', 0.0)):.2%} "
+                f"offtrack={int(offtrack_seen)} frames_total={frames_collected}/{target_frames}",
+                flush=True,
+            )
+            episode_id += 1
+    finally:
+        if video_writer is not None:
+            video_writer.release()
+            print(f"[PPOCollector:{split}] Video saved to {video_path}", flush=True)
+        env.close()
+        cv2.destroyAllWindows()
+
+    summary = _collection_summary(saved_paths, episode_rewards, episode_lengths, episode_progress, episode_offtrack, frames_collected)
+    print(f"[PPOCollector:{split}] Summary: {summary}", flush=True)
+    return CollectionResult(episode_paths=saved_paths, summary=summary)
+
+
 LEFT_STEER = -1.0
 RIGHT_STEER = 1.0
 NEUTRAL_STEER = 0.0
 MANUAL_MAX_STEER = 0.55
 MANUAL_STEER_STEP = 0.12
 MANUAL_STEER_DECAY = 0.18
-MANUAL_THROTTLE_RISE = 0.22
-MANUAL_THROTTLE_DECAY = 0.32
-MANUAL_THROTTLE_BRAKE_DECAY = 0.05
+MANUAL_THROTTLE_STEP = 0.12
+MANUAL_THROTTLE_DECAY = 0.06
+MANUAL_THROTTLE_BRAKE_DECAY = 0.18
 MANUAL_HALF_THROTTLE_TARGET = 0.50
 MANUAL_BRAKE_RISE = 0.10
 MANUAL_BRAKE_DECAY = 0.18
@@ -202,6 +461,7 @@ def _finalize_episode(
     rewards: list[float],
     dones: list[bool],
     truncated: list[bool],
+    telemetry: dict[str, list[float | int]],
     metadata: dict[str, Any],
 ) -> Path:
     action_array = np.asarray(actions, dtype=np.float32)
@@ -215,6 +475,14 @@ def _finalize_episode(
         action_mean_raw=action_array.copy(),
         action_noisy_raw=action_array.copy(),
         noise=zero_noise,
+        progress=np.asarray(telemetry["progress"], dtype=np.float32),
+        progress_delta=np.asarray(telemetry["progress_delta"], dtype=np.float32),
+        speed=np.asarray(telemetry["speed"], dtype=np.float32),
+        steer=np.asarray(telemetry["steer"], dtype=np.float32),
+        corner_angle=np.asarray(telemetry["corner_angle"], dtype=np.float32),
+        offtrack=np.asarray(telemetry["offtrack"], dtype=np.float32),
+        track_index=np.asarray(telemetry["track_index"], dtype=np.int32),
+        telemetry_valid=np.asarray(telemetry["telemetry_valid"], dtype=np.bool_),
         metadata=metadata,
     )
     return writer.save_episode(episode=episode, episode_id=episode_id)
@@ -276,8 +544,19 @@ def collect_automatic_maneuver_dataset(
             rewards = []
             dones = []
             truncated = []
+            telemetry = {
+                "progress": [],
+                "progress_delta": [],
+                "speed": [],
+                "steer": [],
+                "corner_angle": [],
+                "offtrack": [],
+                "track_index": [],
+                "telemetry_valid": [],
+            }
             episode_reward = 0.0
             offtrack_seen = False
+            prev_progress = 0.0
 
             for action in maneuver.actions:
                 if done or frames_collected >= target_frames:
@@ -291,6 +570,10 @@ def collect_automatic_maneuver_dataset(
                 rewards.append(float(reward))
                 dones.append(bool(done))
                 truncated.append(bool(info.get("TimeLimit.truncated", False)))
+                step_telemetry = _extract_step_telemetry(info, env_action, prev_progress)
+                prev_progress = float(step_telemetry["progress"])
+                for key, value in step_telemetry.items():
+                    telemetry[key].append(value)
                 episode_reward += float(reward)
                 if int(info.get("events/offtrack", 0)) > 0:
                     offtrack_seen = True
@@ -341,6 +624,7 @@ def collect_automatic_maneuver_dataset(
                     rewards=rewards,
                     dones=dones,
                     truncated=truncated,
+                    telemetry=telemetry,
                     metadata=metadata,
                 )
             )
@@ -404,9 +688,9 @@ def _poll_manual_controls(
     if brake_pressed:
         throttle = max(0.0, throttle - MANUAL_THROTTLE_BRAKE_DECAY)
     elif keys[pygame_module.K_UP]:
-        throttle = min(1.0, throttle + MANUAL_THROTTLE_RISE)
+        throttle = min(1.0, throttle + MANUAL_THROTTLE_STEP)
     elif keys[pygame_module.K_x]:
-        throttle = min(MANUAL_HALF_THROTTLE_TARGET, throttle + MANUAL_THROTTLE_RISE)
+        throttle = min(MANUAL_HALF_THROTTLE_TARGET, throttle + MANUAL_THROTTLE_STEP)
     else:
         throttle = max(0.0, throttle - MANUAL_THROTTLE_DECAY)
 
@@ -459,6 +743,7 @@ def collect_manual_keyboard_dataset(
     split: str,
     seed: int,
     target_frames: int,
+    target_episodes: int | None = None,
     render: bool = True,
     record_video: bool = False,
     video_fps: float = 30.0,
@@ -488,7 +773,9 @@ def collect_manual_keyboard_dataset(
     quit_requested = False
 
     try:
-        while frames_collected < target_frames and not quit_requested:
+        while frames_collected < target_frames and not quit_requested and (
+            target_episodes is None or episode_id < int(target_episodes)
+        ):
             obs = env.reset()
             done = False
             state = ManualControlState()
@@ -498,8 +785,19 @@ def collect_manual_keyboard_dataset(
             rewards = []
             dones = []
             truncated = []
+            telemetry = {
+                "progress": [],
+                "progress_delta": [],
+                "speed": [],
+                "steer": [],
+                "corner_angle": [],
+                "offtrack": [],
+                "track_index": [],
+                "telemetry_valid": [],
+            }
             episode_reward = 0.0
             offtrack_seen = False
+            prev_progress = 0.0
 
             while not done and frames_collected < target_frames and not quit_requested:
                 env_action = _clip_action(np.asarray([state.steer, state.throttle, state.brake], dtype=np.float32), action_low, action_high)
@@ -511,6 +809,10 @@ def collect_manual_keyboard_dataset(
                 rewards.append(float(reward))
                 dones.append(bool(done))
                 truncated.append(bool(info.get("TimeLimit.truncated", False)))
+                step_telemetry = _extract_step_telemetry(info, env_action, prev_progress)
+                prev_progress = float(step_telemetry["progress"])
+                for key, value in step_telemetry.items():
+                    telemetry[key].append(value)
                 episode_reward += float(reward)
                 if int(info.get("events/offtrack", 0)) > 0:
                     offtrack_seen = True
@@ -524,8 +826,8 @@ def collect_manual_keyboard_dataset(
                             f"source=manual split={split}",
                             f"direction={direction} regime={speed_regime} recovery_focus={int(state.recovery_focus)}",
                             f"action=[{env_action[0]:+.2f}, {env_action[1]:.2f}, {env_action[2]:.2f}]",
-                            f"keys: Left/Right ramp steer to +/-{MANUAL_MAX_STEER:.2f}, Up ramps throttle, Down ramps brake",
-                            "keys: release = fast throttle/brake decay, Down adds brake and rapidly bleeds throttle",
+                            f"keys: Left/Right ramp steer to +/-{MANUAL_MAX_STEER:.2f}, Up ramps throttle by {MANUAL_THROTTLE_STEP:.2f}, Down ramps brake",
+                            "keys: throttle holds and decays slowly on release, Down bleeds throttle while braking",
                             "keys: f recovery, m marker, r reset, q quit",
                         ],
                     )
@@ -578,6 +880,7 @@ def collect_manual_keyboard_dataset(
                     rewards=rewards,
                     dones=dones,
                     truncated=truncated,
+                    telemetry=telemetry,
                     metadata=metadata,
                 )
             )

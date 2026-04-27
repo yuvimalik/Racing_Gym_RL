@@ -8,8 +8,8 @@ paths:
 collector:
   automatic:
     seed: 42
-    render: true
-    record_video: true
+    render: false
+    record_video: false
     video_fps: 30.0
     splits:
       train_frames: 500
@@ -44,31 +44,23 @@ collector:
         config_overrides:
           safety_governor:
             enabled: false
-  manual:
-    seed: 123
-    target_frames: 5000
-    render: true
-    record_video: true
-    video_fps: 30.0
-    direction: CCW
-    regime: high
 
 autoencoder:
-  batch_size: 16
-  epochs: 1000
+  batch_size: 128
+  epochs: 500
   learning_rate: 0.001
 
 rssm:
   action_dim: 3
-  hidden_dim: 512
-  stochastic_dim: 32
+  hidden_dim: 768
+  stochastic_dim: 64
   embedding_dim: 512
   min_std: 0.1
   max_std: 2.0
 
 offline_training:
-  sequence_length: 50
-  batch_size: 16
+  sequence_length: 100
+  batch_size: 64
   learning_rate: 0.0003
   free_nats: 1.0
   kl_scale: 1.0
@@ -81,13 +73,13 @@ offline_training:
     corner_angle: 0.5
     offtrack: 2.0
   hallucination_context: 50
-  hallucination_horizon: 100
+  hallucination_horizon: 150
   hallucination_video_fps: 8.0
   window_stride: 4
-  num_workers: 4
+  num_workers: 16
   pin_memory: true
   persistent_workers: true
-  prefetch_factor: 2
+  prefetch_factor: 4
   use_amp: true
   curated_eval_clips:
     - name: sharp_turn
@@ -134,7 +126,7 @@ control_training:
   checkpoints_dir: ./models/world_model_control
   artifacts_dir: ./results/world_model/control
   window_stride: 4
-  num_workers: 4
+  num_workers: 16
   pin_memory: true
   persistent_workers: true
-  prefetch_factor: 2
+  prefetch_factor: 4

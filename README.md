@@ -2,7 +2,9 @@
 
 A reinforcement learning project for training policies in the `multi_car_racing` environment. The repo supports the legacy single-agent SB3 flow and a maintained local torch path for single-agent and multi-agent training.
 
-Google Colab:[https://colab.research.google.com/github/yuvimalik/Racing_Gym_RL/blob/main/colab_training.ipynb]
+Google Colab:
+- PPO training notebook: [https://colab.research.google.com/github/yuvimalik/Racing_Gym_RL/blob/main/colab_training.ipynb]
+- Executable PPO + world-model demo: [https://colab.research.google.com/github/yuvimalik/Racing_Gym_RL/blob/main/colab_ppo_world_model_demo.ipynb]
 
 ## Project Overview
 
@@ -80,13 +82,21 @@ OPENAI_API_KEY=...
 
 ### Google Colab
 
-The project includes a complete Colab notebook (`colab_training.ipynb`) that handles all setup automatically. Simply:
+The project includes:
+
+- `colab_training.ipynb` for the main PPO/autoresearch Colab flow
+- `colab_ppo_world_model_demo.ipynb` for a smaller, executable PPO + world-model demo that:
+  - evaluates the tracked PPO checkpoint
+  - summarizes tracked world-model benchmark results
+  - collects a tiny replay and trains a one-epoch world-model smoke run in Colab
+
+For either notebook:
 
 1. Upload the notebook to Google Colab
 2. Enable GPU: Runtime -> Change runtime type -> GPU
 3. Run all cells sequentially
 
-The notebook will install all dependencies and create necessary directories automatically.
+The notebooks install dependencies and create their own output directories automatically.
 
 ## Configuration
 

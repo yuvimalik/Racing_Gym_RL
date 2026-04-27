@@ -10,7 +10,7 @@ from world_model.collector import _build_maneuver_actions, save_collection_manif
 from world_model.control import FrozenWorldModel, LatentActor, LatentCritic, discounted_bootstrap_returns, imagine_with_actor
 from world_model.models import Decoder, Encoder, RSSMCell, RSSMSequence
 from world_model.replay import EpisodeReplay, ReplayWriter, SequenceReplayDataset
-from world_model.control_training import train_latent_actor_critic_epoch
+from world_model.control_training import save_latent_actor_compare_video, train_latent_actor_critic_epoch
 from world_model.training import build_curated_eval_batch, build_replay_loader, save_side_by_side_hallucination_video, save_video
 
 
@@ -50,6 +50,11 @@ class WorldModelTests(unittest.TestCase):
         self.assertEqual(tuple(output.stochastic.shape), (2, 5, 32))
         self.assertEqual(tuple(output.reward.shape), (2, 5, 1))
         self.assertEqual(tuple(output.reconstruction.shape), (2, 5, 3, 96, 96))
+        self.assertEqual(tuple(output.telemetry["speed"].shape), (2, 5, 1))
+        self.assertEqual(tuple(output.telemetry["progress_delta"].shape), (2, 5, 1))
+        self.assertEqual(tuple(output.telemetry["steer"].shape), (2, 5, 1))
+        self.assertEqual(tuple(output.telemetry["corner_angle"].shape), (2, 5, 1))
+        self.assertEqual(tuple(output.telemetry["offtrack_logits"].shape), (2, 5, 1))
 
     def test_replay_writer_round_trip(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -69,6 +74,8 @@ class WorldModelTests(unittest.TestCase):
             loaded = ReplayWriter.load_episode(saved)
             self.assertEqual(loaded.metadata["episode_id"], 7)
             self.assertEqual(tuple(loaded.observations_uint8.shape), (12, 96, 96, 3))
+            self.assertEqual(tuple(loaded.progress.shape), (12,))
+            self.assertEqual(tuple(loaded.telemetry_valid.shape), (12,))
 
     def test_sequence_dataset_windows_do_not_cross_episodes(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -94,6 +101,8 @@ class WorldModelTests(unittest.TestCase):
             sample = dataset[0]
             self.assertEqual(tuple(sample["images"].shape), (50, 3, 96, 96))
             self.assertEqual(tuple(sample["actions"].shape), (50, 3))
+            self.assertEqual(tuple(sample["speed"].shape), (50, 1))
+            self.assertEqual(tuple(sample["offtrack"].shape), (50, 1))
             self.assertTrue(bool(sample["is_first"][0].item()))
 
     def test_sequence_dataset_window_stride_reduces_index_count(self):
@@ -310,6 +319,23 @@ class WorldModelTests(unittest.TestCase):
             self.assertIn("imagined_reward_mean", metrics)
             self.assertTrue(all(parameter.grad is None for parameter in frozen.model.parameters()))
 
+    def test_latent_actor_compare_video_smoke(self):
+        frozen = FrozenWorldModel(RSSMSequence())
+        observations = np.random.randint(0, 255, size=(70, 96, 96, 3), dtype=np.uint8)
+        actions = np.random.randn(70, 3).astype(np.float32)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = save_latent_actor_compare_video(
+                world_model=frozen,
+                observations_uint8=observations,
+                actions=actions,
+                output_path=Path(temp_dir) / "compare.mp4",
+                device="cpu",
+                context_length=20,
+                horizon=30,
+                fps=8.0,
+            )
+            self.assertTrue(path.is_file())
+
     def test_manifest_contains_summary(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             episode_paths = [Path(temp_dir) / "train" / "episode_000001.npz"]
@@ -361,8 +387,15 @@ class WorldModelTests(unittest.TestCase):
         self.assertEqual(control["imagination_horizon"], 12)
         self.assertEqual(control["batch_size"], 32)
         self.assertEqual(control["eval_episodes"], 3)
+        offline = config["offline_training"]
+        self.assertEqual(float(offline["telemetry_loss_scale"]), 0.25)
+        self.assertEqual(float(offline["telemetry_weights"]["offtrack"]), 2.0)
         self.assertEqual(control["window_stride"], 4)
         self.assertTrue(control["pin_memory"])
+        self.assertTrue(control["record_eval_video"])
+        self.assertTrue(control["record_compare_video"])
+        self.assertEqual(control["compare_context_length"], 20)
+        self.assertEqual(control["compare_horizon"], 50)
 
 
 if __name__ == "__main__":

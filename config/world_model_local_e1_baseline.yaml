@@ -8,8 +8,8 @@ paths:
 collector:
   automatic:
     seed: 42
-    render: true
-    record_video: true
+    render: false
+    record_video: false
     video_fps: 30.0
     splits:
       train_frames: 500
@@ -27,35 +27,10 @@ collector:
           safety_governor:
             enabled: true
             speed_cap_ratio: 0.30
-      medium:
-        throttle_scale: 0.80
-        steering_scale: 1.00
-        brake_scale: 1.00
-        transition_steps: 4
-        config_overrides:
-          safety_governor:
-            enabled: true
-            speed_cap_ratio: 0.50
-      high:
-        throttle_scale: 1.00
-        steering_scale: 1.00
-        brake_scale: 1.00
-        transition_steps: 3
-        config_overrides:
-          safety_governor:
-            enabled: false
-  manual:
-    seed: 123
-    target_frames: 5000
-    render: true
-    record_video: true
-    video_fps: 30.0
-    direction: CCW
-    regime: high
 
 autoencoder:
   batch_size: 16
-  epochs: 1000
+  epochs: 100
   learning_rate: 0.001
 
 rssm:
@@ -84,10 +59,9 @@ offline_training:
   hallucination_horizon: 100
   hallucination_video_fps: 8.0
   window_stride: 4
-  num_workers: 4
-  pin_memory: true
-  persistent_workers: true
-  prefetch_factor: 2
+  num_workers: 0
+  pin_memory: false
+  persistent_workers: false
   use_amp: true
   curated_eval_clips:
     - name: sharp_turn
@@ -108,33 +82,3 @@ offline_training:
       start_index: 1750
       context_length: 50
       horizon: 100
-
-control_training:
-  epochs: 10
-  context_length: 20
-  imagination_horizon: 12
-  batch_size: 32
-  actor_learning_rate: 0.0003
-  critic_learning_rate: 0.0003
-  discount: 0.99
-  action_l2_scale: 0.0001
-  actor_hidden_dim: 256
-  critic_hidden_dim: 256
-  eval_every: 1
-  eval_episodes: 3
-  eval_max_steps: 1000
-  eval_seed: 123
-  record_eval_video: true
-  record_compare_video: true
-  eval_video_fps: 10.0
-  compare_context_length: 20
-  compare_horizon: 50
-  eval_overlay: true
-  world_model_checkpoint: ./models/world_model/rssm_sequence.pt
-  checkpoints_dir: ./models/world_model_control
-  artifacts_dir: ./results/world_model/control
-  window_stride: 4
-  num_workers: 4
-  pin_memory: true
-  persistent_workers: true
-  prefetch_factor: 2

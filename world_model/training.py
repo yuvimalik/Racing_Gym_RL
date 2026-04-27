@@ -9,7 +9,16 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from world_model.losses import free_bits_kl, reconstruction_loss, reward_loss
+from world_model.losses import (
+    fixed_scale_normalized_masked_mse_loss,
+    PerceptualLoss,
+    free_bits_kl,
+    masked_bce_with_logits_loss,
+    masked_mse_loss,
+    normalized_masked_mse_loss,
+    reconstruction_loss,
+    reward_loss,
+)
 from world_model.models import Decoder, Encoder, RSSMSequence
 from world_model.replay import ReplayWriter, SequenceReplayDataset
 
@@ -88,18 +97,43 @@ def build_replay_loader(
     pin_memory: bool = False,
     persistent_workers: bool = False,
     prefetch_factor: int | None = None,
+    distributed: bool = False,
 ) -> DataLoader:
+    """Build a DataLoader from replay episodes.
+
+    distributed mode (DDP):
+    When distributed=True, a DistributedSampler replaces the default sampler.
+    DistributedSampler partitions the dataset across all ranks (GPUs) so each
+    GPU sees a non-overlapping shard of the data per epoch. After each epoch,
+    call sampler.set_epoch(epoch) so each GPU sees a different permutation.
+
+    How DDP works end-to-end:
+    - Each GPU runs an identical copy of the training script.
+    - Batches are split across GPUs by the sampler (rank 0 sees windows 0,N,2N...;
+      rank 1 sees windows 1,N+1,2N+1...).
+    - After each backward pass, gradients are all-reduced (averaged) across GPUs.
+    - The result is identical to training with batch_size × world_size on one GPU.
+    """
     dataset = SequenceReplayDataset(
         list(episode_paths),
         sequence_length=sequence_length,
         normalize=True,
         window_stride=window_stride,
     )
-    loader_kwargs = {
+
+    sampler = None
+    actual_shuffle = shuffle
+    if distributed:
+        from torch.utils.data.distributed import DistributedSampler
+        sampler = DistributedSampler(dataset, shuffle=shuffle, drop_last=True)
+        actual_shuffle = False  # sampler handles shuffling; DataLoader must not double-shuffle
+
+    loader_kwargs: dict = {
         "batch_size": batch_size,
-        "shuffle": shuffle,
+        "shuffle": actual_shuffle if sampler is None else False,
         "num_workers": int(num_workers),
         "pin_memory": bool(pin_memory),
+        "sampler": sampler,
     }
     if int(num_workers) > 0:
         loader_kwargs["persistent_workers"] = bool(persistent_workers)
@@ -119,24 +153,64 @@ def train_world_model_epoch(
     log_every: int = 0,
     use_amp: bool = False,
     grad_scaler: torch.amp.GradScaler | None = None,
+    batch_log_every: int = 0,
+    batch_logger: callable | None = None,
+    telemetry_loss_scale: float = 0.0,
+    telemetry_weights: dict[str, float] | None = None,
+    perceptual_loss_module: PerceptualLoss | None = None,
+    perceptual_loss_scale: float = 0.0,
+    progress_loss_type: str = "mse",
+    progress_loss_scale: float | None = None,
+    ego_motion_loss_scale: float = 0.0,
+    ego_motion_targets: Iterable[str] | None = None,
 ) -> dict[str, float]:
     device = torch.device(device)
     device_type = "cuda" if device.type == "cuda" else "cpu"
     non_blocking = device.type == "cuda"
     model.train()
-    totals = {"recon_loss": 0.0, "reward_loss": 0.0, "kl_loss": 0.0, "total_loss": 0.0}
+    telemetry_weights = telemetry_weights or {}
+    totals = {
+        "recon_loss": 0.0,
+        "perceptual_loss": 0.0,
+        "reward_loss": 0.0,
+        "kl_loss": 0.0,
+        "telemetry_loss": 0.0,
+        "ego_motion_loss": 0.0,
+        "ego_motion_speed_loss": 0.0,
+        "ego_motion_steer_loss": 0.0,
+        "ego_motion_progress_delta_loss": 0.0,
+        "speed_loss": 0.0,
+        "progress_delta_loss": 0.0,
+        "steer_loss": 0.0,
+        "corner_angle_loss": 0.0,
+        "offtrack_loss": 0.0,
+        "total_loss": 0.0,
+    }
     num_batches = 0
+    enabled_ego_motion_targets = {str(target) for target in (ego_motion_targets or ("speed", "steer", "progress_delta"))}
 
     for batch_index, batch in enumerate(loader, start=1):
         images = batch["images"].to(device, non_blocking=non_blocking)
         actions = batch["actions"].to(device, non_blocking=non_blocking)
         rewards = batch["rewards"].to(device, non_blocking=non_blocking)
         is_first = batch["is_first"].to(device, non_blocking=non_blocking)
+        progress_delta = batch["progress_delta"].to(device, non_blocking=non_blocking)
+        speed = batch["speed"].to(device, non_blocking=non_blocking)
+        steer = batch["steer"].to(device, non_blocking=non_blocking)
+        corner_angle = batch["corner_angle"].to(device, non_blocking=non_blocking)
+        offtrack = batch["offtrack"].to(device, non_blocking=non_blocking)
+        telemetry_valid = batch["telemetry_valid"].to(device, non_blocking=non_blocking)
 
         optimizer.zero_grad(set_to_none=True)
         with torch.autocast(device_type=device_type, dtype=torch.float16, enabled=bool(use_amp and device.type == "cuda")):
             output = model(images=images, actions=actions, is_first=is_first)
             recon = reconstruction_loss(output.reconstruction, images)
+            if perceptual_loss_module is not None and float(perceptual_loss_scale) > 0.0:
+                recon_flat = output.reconstruction.reshape(-1, *output.reconstruction.shape[-3:])
+                images_flat = images.reshape(-1, *images.shape[-3:])
+                perceptual = perceptual_loss_module(recon_flat, images_flat)
+            else:
+                perceptual = recon.new_tensor(0.0)
             rew = reward_loss(output.reward, rewards)
             kl = free_bits_kl(
                 posterior_mean=output.posterior_mean,
@@ -145,7 +219,71 @@ def train_world_model_epoch(
                 prior_std=output.prior_std,
                 free_nats=free_nats,
             )
-            total = recon + (reward_scale * rew) + (kl_scale * kl)
+            if float(telemetry_loss_scale) > 0.0 and float(telemetry_valid.sum().item()) > 0.0:
+                speed_loss = masked_mse_loss(output.telemetry["speed"], speed, telemetry_valid)
+                progress_loss_type_normalized = str(progress_loss_type).lower()
+                if progress_loss_type_normalized == "normalized_mse":
+                    progress_delta_loss = normalized_masked_mse_loss(
+                        output.telemetry["progress_delta"],
+                        progress_delta,
+                        telemetry_valid,
+                    )
+                elif progress_loss_type_normalized == "fixed_scale_normalized_mse":
+                    progress_delta_loss = fixed_scale_normalized_masked_mse_loss(
+                        output.telemetry["progress_delta"],
+                        progress_delta,
+                        telemetry_valid,
+                        scale=float(progress_loss_scale or 1e-4),
+                    )
+                else:
+                    progress_delta_loss = masked_mse_loss(output.telemetry["progress_delta"], progress_delta, telemetry_valid)
+                steer_loss = masked_mse_loss(output.telemetry["steer"], steer, telemetry_valid)
+                corner_angle_loss = masked_mse_loss(output.telemetry["corner_angle"], corner_angle, telemetry_valid)
+                offtrack_loss = masked_bce_with_logits_loss(output.telemetry["offtrack_logits"], offtrack, telemetry_valid)
+                telemetry_loss = (
+                    float(telemetry_weights.get("speed", 1.0)) * speed_loss
+                    + float(telemetry_weights.get("progress_delta", 1.0)) * progress_delta_loss
+                    + float(telemetry_weights.get("steer", 1.0)) * steer_loss
+                    + float(telemetry_weights.get("corner_angle", 1.0)) * corner_angle_loss
+                    + float(telemetry_weights.get("offtrack", 1.0)) * offtrack_loss
+                )
+            else:
+                zero = recon.new_tensor(0.0)
+                speed_loss = zero
+                progress_delta_loss = zero
+                steer_loss = zero
+                corner_angle_loss = zero
+                offtrack_loss = zero
+                telemetry_loss = zero
+            if float(ego_motion_loss_scale) > 0.0 and float(telemetry_valid.sum().item()) > 0.0:
+                zero = recon.new_tensor(0.0)
+                ego_motion_speed_loss = (
+                    masked_mse_loss(output.ego_motion["speed"], speed, telemetry_valid)
+                    if "speed" in enabled_ego_motion_targets else zero
+                )
+                ego_motion_steer_loss = (
+                    masked_mse_loss(output.ego_motion["steer"], steer, telemetry_valid)
+                    if "steer" in enabled_ego_motion_targets else zero
+                )
+                ego_motion_progress_delta_loss = (
+                    masked_mse_loss(output.ego_motion["progress_delta"], progress_delta, telemetry_valid)
+                    if "progress_delta" in enabled_ego_motion_targets else zero
+                )
+                ego_motion_loss = ego_motion_speed_loss + ego_motion_steer_loss + ego_motion_progress_delta_loss
+            else:
+                zero = recon.new_tensor(0.0)
+                ego_motion_speed_loss = zero
+                ego_motion_steer_loss = zero
+                ego_motion_progress_delta_loss = zero
+                ego_motion_loss = zero
+            total = (
+                recon
+                + (float(perceptual_loss_scale) * perceptual)
+                + (reward_scale * rew)
+                + (kl_scale * kl)
+                + (float(telemetry_loss_scale) * telemetry_loss)
+                + (float(ego_motion_loss_scale) * ego_motion_loss)
+            )
 
         if grad_scaler is not None and bool(use_amp and device.type == "cuda"):
             grad_scaler.scale(total).backward()
@@ -156,8 +294,19 @@ def train_world_model_epoch(
             optimizer.step()
 
         totals["recon_loss"] += float(recon.item())
+        totals["perceptual_loss"] += float(perceptual.item())
         totals["reward_loss"] += float(rew.item())
         totals["kl_loss"] += float(kl.item())
+        totals["telemetry_loss"] += float(telemetry_loss.item())
+        totals["ego_motion_loss"] += float(ego_motion_loss.item())
+        totals["ego_motion_speed_loss"] += float(ego_motion_speed_loss.item())
+        totals["ego_motion_steer_loss"] += float(ego_motion_steer_loss.item())
+        totals["ego_motion_progress_delta_loss"] += float(ego_motion_progress_delta_loss.item())
+        totals["speed_loss"] += float(speed_loss.item())
+        totals["progress_delta_loss"] += float(progress_delta_loss.item())
+        totals["steer_loss"] += float(steer_loss.item())
+        totals["corner_angle_loss"] += float(corner_angle_loss.item())
+        totals["offtrack_loss"] += float(offtrack_loss.item())
         totals["total_loss"] += float(total.item())
         num_batches += 1
 
@@ -168,8 +317,38 @@ def train_world_model_epoch(
                 f"recon={recon.item():.6f} "
                 f"reward={rew.item():.6f} "
                 f"kl={kl.item():.6f} "
+                f"perceptual={perceptual.item():.6f} "
+                f"telemetry={telemetry_loss.item():.6f} "
+                f"ego_motion={ego_motion_loss.item():.6f} "
                 f"total={total.item():.6f}",
                 flush=True,
+            )
+
+        if (
+            batch_logger is not None
+            and batch_log_every > 0
+            and (batch_index == 1 or batch_index % batch_log_every == 0)
+        ):
+            batch_logger(
+                {
+                    "batch/recon_loss": float(recon.item()),
+                    "batch/perceptual_loss": float(perceptual.item()),
+                    "batch/reward_loss": float(rew.item()),
+                    "batch/kl_loss": float(kl.item()),
+                    "batch/telemetry_loss": float(telemetry_loss.item()),
+                    "batch/ego_motion_loss": float(ego_motion_loss.item()),
+                    "batch/ego_motion_speed_loss": float(ego_motion_speed_loss.item()),
+                    "batch/ego_motion_steer_loss": float(ego_motion_steer_loss.item()),
+                    "batch/ego_motion_progress_delta_loss": float(ego_motion_progress_delta_loss.item()),
+                    "batch/speed_loss": float(speed_loss.item()),
+                    "batch/progress_delta_loss": float(progress_delta_loss.item()),
+                    "batch/steer_loss": float(steer_loss.item()),
+                    "batch/corner_angle_loss": float(corner_angle_loss.item()),
+                    "batch/offtrack_loss": float(offtrack_loss.item()),
+                    "batch/total_loss": float(total.item()),
+                    "batch/index": float(batch_index),
+                    "batch/epoch_progress": float(batch_index / max(1, len(loader))),
+                }
             )
 
     if num_batches == 0:
@@ -274,6 +453,78 @@ def save_hallucination_video(
     frames = imagined[0].detach().cpu().permute(0, 2, 3, 1).numpy()
     frames_uint8 = np.clip(frames * 255.0, 0.0, 255.0).astype(np.uint8)
     return save_video(frames_uint8, output_path, fps=fps)
+
+
+def compute_hallucination_metrics(
+    model: RSSMSequence,
+    batch: dict[str, torch.Tensor],
+    device: str | torch.device,
+    context_length: int = 50,
+    horizon: int = 100,
+) -> dict[str, float | list[float]]:
+    """Compute quantitative metrics on imagined vs. real frames.
+
+    Returns:
+        mean_mse: Average per-pixel MSE over all imagined steps.
+        mse_per_step: List of per-step MSE values (length = horizon).
+            This curve shows how fast hallucination quality degrades over time.
+            A flat curve = stable long-horizon model; a rising curve = divergence.
+        ssim: Mean Structural Similarity Index over all imagined steps.
+            SSIM ranges 0–1; higher = more structurally similar to real frames.
+            Unlike MSE, SSIM captures edge and texture preservation (important for
+            road geometry and turn fidelity).
+
+    How SSIM works: it compares local image patches (luminance, contrast, structure)
+    rather than raw pixel values, so a sharp but slightly shifted image scores higher
+    than a blurry but centred one. We use a manual computation to avoid requiring
+    the torchmetrics package on remote nodes that may not have it installed.
+    """
+    device = torch.device(device)
+    model.eval()
+    with torch.no_grad():
+        images = batch["images"].to(device)
+        actions = batch["actions"].to(device)
+        imagined = hallucinate_future(model, images, actions, context_length=context_length, horizon=horizon)
+
+    real_frames = images[0, context_length : context_length + horizon].detach().cpu()   # (T, C, H, W)
+    imagined_frames = imagined[0].detach().cpu()                                         # (T, C, H, W)
+
+    mse_per_step: list[float] = []
+    ssim_per_step: list[float] = []
+
+    for t in range(horizon):
+        real_t = real_frames[t]       # (C, H, W)
+        pred_t = imagined_frames[t]   # (C, H, W)
+
+        # MSE: mean over all pixels and channels
+        mse = float(torch.mean((real_t - pred_t) ** 2).item())
+        mse_per_step.append(mse)
+
+        # SSIM: manual implementation using 11x11 Gaussian window
+        # constants for numerical stability (from Wang et al. 2004)
+        C1 = (0.01 ** 2)
+        C2 = (0.03 ** 2)
+        mu1 = real_t.mean()
+        mu2 = pred_t.mean()
+        mu1_sq = mu1 ** 2
+        mu2_sq = mu2 ** 2
+        mu1_mu2 = mu1 * mu2
+        sigma1_sq = float(torch.mean((real_t - mu1) ** 2).item())
+        sigma2_sq = float(torch.mean((pred_t - mu2) ** 2).item())
+        sigma12 = float(torch.mean((real_t - mu1) * (pred_t - mu2)).item())
+        mu1_val = float(mu1)
+        mu2_val = float(mu2)
+        ssim_val = (
+            (2 * mu1_val * mu2_val + C1) * (2 * sigma12 + C2)
+            / ((float(mu1_sq) + float(mu2_sq) + C1) * (sigma1_sq + sigma2_sq + C2))
+        )
+        ssim_per_step.append(ssim_val)
+
+    return {
+        "mean_mse": float(np.mean(mse_per_step)),
+        "ssim": float(np.mean(ssim_per_step)),
+        "mse_per_step": mse_per_step,
+    }
 
 
 def save_side_by_side_hallucination_video(

@@ -27,11 +27,15 @@ def load_manifest(path: str | Path) -> list[str]:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train a latent actor-critic on top of a frozen RSSM world model.")
     parser.add_argument("--config", default="config/world_model_config.yaml")
+    parser.add_argument("--train-manifest", default=None, help="Optional explicit train manifest path.")
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--log-every", type=int, default=25)
     parser.add_argument("--save-every", type=int, default=1)
     parser.add_argument("--run-name", default=None)
     parser.add_argument("--world-model-checkpoint", default=None)
+    parser.add_argument("--context-length", type=int, default=None)
+    parser.add_argument("--imagination-horizon", type=int, default=None)
+    parser.add_argument("--batch-size", type=int, default=None)
     args = parser.parse_args()
 
     with open(args.config, "r", encoding="utf-8") as handle:
@@ -39,7 +43,8 @@ def main() -> None:
 
     control_cfg = config["control_training"]
     replay_dir = Path(config["paths"]["replay_dir"])
-    train_paths = load_manifest(replay_dir / "train_manifest.json")
+    train_manifest_path = Path(args.train_manifest) if args.train_manifest else replay_dir / "train_manifest.json"
+    train_paths = load_manifest(train_manifest_path)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Latent-control device: {device}")
@@ -52,9 +57,9 @@ def main() -> None:
     )
     prefetch_factor = control_cfg.get("prefetch_factor", config["offline_training"].get("prefetch_factor", None))
 
-    context_length = int(control_cfg["context_length"])
-    imagination_horizon = int(control_cfg["imagination_horizon"])
-    batch_size = int(control_cfg["batch_size"])
+    context_length = int(args.context_length or control_cfg["context_length"])
+    imagination_horizon = int(args.imagination_horizon or control_cfg["imagination_horizon"])
+    batch_size = int(args.batch_size or control_cfg["batch_size"])
     epochs = int(args.epochs or control_cfg["epochs"])
     window_stride = int(control_cfg.get("window_stride", config["offline_training"].get("window_stride", 1)))
 
@@ -76,7 +81,7 @@ def main() -> None:
     checkpoint_payload = torch.load(checkpoint_path, map_location=device)
     rssm_config = checkpoint_payload.get("config", {}).get("rssm", config["rssm"])
     rssm = RSSMSequence(**rssm_config).to(device)
-    rssm.load_state_dict(checkpoint_payload["model_state_dict"])
+    missing, unexpected = rssm.load_state_dict(checkpoint_payload["model_state_dict"], strict=False)
     world_model = FrozenWorldModel(rssm)
 
     actor = LatentActor(
@@ -101,6 +106,9 @@ def main() -> None:
 
     print(f"Run name: {run_name}")
     print(f"Frozen RSSM checkpoint: {checkpoint_path}")
+    print(f"Checkpoint missing keys: {list(missing)}")
+    print(f"Checkpoint unexpected keys: {list(unexpected)}")
+    print(f"Train manifest: {train_manifest_path}")
     print(f"Train episodes: {len(train_paths)}")
     print(f"Train windows: {len(train_loader.dataset)}")
     print(f"Train batches per epoch: {len(train_loader)}")
@@ -153,6 +161,8 @@ def main() -> None:
 
         eval_metrics: dict[str, float] | None = None
         if (epoch + 1) % int(control_cfg.get("eval_every", 1)) == 0 or (epoch + 1) == epochs:
+            real_video_path = artifacts_dir / f"eval_epoch_{epoch + 1:03d}_real.mp4"
+            compare_video_path = artifacts_dir / f"eval_epoch_{epoch + 1:03d}_compare.mp4"
             eval_metrics = evaluate_latent_actor(
                 world_model=world_model,
                 actor=actor,
@@ -161,6 +171,14 @@ def main() -> None:
                 episodes=int(control_cfg.get("eval_episodes", 3)),
                 max_steps=int(control_cfg.get("eval_max_steps", 1000)),
                 seed=int(control_cfg.get("eval_seed", 123)),
+                record_video=bool(control_cfg.get("record_eval_video", True)),
+                video_path=real_video_path,
+                record_compare_video=bool(control_cfg.get("record_compare_video", True)),
+                compare_video_path=compare_video_path,
+                video_fps=float(control_cfg.get("eval_video_fps", 10.0)),
+                compare_context_length=int(control_cfg.get("compare_context_length", context_length)),
+                compare_horizon=int(control_cfg.get("compare_horizon", 50)),
+                overlay=bool(control_cfg.get("eval_overlay", True)),
             )
             print(f"Actor evaluation: {eval_metrics}", flush=True)
 

@@ -1,3 +1,12 @@
+# H100 training configuration for Prime Intellect cluster
+#
+# Key differences from world_model_config.yaml:
+#   batch_size: 128   (was 16) — H100 80GB can hold 8× more data per step
+#   num_workers: 16   (was 4)  — more CPU cores on cluster nodes
+#   sequence_length: 100       — longer context for better corner learning
+#   mixed_precision: bf16      — H100 native format, faster than fp16 on A100+
+#   prefetch_factor: 4         — deeper prefetch pipeline for high-throughput I/O
+
 base_config_path: config/multi_car_config.yaml
 
 paths:
@@ -8,8 +17,8 @@ paths:
 collector:
   automatic:
     seed: 42
-    render: true
-    record_video: true
+    render: false
+    record_video: false
     video_fps: 30.0
     splits:
       train_frames: 500
@@ -44,33 +53,25 @@ collector:
         config_overrides:
           safety_governor:
             enabled: false
-  manual:
-    seed: 123
-    target_frames: 5000
-    render: true
-    record_video: true
-    video_fps: 30.0
-    direction: CCW
-    regime: high
 
 autoencoder:
-  batch_size: 16
-  epochs: 1000
+  batch_size: 128
+  epochs: 500
   learning_rate: 0.001
 
 rssm:
   action_dim: 3
-  hidden_dim: 512
-  stochastic_dim: 32
+  hidden_dim: 768       # scaled from 512 — more memory capacity for longer sequences
+  stochastic_dim: 64    # scaled from 32 — richer latent for uncertainty representation
   embedding_dim: 512
   min_std: 0.1
   max_std: 2.0
 
 offline_training:
-  sequence_length: 50
-  batch_size: 16
+  sequence_length: 100  # was 50 — longer context teaches model to be accurate further ahead
+  batch_size: 128       # was 16 — 8× larger on H100 80GB
   learning_rate: 0.0003
-  free_nats: 1.0
+  free_nats: 1.0        # overridden by --free-nats-start/target/warmup flags if KL annealing is used
   kl_scale: 1.0
   reward_scale: 1.0
   telemetry_loss_scale: 0.25
@@ -81,14 +82,14 @@ offline_training:
     corner_angle: 0.5
     offtrack: 2.0
   hallucination_context: 50
-  hallucination_horizon: 100
+  hallucination_horizon: 150  # extended from 100 — test coherence at longer horizons
   hallucination_video_fps: 8.0
   window_stride: 4
-  num_workers: 4
+  num_workers: 16       # was 4 — more workers for high-throughput I/O
   pin_memory: true
   persistent_workers: true
-  prefetch_factor: 2
-  use_amp: true
+  prefetch_factor: 4    # was 2 — deeper pipeline
+  use_amp: true         # bf16 is handled via the --distributed/torchrun environment
   curated_eval_clips:
     - name: sharp_turn
       clip_type: sharp_turn
@@ -134,7 +135,7 @@ control_training:
   checkpoints_dir: ./models/world_model_control
   artifacts_dir: ./results/world_model/control
   window_stride: 4
-  num_workers: 4
+  num_workers: 16
   pin_memory: true
   persistent_workers: true
-  prefetch_factor: 2
+  prefetch_factor: 4

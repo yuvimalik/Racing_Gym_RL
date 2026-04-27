@@ -1,0 +1,102 @@
+base_config_path: config/multi_car_config.yaml
+
+paths:
+  replay_dir: ./results/world_model/demo_replay
+  artifacts_dir: ./results/world_model/demo_artifacts
+  checkpoints_dir: ./models/world_model_demo
+
+collector:
+  automatic:
+    seed: 42
+    render: false
+    record_video: false
+    video_fps: 15.0
+    splits:
+      train_frames: 240
+      val_frames: 80
+    directions:
+      - CCW
+    regimes:
+      medium:
+        throttle_scale: 0.80
+        steering_scale: 1.00
+        brake_scale: 1.00
+        transition_steps: 4
+        config_overrides:
+          safety_governor:
+            enabled: true
+            speed_cap_ratio: 0.50
+  manual:
+    seed: 123
+    target_frames: 500
+    render: false
+    record_video: false
+    video_fps: 15.0
+    direction: CCW
+    regime: medium
+
+autoencoder:
+  batch_size: 8
+  epochs: 50
+  learning_rate: 0.001
+
+rssm:
+  action_dim: 3
+  hidden_dim: 256
+  stochastic_dim: 16
+  embedding_dim: 256
+  min_std: 0.1
+  max_std: 2.0
+
+offline_training:
+  sequence_length: 20
+  batch_size: 4
+  learning_rate: 0.0003
+  free_nats: 1.0
+  kl_scale: 1.0
+  reward_scale: 1.0
+  telemetry_loss_scale: 0.25
+  telemetry_weights:
+    speed: 1.0
+    progress_delta: 1.0
+    steer: 0.5
+    corner_angle: 0.5
+    offtrack: 2.0
+  hallucination_context: 10
+  hallucination_horizon: 20
+  hallucination_video_fps: 8.0
+  window_stride: 2
+  num_workers: 0
+  pin_memory: false
+  persistent_workers: false
+  use_amp: false
+  curated_eval_clips: []
+
+control_training:
+  epochs: 1
+  context_length: 10
+  imagination_horizon: 6
+  batch_size: 4
+  actor_learning_rate: 0.0003
+  critic_learning_rate: 0.0003
+  discount: 0.99
+  action_l2_scale: 0.0001
+  actor_hidden_dim: 128
+  critic_hidden_dim: 128
+  eval_every: 1
+  eval_episodes: 1
+  eval_max_steps: 200
+  eval_seed: 123
+  record_eval_video: false
+  record_compare_video: false
+  eval_video_fps: 8.0
+  compare_context_length: 10
+  compare_horizon: 20
+  eval_overlay: true
+  world_model_checkpoint: ./models/world_model_demo/rssm_sequence.pt
+  checkpoints_dir: ./models/world_model_control_demo
+  artifacts_dir: ./results/world_model/demo_control
+  window_stride: 2
+  num_workers: 0
+  pin_memory: false
+  persistent_workers: false

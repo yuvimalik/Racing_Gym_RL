@@ -5,17 +5,16 @@ from pathlib import Path
 
 import yaml
 
-from world_model.collector import collect_automatic_maneuver_dataset, save_collection_manifest
+from world_model.collector import (
+    collect_automatic_maneuver_dataset,
+    collect_manual_keyboard_dataset,
+    collect_ppo_policy_dataset,
+    save_collection_manifest,
+)
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Collect automatic maneuver-based replay episodes for the world model.")
-    parser.add_argument("--config", default="config/world_model_config.yaml")
-    args = parser.parse_args()
-
-    with open(args.config, "r", encoding="utf-8") as handle:
-        config = yaml.safe_load(handle)
-
+def _run_automatic(config: dict, args: argparse.Namespace) -> None:
+    """Original scripted-maneuver collection path."""
     collector_cfg = config["collector"]["automatic"]
     output_dir = Path(config["paths"]["replay_dir"])
     render = bool(collector_cfg.get("render", True))
@@ -48,6 +47,8 @@ def main() -> None:
                     },
                 }
                 split = f"{regime_name}_{direction.lower()}_{split_name}"
+                if args.split_prefix:
+                    split = f"{args.split_prefix}_{split}"
                 result = collect_automatic_maneuver_dataset(
                     base_config_path=config["base_config_path"],
                     output_dir=output_dir,
@@ -68,6 +69,235 @@ def main() -> None:
                 )
                 print(f"Saved {len(result.episode_paths)} automatic episodes to {manifest_path}")
                 seed_offset += 1
+
+
+def _run_ppo_policy(config: dict, args: argparse.Namespace) -> None:
+    """Collect episodes using a trained PPO policy checkpoint.
+
+    Why: A policy-based collector produces more natural, correlated action
+    sequences than scripted maneuvers. Using a mid-training checkpoint (e.g.
+    ppo_racecar_300000_steps.zip) gives the world model diverse driving data
+    including cornering, braking, and mild recovery — without being so perfect
+    that it never shows edge cases.
+
+    Supports both .pt (custom PyTorch) and .zip (SB3) checkpoints.
+    """
+    output_dir = Path(config["paths"]["replay_dir"])
+    collector_cfg = config["collector"]["automatic"]
+    base_seed = int(collector_cfg.get("seed", 42))
+    directions = args.directions if args.directions else [str(d).upper() for d in collector_cfg.get("directions", ["CCW"])]
+
+    for i, direction in enumerate(directions):
+        for split_name, frame_target in [
+            ("train", args.train_frames),
+            ("val", args.val_frames),
+        ]:
+            if frame_target <= 0:
+                continue
+
+            split = f"ppo_{Path(args.policy_checkpoint).stem}_{direction.lower()}_{split_name}"
+            if args.split_prefix:
+                split = f"{args.split_prefix}_{split}"
+            overrides = {
+                "environment": {
+                    "direction": direction,
+                    "use_random_direction": False,
+                }
+            }
+            result = collect_ppo_policy_dataset(
+                base_config_path=config["base_config_path"],
+                output_dir=output_dir,
+                split=split,
+                target_frames=frame_target,
+                seed=base_seed + i,
+                policy_checkpoint=args.policy_checkpoint,
+                policy_variant=args.policy_variant,
+                deterministic=args.deterministic,
+                render=args.render,
+                record_video=args.record_video,
+                video_fps=float(collector_cfg.get("video_fps", 30.0)),
+                config_overrides=overrides,
+                device=args.device,
+            )
+            manifest_path = save_collection_manifest(
+                output_dir=output_dir,
+                split=split,
+                episode_paths=result.episode_paths,
+                summary=result.summary,
+            )
+            print(f"Saved {len(result.episode_paths)} PPO policy episodes to {manifest_path}")
+
+
+def _run_manual(config: dict, args: argparse.Namespace) -> None:
+    """Collect long manual driving episodes with keyboard control.
+
+    Why: Manual collection is the only path where the user can intentionally
+    drive harsh turn entry/apex/exit sequences and mark interesting segments
+    during collection. This is the right tool when automatic/PPO replay lacks
+    true turning behavior.
+    """
+    collector_cfg = config["collector"]["manual"]
+    output_dir = Path(config["paths"]["replay_dir"])
+    seed = int(collector_cfg.get("seed", 123))
+    target_frames = int(args.manual_target_frames or collector_cfg.get("target_frames", 5000))
+    target_episodes = int(args.manual_target_episodes) if args.manual_target_episodes is not None else None
+    direction = str(args.manual_direction or collector_cfg.get("direction", "CCW")).upper()
+    regime = str(args.manual_regime or collector_cfg.get("regime", "high"))
+    render = bool(args.render or collector_cfg.get("render", True))
+    record_video = bool(args.record_video or collector_cfg.get("record_video", True))
+    video_fps = float(collector_cfg.get("video_fps", 30.0))
+
+    split = args.manual_split or f"manual_{regime.lower()}_{direction.lower()}"
+    if args.split_prefix:
+        split = f"{args.split_prefix}_{split}"
+
+    overrides = {
+        "environment": {
+            "direction": direction,
+            "use_random_direction": False,
+        },
+        "safety_governor": {
+            "enabled": False,
+        },
+    }
+
+    result = collect_manual_keyboard_dataset(
+        base_config_path=config["base_config_path"],
+        output_dir=output_dir,
+        split=split,
+        seed=seed,
+        target_frames=target_frames,
+        target_episodes=target_episodes,
+        render=render,
+        record_video=record_video,
+        video_fps=video_fps,
+        config_overrides=overrides,
+        speed_regime=regime,
+    )
+    manifest_path = save_collection_manifest(
+        output_dir=output_dir,
+        split=split,
+        episode_paths=result.episode_paths,
+        summary=result.summary,
+    )
+    print(f"Saved {len(result.episode_paths)} manual episodes to {manifest_path}")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Collect replay episodes for the world model. "
+                    "By default uses scripted maneuvers. Use --policy_checkpoint to collect with a trained PPO policy."
+    )
+    parser.add_argument("--config", default="config/world_model_config.yaml")
+    parser.add_argument(
+        "--manual",
+        action="store_true",
+        help="Collect manual keyboard driving data instead of automatic maneuvers or PPO replay.",
+    )
+
+    # PPO policy collection arguments
+    parser.add_argument(
+        "--policy_checkpoint",
+        default=None,
+        help="Path to a PPO checkpoint (.pt for custom format, .zip for SB3). "
+             "When provided, collects data by running this policy instead of scripted maneuvers. "
+             "Example: models/ppo_racecar_300000_steps.zip or models/best_model_torch.pt",
+    )
+    parser.add_argument(
+        "--policy_variant",
+        default="autoresearch_run_008",
+        choices=["legacy", "autoresearch_run_008"],
+        help="Policy class variant for .pt checkpoints. "
+             "Use 'autoresearch_run_008' for the tanh-squashed variant (most recent). "
+             "Ignored for .zip (SB3) checkpoints.",
+    )
+    parser.add_argument(
+        "--deterministic",
+        action="store_true",
+        default=True,
+        help="Run policy deterministically (use mean action, no sampling). "
+             "Gives cleaner trajectories. Use --no-deterministic for stochastic rollouts.",
+    )
+    parser.add_argument("--no-deterministic", dest="deterministic", action="store_false")
+    parser.add_argument(
+        "--train_frames",
+        type=int,
+        default=5000,
+        help="Number of training frames to collect (PPO mode only).",
+    )
+    parser.add_argument(
+        "--val_frames",
+        type=int,
+        default=1000,
+        help="Number of validation frames to collect (PPO mode only).",
+    )
+    parser.add_argument(
+        "--directions",
+        nargs="+",
+        default=None,
+        help="Directions to collect in (e.g. CCW CW). Defaults to config value.",
+    )
+    parser.add_argument(
+        "--render",
+        action="store_true",
+        default=False,
+        help="Render the environment window during collection.",
+    )
+    parser.add_argument(
+        "--record_video",
+        action="store_true",
+        default=False,
+        help="Save a video of the collection run.",
+    )
+    parser.add_argument(
+        "--device",
+        default="cpu",
+        help="Device for policy inference: 'cpu' or 'cuda'. "
+             "CPU is usually fine since collection is env-bound, not compute-bound.",
+    )
+    parser.add_argument(
+        "--split-prefix",
+        default=None,
+        help="Optional prefix for output split and manifest names, e.g. d4pilot or d4main.",
+    )
+    parser.add_argument(
+        "--manual_target_frames",
+        type=int,
+        default=None,
+        help="Manual collection target frame budget. Defaults to config collector.manual.target_frames.",
+    )
+    parser.add_argument(
+        "--manual_target_episodes",
+        type=int,
+        default=None,
+        help="Optional cap on the number of manual episodes to save.",
+    )
+    parser.add_argument(
+        "--manual_direction",
+        default=None,
+        help="Manual collection direction override, e.g. CCW or CW.",
+    )
+    parser.add_argument(
+        "--manual_regime",
+        default=None,
+        help="Manual collection regime label to store in metadata, e.g. high or harsh_turns.",
+    )
+    parser.add_argument(
+        "--manual_split",
+        default=None,
+        help="Explicit manual split name. Defaults to manual_<regime>_<direction>.",
+    )
+    args = parser.parse_args()
+
+    with open(args.config, "r", encoding="utf-8") as handle:
+        config = yaml.safe_load(handle)
+
+    if args.manual:
+        _run_manual(config, args)
+    elif args.policy_checkpoint is not None:
+        _run_ppo_policy(config, args)
+    else:
+        _run_automatic(config, args)
 
 
 if __name__ == "__main__":
