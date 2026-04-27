@@ -2,7 +2,9 @@
 
 A reinforcement learning project for training a Proximal Policy Optimization (PPO) agent to drive a car in the `multi_car_racing` environment using Stable-Baselines3.
 
-Google Colab:[https://colab.research.google.com/github/yuvimalik/Racing_Gym_RL/blob/main/colab_training.ipynb]
+Google Colab:
+- PPO training notebook: [https://colab.research.google.com/github/yuvimalik/Racing_Gym_RL/blob/main/colab_training.ipynb]
+- Executable PPO + world-model demo: [https://colab.research.google.com/github/yuvimalik/Racing_Gym_RL/blob/main/colab_ppo_world_model_demo.ipynb]
 
 ## Project Overview
 
@@ -64,13 +66,21 @@ Note: `multi_car_racing` is installed from GitHub and registers the environment 
 
 ### Google Colab
 
-The project includes a complete Colab notebook (`colab_training.ipynb`) that handles all setup automatically. Simply:
+The project includes:
+
+- `colab_training.ipynb` for the original PPO-focused training flow
+- `colab_ppo_world_model_demo.ipynb` for a smaller, more executable end-to-end demo that:
+  - evaluates the tracked PPO checkpoint
+  - summarizes tracked benchmark results
+  - collects a tiny replay and trains a one-epoch world-model smoke run in Colab
+
+For either notebook:
 
 1. Upload the notebook to Google Colab
 2. Enable GPU: Runtime -> Change runtime type -> GPU
 3. Run all cells sequentially
 
-The notebook will install all dependencies and create necessary directories automatically.
+The notebooks install dependencies and create their own output directories automatically.
 
 ## Configuration
 
