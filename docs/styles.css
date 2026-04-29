@@ -1,0 +1,269 @@
+:root {
+  --bg: #f4f1ea;
+  --paper: #fffdf8;
+  --ink: #1d1a17;
+  --muted: #645b51;
+  --line: #d8d0c4;
+  --accent: #8f2d1c;
+  --accent-soft: #f2e3dd;
+  --link: #7d2415;
+  --shadow: 0 10px 30px rgba(48, 34, 20, 0.08);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  margin: 0;
+  font-family: Georgia, "Times New Roman", Times, serif;
+  background: linear-gradient(180deg, #ebe4d8 0%, var(--bg) 30%, #efe9de 100%);
+  color: var(--ink);
+  line-height: 1.7;
+}
+
+a {
+  color: var(--link);
+}
+
+a:hover {
+  color: var(--accent);
+}
+
+.site-header {
+  padding: 3.5rem 1.5rem 2rem;
+}
+
+.site-header__inner {
+  max-width: 1100px;
+  margin: 0 auto;
+}
+
+.site-kicker {
+  margin: 0 0 0.5rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  font-size: 0.78rem;
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.site-header h1 {
+  margin: 0;
+  max-width: 900px;
+  font-size: clamp(2.2rem, 5vw, 4.2rem);
+  line-height: 1.06;
+  letter-spacing: -0.03em;
+}
+
+.site-subtitle,
+.site-authors {
+  max-width: 760px;
+  color: var(--muted);
+}
+
+.site-subtitle {
+  margin: 1rem 0 0.65rem;
+  font-size: 1.1rem;
+}
+
+.site-authors {
+  margin: 0;
+  font-size: 0.98rem;
+}
+
+.layout {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 0 1.5rem 4rem;
+  display: grid;
+  grid-template-columns: 280px minmax(0, 1fr);
+  gap: 2rem;
+}
+
+.sidebar {
+  position: sticky;
+  top: 1rem;
+  align-self: start;
+}
+
+.sidebar-card {
+  background: rgba(255, 253, 248, 0.75);
+  backdrop-filter: blur(8px);
+  border: 1px solid rgba(143, 45, 28, 0.1);
+  border-radius: 18px;
+  padding: 1.15rem 1.1rem;
+  box-shadow: var(--shadow);
+  margin-bottom: 1rem;
+}
+
+.sidebar-card h2 {
+  margin: 0 0 0.75rem;
+  font-size: 1rem;
+}
+
+.toc {
+  margin: 0;
+  padding-left: 1.2rem;
+  font-size: 0.95rem;
+}
+
+.toc li + li {
+  margin-top: 0.28rem;
+}
+
+.link-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  font-size: 0.95rem;
+}
+
+.link-list li + li {
+  margin-top: 0.4rem;
+}
+
+.paper {
+  background: var(--paper);
+  border: 1px solid rgba(143, 45, 28, 0.1);
+  border-radius: 24px;
+  box-shadow: var(--shadow);
+  padding: 2.75rem 3rem 3rem;
+}
+
+.paper h2 {
+  margin-top: 0;
+  margin-bottom: 0.9rem;
+  font-size: 1.45rem;
+  line-height: 1.2;
+}
+
+.paper section + section {
+  margin-top: 2.6rem;
+  padding-top: 2.1rem;
+  border-top: 1px solid var(--line);
+}
+
+.paper p {
+  margin: 0 0 1rem;
+  text-align: justify;
+}
+
+.paper ul {
+  margin-top: 0.5rem;
+}
+
+.figure-placeholder {
+  margin: 1.5rem 0;
+  padding: 1rem 1.1rem;
+  border-left: 4px solid var(--accent);
+  background: var(--accent-soft);
+  color: #4e231a;
+  font-size: 0.96rem;
+}
+
+.figure-placeholder strong {
+  display: block;
+  margin-bottom: 0.25rem;
+}
+
+.phase-table {
+  margin: 1.5rem 0 0.4rem;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  overflow: hidden;
+  background: #fffaf2;
+}
+
+.phase-table__header {
+  padding: 0.85rem 1rem;
+  background: #f6ede2;
+  color: #4d281f;
+  font-weight: 700;
+}
+
+.phase-table table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.95rem;
+}
+
+.phase-table th,
+.phase-table td {
+  padding: 0.9rem 1rem;
+  border-top: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+}
+
+.phase-table th {
+  font-weight: 700;
+  background: rgba(143, 45, 28, 0.04);
+}
+
+.references {
+  padding-left: 1.4rem;
+}
+
+.references li + li {
+  margin-top: 0.7rem;
+}
+
+@media (max-width: 980px) {
+  .layout {
+    grid-template-columns: 1fr;
+  }
+
+  .sidebar {
+    position: static;
+  }
+}
+
+@media (max-width: 720px) {
+  .site-header {
+    padding-top: 2.4rem;
+  }
+
+  .paper {
+    padding: 1.4rem 1.2rem 1.8rem;
+    border-radius: 18px;
+  }
+
+  .phase-table {
+    overflow-x: auto;
+  }
+
+  .paper p {
+    text-align: left;
+  }
+}
+
+@media print {
+  body {
+    background: #fff;
+  }
+
+  .site-header {
+    padding: 0 0 1rem;
+  }
+
+  .layout {
+    display: block;
+    max-width: 100%;
+    padding: 0;
+  }
+
+  .sidebar {
+    display: none;
+  }
+
+  .paper {
+    border: none;
+    box-shadow: none;
+    padding: 0;
+  }
+}
