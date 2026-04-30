@@ -4,404 +4,417 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Racing Gym RL Final Report</title>
-  <meta name="description" content="Research-style final report for the Racing Gym RL project: PPO baselines, multi-agent scaling, and world-model experiments.">
+  <meta name="description" content="Professional research-style final report for the Racing Gym RL project: single-car PPO, ten-car racing, and world-model experiments.">
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <header class="site-header">
-    <div class="site-header__inner">
-      <p class="site-kicker">GitHub Pages Report Draft</p>
+  <div class="page-shell">
+    <header class="report-header">
+      <div class="report-rule"></div>
+      <p class="report-type">Course Project Final Report</p>
       <h1>From Single-Car PPO to Multi-Agent Racing and World Models</h1>
-      <p class="site-subtitle">
-        A research-style final report for the Racing Gym RL course project
+      <p class="author-line">
+        Yuv Malik, Pablo Echevarria, Matthew Lobo
       </p>
-      <p class="site-authors">
-        Yuvraj Malik and collaborators<br>
-        Repository: <a href="https://github.com/yuvimalik/Racing_Gym_RL">github.com/yuvimalik/Racing_Gym_RL</a>
+      <p class="affiliation-line">
+        Racing Gym RL Project Repository:
+        <a href="https://github.com/yuvimalik/Racing_Gym_RL">github.com/yuvimalik/Racing_Gym_RL</a>
       </p>
-    </div>
-  </header>
+      <nav class="top-links" aria-label="Project links">
+        <a href="https://github.com/yuvimalik/Racing_Gym_RL">Repository</a>
+        <a href="https://colab.research.google.com/github/yuvimalik/Racing_Gym_RL/blob/main/colab_training.ipynb">PPO Colab</a>
+        <a href="https://colab.research.google.com/github/yuvimalik/Racing_Gym_RL/blob/main/colab_ppo_world_model_demo.ipynb">World-Model Colab</a>
+        <a href="https://github.com/yuvimalik/Racing_Gym_RL/blob/main/WORLD_MODEL_PROGRESS.md">Progress Log</a>
+        <a href="https://github.com/yuvimalik/Racing_Gym_RL/blob/main/WORLD_MODEL_HANDOFF.md">Handoff</a>
+      </nav>
+      <div class="report-rule"></div>
+    </header>
 
-  <main class="layout">
-    <aside class="sidebar">
-      <section class="sidebar-card">
-        <h2>Contents</h2>
-        <nav>
-          <ol class="toc">
-            <li><a href="#abstract">Abstract</a></li>
-            <li><a href="#introduction">1. Introduction</a></li>
-            <li><a href="#environment">2. Task and Environment</a></li>
-            <li><a href="#single-car">3. Single-Car PPO</a></li>
-            <li><a href="#multi-agent">4. Multi-Agent and Ten-Car PPO</a></li>
-            <li><a href="#world-models">5. World Models</a></li>
-            <li><a href="#results">6. Results and Lessons</a></li>
-            <li><a href="#limitations">7. Limitations and Future Work</a></li>
-            <li><a href="#reproducibility">8. Reproducibility</a></li>
-            <li><a href="#references">References</a></li>
-          </ol>
-        </nav>
-      </section>
-
-      <section class="sidebar-card">
-        <h2>Project Links</h2>
-        <ul class="link-list">
-          <li><a href="https://github.com/yuvimalik/Racing_Gym_RL">Repository</a></li>
-          <li><a href="https://colab.research.google.com/github/yuvimalik/Racing_Gym_RL/blob/main/colab_training.ipynb">PPO Colab</a></li>
-          <li><a href="https://colab.research.google.com/github/yuvimalik/Racing_Gym_RL/blob/main/colab_ppo_world_model_demo.ipynb">PPO + World Model Colab</a></li>
-          <li><a href="https://github.com/yuvimalik/Racing_Gym_RL/blob/main/WORLD_MODEL_PROGRESS.md">World Model Progress Log</a></li>
-          <li><a href="https://github.com/yuvimalik/Racing_Gym_RL/blob/main/WORLD_MODEL_HANDOFF.md">World Model Handoff</a></li>
-          <li><a href="https://github.com/yuvimalik/Racing_Gym_RL/blob/main/TRAINING_HISTORY.md">Training History</a></li>
-        </ul>
-      </section>
-
-      <section class="sidebar-card">
-        <h2>Asset Placeholders</h2>
-        <p>
-          This first draft is intentionally asset-light. Final videos, plots, tables, and side-by-side rollouts can be
-          dropped into the marked figure slots later without changing the overall structure.
-        </p>
-      </section>
-    </aside>
-
-    <article class="paper">
-      <section id="abstract">
+    <main class="paper">
+      <section class="abstract-block" id="abstract">
         <h2>Abstract</h2>
-        <p>
-          This project studies how far a reinforcement learning pipeline can be pushed in a visually rich racing
-          simulator, starting from a single-car Proximal Policy Optimization (PPO) baseline and then extending toward
-          multi-agent racing and world-model-based control. The first stage established a stable single-car control
-          pipeline using image observations, continuous actions, and a local torch PPO implementation inspired by the
-          clipped-surrogate formulation of PPO <a href="#ref-ppo">[1]</a>. The second stage increased task complexity
-          by scaling to multi-car racing and eventually ten-car shared-policy training, which required changes in
-          environment wrapping, evaluation, anti-contact logic, and experiment management. The third stage introduced
-          an offline world-model branch based on recurrent state-space models (RSSMs), following the lineage from
-          PlaNet <a href="#ref-planet">[2]</a> through Dreamer <a href="#ref-dreamer">[3]</a>, DreamerV2
-          <a href="#ref-dreamerv2">[4]</a>, DreamerV3 <a href="#ref-dreamerv3">[5]</a>, and Dreamer 4
-          <a href="#ref-dreamer4">[6]</a>. In our codebase, the world-model branch learned coherent short-horizon
-          hallucinations and useful telemetry prediction, but still struggled with hard-turn future dynamics and
-          reliable policy transfer. The most important output of the project is therefore not a single metric, but a
-          documented progression of engineering and research choices: what stabilized PPO, what broke when scaling to
-          ten cars, and why predictive representation quality became the central bottleneck.
-        </p>
-        <div class="phase-table">
-          <div class="phase-table__header">Project progression at a glance</div>
-          <table>
-            <thead>
-              <tr>
-                <th>Phase</th>
-                <th>Question</th>
-                <th>Main outcome</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr>
-                <td>Single-car PPO</td>
-                <td>Can a pixel-based racing policy learn stable lane-following and recovery?</td>
-                <td>Yes; this became the executable control baseline.</td>
-              </tr>
-              <tr>
-                <td>Ten-car PPO</td>
-                <td>Can the same pipeline scale to dense interaction and shared-policy racing?</td>
-                <td>Partially; infrastructure matured faster than race quality.</td>
-              </tr>
-              <tr>
-                <td>World model</td>
-                <td>Can a learned RSSM capture enough future structure to support imagination-based control?</td>
-                <td>Useful short-horizon prediction, but turn evolution remains the main failure mode.</td>
-              </tr>
-            </tbody>
-          </table>
+        <div class="two-column">
+          <p>
+            This project studies how far a reinforcement learning pipeline can be pushed in a visually rich racing
+            simulator, starting from a single-car Proximal Policy Optimization (PPO) baseline and then extending toward
+            multi-agent racing and world-model-based control. The first stage established a stable single-car control
+            pipeline using image observations, continuous actions, and a local torch PPO implementation inspired by the
+            clipped-surrogate formulation of PPO <a href="#ref-ppo">[1]</a>. The second stage increased task complexity
+            by scaling to multi-car racing and eventually ten-car shared-policy training, which required changes in
+            environment wrapping, evaluation, anti-contact logic, and experiment management.
+          </p>
+          <p>
+            The third stage introduced an offline world-model branch based on recurrent state-space models, following
+            the lineage from PlaNet <a href="#ref-planet">[2]</a> through Dreamer <a href="#ref-dreamer">[3]</a>,
+            DreamerV2 <a href="#ref-dreamerv2">[4]</a>, DreamerV3 <a href="#ref-dreamerv3">[5]</a>, and Dreamer 4
+            <a href="#ref-dreamer4">[6]</a>. In our codebase, the world-model branch learned coherent short-horizon
+            hallucinations and useful telemetry prediction, but still struggled with hard-turn future dynamics and
+            reliable policy transfer. The strongest outcome is therefore not a single metric, but a coherent research
+            progression: PPO became stable, ten-car scaling exposed infrastructure and interaction challenges, and
+            predictive representation quality emerged as the next major bottleneck.
+          </p>
         </div>
+      </section>
+
+      <section class="summary-table-section">
+        <table class="summary-table">
+          <thead>
+            <tr>
+              <th>Phase</th>
+              <th>Primary question</th>
+              <th>Main result</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Single-car PPO</td>
+              <td>Can a pixel-based driver learn stable lane-following and recovery?</td>
+              <td>Yes. This became the executable control baseline.</td>
+            </tr>
+            <tr>
+              <td>Ten-car PPO</td>
+              <td>Can the pipeline scale to dense interaction and shared-policy racing?</td>
+              <td>Partially. Infrastructure matured faster than race quality.</td>
+            </tr>
+            <tr>
+              <td>World model</td>
+              <td>Can a learned RSSM support useful imagination for control?</td>
+              <td>Short-horizon fidelity improved, but turn evolution remained unstable.</td>
+            </tr>
+          </tbody>
+        </table>
       </section>
 
       <section id="introduction">
         <h2>1. Introduction</h2>
-        <p>
-          The project began with a simple but demanding question: can an agent learn robust racing behavior directly
-          from raw pixels in a simulator that is visually compact but behaviorally unforgiving? Racing is a useful test
-          bed because it combines perception, control smoothness, anticipation of turns, recovery after drift, and
-          eventually interaction with other agents. Even the single-car task already contains many of the difficulties
-          that make visual control brittle in practice: noisy observations, long-horizon credit assignment, and strong
-          sensitivity to reward design and action parameterization.
-        </p>
-        <p>
-          The work therefore evolved in stages rather than attempting an end-to-end ambitious solution from the start.
-          We first sought a reliable single-car PPO baseline, because without a competent policy it is difficult to
-          distinguish optimizer failures from task-definition failures. Once the baseline became stable, we expanded the
-          problem toward multi-car and ten-car racing, where the challenge shifts from pure lane-following to contact,
-          ranking, blocking, and overtaking. In parallel, we started a world-model branch aimed at a broader question:
-          can a predictive latent model capture enough structure about racing to support imagination-based control or at
-          least provide a more reusable representation than direct policy optimization?
-        </p>
-        <p>
-          This report is written as a research narrative rather than a changelog. The emphasis is on the progression of
-          ideas: why PPO remained a practical baseline, why scaling to ten cars required more engineering than
-          anticipated, and why the world-model branch became attractive despite the practicality of direct PPO. PPO
-          provides the policy-gradient backbone <a href="#ref-ppo">[1]</a>. For world models, the relevant lineage
-          begins with latent planning from pixels in PlaNet <a href="#ref-planet">[2]</a>, moves through
-          Dreamer-style latent imagination <a href="#ref-dreamer">[3]</a>, and continues toward broad-domain robust
-          world-model RL in DreamerV2 and DreamerV3 <a href="#ref-dreamerv2">[4]</a>,
-          <a href="#ref-dreamerv3">[5]</a>. On the multi-agent side, MAPPO-style results show that PPO-based shared
-          policy training can remain surprisingly competitive in cooperative multi-agent settings
-          <a href="#ref-mappo">[7]</a>, which provided a useful conceptual anchor even though our simulator and
-          implementation are custom.
-        </p>
+        <div class="two-column">
+          <p>
+            The project began with a straightforward but technically demanding question: can an agent learn robust
+            racing behavior directly from raw pixels in a simulator that is visually small but behaviorally unforgiving?
+            Racing is an appealing benchmark because it combines perception, smooth continuous control, anticipation of
+            upcoming turns, recovery after drift, and eventually interaction with other agents. Even the single-car task
+            already contains many of the elements that make visual reinforcement learning brittle in practice: noisy
+            observations, long-horizon credit assignment, and sensitivity to reward shaping and action parameterization.
+          </p>
+          <p>
+            The work therefore evolved in stages rather than attempting an ambitious end-to-end solution immediately.
+            We first sought a reliable single-car PPO baseline, because without a competent policy it is hard to
+            distinguish optimizer failures from task-definition failures. Once that baseline stabilized, we expanded
+            toward multi-car and ten-car racing, where the problem shifts from pure track-following to contact,
+            ranking, blocking, and overtaking. In parallel, we started a world-model branch to test whether a
+            predictive latent model could capture enough structure about racing to support imagination-based control or,
+            at minimum, provide a more reusable representation than direct policy optimization.
+          </p>
+          <p>
+            This report is written as a research narrative rather than a changelog. The emphasis is on progression:
+            why PPO remained the practical control baseline, why multi-agent scaling demanded more engineering than
+            expected, and why the world-model branch became attractive despite the practicality of direct PPO. PPO
+            provides the policy-gradient backbone <a href="#ref-ppo">[1]</a>. For latent dynamics, the relevant
+            lineage begins with PlaNet <a href="#ref-planet">[2]</a>, moves through Dreamer-style latent imagination
+            <a href="#ref-dreamer">[3]</a>, and extends through DreamerV2 and DreamerV3
+            <a href="#ref-dreamerv2">[4]</a>, <a href="#ref-dreamerv3">[5]</a>. For the multi-agent framing,
+            MAPPO-style results demonstrate that PPO-based shared-policy systems can remain surprisingly competitive
+            once implementation details are treated seriously <a href="#ref-mappo">[7]</a>.
+          </p>
+        </div>
       </section>
 
       <section id="environment">
         <h2>2. Task and Environment</h2>
-        <p>
-          All phases of the project were built around the <code>multi_car_racing</code> environment, a Gym-style
-          simulator that emits 96x96 RGB observations and expects continuous control actions for steering, throttle, and
-          braking. In the single-car setting, the problem is a continuous-control visual RL task. In the multi-car
-          setting, the same environment becomes an interaction-heavy racing problem in which ranking, collisions,
-          contact persistence, and lane discipline matter as much as raw forward speed.
-        </p>
-        <p>
-          A useful property of this environment is that it supports consistent evaluation across multiple control
-          paradigms. A direct PPO agent can act online in the simulator, while a world-model pipeline can collect replay
-          from the same environment and evaluate hallucinations under the same observation semantics. This kept the
-          project grounded on a common substrate instead of mixing incompatible tasks.
-        </p>
-
-        <div class="figure-placeholder">
-          <strong>Figure Placeholder A.</strong>
-          <span>Environment overview: screenshot grid showing single-car, multi-car, and ten-car layouts.</span>
+        <div class="two-column">
+          <p>
+            All phases of the project were built around the <code>multi_car_racing</code> environment, a Gym-style
+            simulator that emits 96x96 RGB observations and expects continuous control actions for steering, throttle,
+            and braking. In the single-car setting, the problem is a visual continuous-control task. In the multi-car
+            setting, the same environment becomes an interaction-heavy racing problem in which ranking, contact
+            persistence, and lane discipline matter as much as raw forward speed.
+          </p>
+          <p>
+            A useful property of the environment is that it supports consistent evaluation across multiple control
+            paradigms. A direct PPO agent can act online in the simulator, while a world-model pipeline can collect
+            replay from the same substrate and evaluate hallucinations under the same observation semantics. This kept
+            the project grounded on a shared benchmark rather than letting the modeling branches drift apart.
+          </p>
+          <p>
+            The environment's apparent simplicity is deceptive. The observation is small but visually dense: road
+            boundaries, grass, opponent positions, and ego-car attitude must all be inferred from compressed RGB input.
+            That makes the benchmark useful as a bridge between standard deep RL and more representation-heavy
+            world-model methods. It is complicated enough to motivate latent modeling, but still compact enough for a
+            course-scale project.
+          </p>
         </div>
-
-        <p>
-          The environment's apparent simplicity is deceptive. The observation is small but visually dense: road
-          boundaries, grass, opponent positions, and ego-car attitude must all be inferred from compressed RGB input.
-          This makes the benchmark a useful bridge between standard deep RL and representation-heavy world-model
-          methods. It is complicated enough to motivate latent modeling, but still compact enough to iterate on within
-          a course-scale project.
-        </p>
       </section>
 
       <section id="single-car">
         <h2>3. Single-Car PPO: Establishing a Baseline</h2>
-        <p>
-          The initial phase focused on training a single racing agent from images using PPO <a href="#ref-ppo">[1]</a>.
-          This was the stabilizing step for the entire project, because it answered the most practical early question:
-          can the simulator, reward shaping, and observation pipeline support competent learning at all? If the answer
-          had been no, later work on multi-agent racing or world models would have been premature.
-        </p>
-        <p>
-          Early versions of the stack followed a standard image-based actor-critic pattern with a convolutional encoder
-          feeding policy and value heads. The project later moved toward a local torch implementation with a
-          tanh-squashed Gaussian policy and corrected log-probabilities under action squashing. That detail mattered. In
-          practice, a racing agent is sensitive not just to which actions are chosen, but to how the action
-          distribution is represented, clipped, and optimized under PPO.
-        </p>
-        <p>
-          This phase also established the importance of instrumentation. The project did not only log reward; it tracked
-          progress, speed, off-track behavior, and evaluation videos. That became essential later, because racing
-          rewards can be deceptive: a policy can exploit local shaping terms without becoming a strong driver. The
-          single-car baseline therefore served not just as an optimizer benchmark, but as the first version of a broader
-          evaluation philosophy.
-        </p>
-        <p>
-          Methodologically, the single-car phase acted as an ablation filter. Before adding more agents or latent
-          imagination, the project first had to settle practical issues such as action squashing, evaluation cadence,
-          rollout inspection, and run promotion criteria. Many apparent RL improvements disappear once the environment
-          wrapper or evaluation protocol changes; this stage reduced that ambiguity.
-        </p>
-        <p>
-          The outcome was a meaningful baseline policy and a more disciplined training stack. The promoted single-car
-          torch policy became the reference point for later replay collection, policy comparison, and Colab
-          demonstrations. More importantly, it gave the project a working answer to the first-order control problem
-          before the research scope widened.
-        </p>
-
-        <div class="figure-placeholder">
-          <strong>Figure Placeholder B.</strong>
-          <span>Single-car PPO results: learning curve plus one short evaluation replay.</span>
+        <div class="two-column">
+          <p>
+            The initial phase focused on training a single racing agent from images using PPO <a href="#ref-ppo">[1]</a>.
+            This was the stabilizing step for the entire project, because it answered the most practical early question:
+            can the simulator, reward shaping, and observation pipeline support competent learning at all? If the answer
+            had been no, later work on multi-agent racing or world models would have been premature.
+          </p>
+          <p>
+            Early versions of the stack followed a standard image-based actor-critic pattern with a convolutional
+            encoder feeding policy and value heads. The project later moved toward a local torch implementation with a
+            tanh-squashed Gaussian policy and corrected log-probabilities under action squashing. That detail mattered:
+            in racing, the agent is sensitive not just to which actions are chosen, but to how the action distribution
+            is represented and optimized under PPO.
+          </p>
+          <p>
+            This phase also established the importance of instrumentation. The project did not only log reward; it
+            tracked progress, speed, off-track behavior, and evaluation videos. That became essential later, because
+            racing rewards can be deceptive: a policy can exploit local shaping terms without becoming a strong driver.
+            The single-car baseline therefore served not just as an optimizer benchmark, but as the first version of a
+            broader evaluation philosophy.
+          </p>
+          <p>
+            Methodologically, the single-car phase acted as an ablation filter. Before adding more agents or latent
+            imagination, the project first had to settle practical issues such as action squashing, evaluation cadence,
+            rollout inspection, and run promotion criteria. Many apparent RL improvements disappear once the environment
+            wrapper or evaluation protocol changes; this stage reduced that ambiguity.
+          </p>
         </div>
+
+        <figure class="media-figure">
+          <video controls preload="metadata" playsinline>
+            <source src="assets/video1.mp4" type="video/mp4">
+          </video>
+          <figcaption>
+            <strong>Video 1.</strong> Two-car racing behavior from the PPO branch, included as a compact demonstration
+            of the control stack after the single-car baseline matured into interaction-capable racing.
+          </figcaption>
+        </figure>
       </section>
 
       <section id="multi-agent">
         <h2>4. Scaling from One Car to Multi-Agent and Ten-Car PPO</h2>
-        <p>
-          Once the single-car baseline became usable, the natural next question was whether the same control approach
-          could survive a more complex racing setting. The answer was not simply "increase the number of cars."
-          Multi-agent racing changed the optimization landscape in several ways. Behavior that is acceptable in
-          single-car training becomes pathological once opponents are present: bumping, hooking, lane blocking, and
-          progress-through-contact can all look locally rewarding while producing obviously poor racing. Evaluation also
-          becomes harder, because a checkpoint may render successfully while still being strategically useless.
-        </p>
-        <p>
-          The codebase therefore moved toward a shared-policy PPO setup closer in spirit to PPO-based multi-agent
-          baselines, informed by the literature showing that PPO-derived methods remain stronger than often expected in
-          multi-agent settings <a href="#ref-mappo">[7]</a>. Our implementation is not a direct reproduction of MAPPO,
-          because the project remained grounded in a custom simulator and a local torch stack, but the same lesson
-          applied: simple PPO-based systems can be competitive when implementation and evaluation details are treated
-          seriously.
-        </p>
-        <p>
-          Relative to the single-car case, the ten-car setting changed both the state distribution and the semantics of
-          success. The policy now had to react not only to track geometry but also to non-stationary visual clutter from
-          opponents, while the training system had to distinguish genuine overtakes from contact-based exploitation.
-          This is the phase where the project most clearly shifted from "train a driver" to "design an experimental
-          system for racing."
-        </p>
-        <p>
-          The engineering work expanded substantially in this phase. Environment wrapping had to respect per-agent
-          observations and action semantics. Evaluation logic had to report race-specific metrics rather than a single
-          scalar reward. Anti-contact and anti-hooking heuristics became necessary to prevent degenerate competitive
-          behavior. Training infrastructure also became more demanding, which explains the presence of cloud and pod
-          orchestration material in the repository.
-        </p>
-        <p>
-          The ten-car PPO experiments should therefore be understood as a scale test of the full project stack. They
-          probe whether the repository can support larger populations, whether evaluation artifacts remain usable under
-          many-agent rendering, and whether a shared-policy PPO recipe can learn something better than chaos. Even when
-          the resulting policies are not yet final-showcase quality, this phase materially improved the experimental
-          maturity of the project.
-        </p>
-
-        <div class="figure-placeholder">
-          <strong>Figure Placeholder C.</strong>
-          <span>Multi-agent and ten-car PPO: tiled evaluation video or rank/contact summary figure.</span>
+        <div class="two-column">
+          <p>
+            Once the single-car baseline became usable, the natural next question was whether the same control approach
+            could survive a more complex racing setting. The answer was not simply "increase the number of cars."
+            Multi-agent racing changed the optimization landscape in several ways. Behavior that is acceptable in
+            single-car training becomes pathological once opponents are present: bumping, hooking, lane blocking, and
+            progress-through-contact can all look locally rewarding while producing obviously poor racing.
+          </p>
+          <p>
+            The codebase therefore moved toward a shared-policy PPO setup closer in spirit to PPO-based multi-agent
+            baselines, informed by the practical lesson from MAPPO-style work that PPO-derived methods often remain
+            stronger than expected in multi-agent settings <a href="#ref-mappo">[7]</a>. Our implementation is not a
+            direct reproduction of MAPPO, because the project remained grounded in a custom simulator and a local torch
+            stack, but the same high-level lesson applied: simple PPO-based systems can stay competitive when the
+            evaluation logic and engineering details are treated seriously.
+          </p>
+          <p>
+            Relative to the single-car case, the ten-car setting changed both the state distribution and the semantics
+            of success. The policy now had to react not only to track geometry but also to non-stationary visual clutter
+            from opponents, while the training system had to distinguish genuine overtakes from contact-based
+            exploitation. This was the phase where the project most clearly shifted from "train a driver" to "design an
+            experimental system for racing."
+          </p>
+          <p>
+            The engineering work expanded substantially in this phase. Environment wrapping had to respect per-agent
+            observations and action semantics. Evaluation logic had to report race-specific metrics rather than a single
+            scalar reward. Anti-contact and anti-hooking heuristics became necessary to prevent degenerate competitive
+            behavior. Training infrastructure also became more demanding, which explains the presence of cloud and pod
+            orchestration material in the repository.
+          </p>
         </div>
+
+        <figure class="media-figure">
+          <video controls preload="metadata" playsinline>
+            <source src="assets/video2.mp4" type="video/mp4">
+          </video>
+          <figcaption>
+            <strong>Video 2.</strong> Ten-car shared-policy PPO evaluation. This branch was less important for a single
+            headline metric than for exposing the infrastructure, safety, and evaluation demands of scaling beyond the
+            original one-car setup.
+          </figcaption>
+        </figure>
       </section>
 
       <section id="world-models">
         <h2>5. World Models: From RSSMs to Dreamer-Style Imagination</h2>
-        <p>
-          The world-model branch emerged from a broader scientific motivation. Direct PPO learns a policy, but it does
-          not explicitly learn a reusable predictive representation of the environment. For racing, that limitation
-          matters: the central challenge is not just choosing the next steering command, but understanding track
-          geometry, ego-motion, and future consequences over extended horizons. This makes the world-model literature
-          particularly relevant.
-        </p>
-        <p>
-          The starting point for our conceptual framing was PlaNet <a href="#ref-planet">[2]</a>, which introduced
-          latent dynamics planning from pixels using a recurrent state-space model with deterministic and stochastic
-          components. Dreamer then shifted from online planning to learning behaviors through latent imagination
-          <a href="#ref-dreamer">[3]</a>, allowing policy optimization directly inside the learned model. DreamerV2
-          strengthened this line by using discrete latent representations and showing strong Atari performance inside a
-          world-model framework <a href="#ref-dreamerv2">[4]</a>. DreamerV3 pushed further toward broad-domain
-          robustness, arguing that one world-model RL algorithm with fixed hyperparameters can remain competitive across
-          many task families <a href="#ref-dreamerv3">[5]</a>. Dreamer 4 extends the frontier toward scalable
-          imagination training inside fast and accurate world models, with an explicit offline-control framing
-          <a href="#ref-dreamer4">[6]</a>.
-        </p>
-        <p>
-          Our implementation does not attempt to reproduce DreamerV3 or Dreamer 4 directly. Instead, it adopts a
-          narrower but tractable course-project path: an offline RSSM-style model trained on replay from the racing
-          simulator, followed by latent actor-critic diagnostics and telemetry-faithfulness evaluation. Concretely, the
-          repository includes an encoder-decoder backbone, deterministic GRU dynamics, stochastic prior and posterior
-          latent heads, reward prediction, replay collection, hallucination video generation, and a frozen-world-model
-          control wrapper. Over time, the branch also gained telemetry supervision for speed, progress delta, steering,
-          corner angle, and off-track probability.
-        </p>
-        <p>
-          This pipeline was useful in two distinct ways. First, it produced qualitative artifacts such as side-by-side
-          hallucination videos that made the model's strengths and weaknesses concrete. Second, it supported a more
-          targeted diagnostic lens than direct PPO. Instead of asking only whether the final policy improves, we could
-          ask whether the latent model preserved road geometry, whether reward prediction remained correlated with held
-          out replay, whether off-track classification was faithful, and whether failures were local or structural.
-        </p>
-        <p>
-          The main technical conclusion of this branch is mixed but informative. Short-horizon straight-line
-          hallucinations became broadly coherent, and telemetry supervision materially improved local faithfulness.
-          However, turn evolution remained the dominant weakness. The project logs repeatedly identify an ego/world
-          inconsistency problem: the model can preserve local appearance and still fail to produce convincing future
-          turning dynamics. This is why the frontier in the repository shifted away from simple loss reweighting and
-          toward more structural interventions around pose evolution and explicit motion conditioning.
-        </p>
-
-        <div class="figure-placeholder">
-          <strong>Figure Placeholder D.</strong>
-          <span>World-model comparison: real versus imagined future frames on a sharp-turn clip.</span>
+        <div class="two-column">
+          <p>
+            The world-model branch emerged from a broader scientific motivation. Direct PPO learns a policy, but it does
+            not explicitly learn a reusable predictive representation of the environment. For racing, that limitation
+            matters: the central challenge is not just choosing the next steering command, but understanding track
+            geometry, ego-motion, and future consequences over extended horizons. This makes the world-model literature
+            particularly relevant.
+          </p>
+          <p>
+            The starting point for our conceptual framing was PlaNet <a href="#ref-planet">[2]</a>, which introduced
+            latent dynamics planning from pixels using a recurrent state-space model with deterministic and stochastic
+            components. Dreamer then shifted from online planning to learning behaviors through latent imagination
+            <a href="#ref-dreamer">[3]</a>, allowing policy optimization directly inside the learned model. DreamerV2
+            strengthened this line by using discrete latent representations and showing strong Atari performance inside a
+            world-model framework <a href="#ref-dreamerv2">[4]</a>. DreamerV3 pushed further toward broad-domain
+            robustness, arguing that one world-model RL algorithm with fixed hyperparameters can remain competitive
+            across many task families <a href="#ref-dreamerv3">[5]</a>. Dreamer 4 extends the frontier toward scalable
+            imagination training inside fast and accurate world models, with a more explicit large-scale offline control
+            framing <a href="#ref-dreamer4">[6]</a>.
+          </p>
+          <p>
+            Our implementation does not attempt to reproduce DreamerV3 or Dreamer 4 directly. Instead, it adopts a
+            narrower course-project path: an offline RSSM-style model trained on replay from the racing simulator,
+            followed by latent actor-critic diagnostics and telemetry-faithfulness evaluation. The repository includes
+            an encoder-decoder backbone, deterministic GRU dynamics, stochastic prior and posterior latent heads, reward
+            prediction, replay collection, hallucination video generation, and a frozen-world-model control wrapper.
+            Over time, the branch also gained telemetry supervision for speed, progress delta, steering, corner angle,
+            and off-track probability.
+          </p>
+          <p>
+            This pipeline was useful in two distinct ways. First, it produced qualitative artifacts such as side-by-side
+            hallucination videos that made the model's strengths and weaknesses concrete. Second, it supported a more
+            targeted diagnostic lens than direct PPO. Instead of asking only whether the final policy improves, we could
+            ask whether the latent model preserved road geometry, whether reward prediction remained correlated with held
+            out replay, whether off-track classification was faithful, and whether failures were local or structural.
+          </p>
+          <p>
+            The main technical conclusion of this branch is mixed but informative. Short-horizon straight-line
+            hallucinations became broadly coherent, and telemetry supervision materially improved local faithfulness.
+            However, turn evolution remained the dominant weakness. The project logs repeatedly identify an ego/world
+            inconsistency problem: the model can preserve local appearance and still fail to produce convincing future
+            turning dynamics. This is why the frontier in the repository shifted away from simple loss reweighting and
+            toward more structural interventions around pose evolution and explicit motion conditioning.
+          </p>
         </div>
 
-        <p>
-          DreamerV3 and Dreamer 4 are especially relevant here because they anchor the aspirational direction of the
-          project. DreamerV3 showed that world-model RL can be practical across diverse domains with a single robust
-          recipe <a href="#ref-dreamerv3">[5]</a>. Dreamer 4 raised the bar further by emphasizing scalable, accurate
-          world modeling for imagination training itself <a href="#ref-dreamer4">[6]</a>. Our project does not claim
-          those capabilities. Instead, it uses the racing simulator as a medium-scale test of the same broader idea:
-          whether predictive latent models can become a stronger substrate for control than direct policy learning
-          alone.
-        </p>
+        <div class="media-grid">
+          <figure class="media-figure media-figure--half">
+            <video controls preload="metadata" playsinline>
+              <source src="assets/video3.mp4" type="video/mp4">
+            </video>
+            <figcaption>
+              <strong>Video 3.</strong> Early hallucinations from the world-model branch. Local appearance is partially
+              preserved, but future structure remains unstable.
+            </figcaption>
+          </figure>
+
+          <figure class="media-figure media-figure--half">
+            <video controls preload="metadata" playsinline>
+              <source src="assets/video4.mp4" type="video/mp4">
+            </video>
+            <figcaption>
+              <strong>Video 4.</strong> Later side-by-side hallucination progress. Structural stability improves, though
+              sharp-turn future dynamics remain the central failure mode.
+            </figcaption>
+          </figure>
+        </div>
       </section>
 
       <section id="results">
         <h2>6. Results and Lessons Learned</h2>
-        <p>
-          The project produced three main outcomes. First, the single-car PPO branch achieved a stable, executable
-          baseline with meaningful evaluation behavior and enough quality to support demonstration notebooks. Second, the
-          multi-agent branch substantially hardened the training and evaluation infrastructure, even when behavior
-          quality lagged behind the engineering ambition of ten-car racing. Third, the world-model branch produced a
-          functioning offline RSSM pipeline with qualitative and quantitative diagnostics that exposed where
-          model-based control was still failing.
-        </p>
-        <p>
-          In report form, the strongest result is not a single scalar score. It is the emergence of a coherent
-          experimental arc: from making PPO stable in a visual racing domain, to discovering the engineering demands of
-          multi-agent scaling, to identifying predictive representation quality as the next bottleneck. That arc is
-          stronger than a disconnected collection of runs, and it is what makes the repository suitable for a final
-          research-style project page.
-        </p>
-        <p>
-          Several practical lessons followed. Reward and rollout curves alone were not sufficient for racing; visual
-          artifacts, progress metrics, contact metrics, and manually inspected replay videos all mattered. Scaling the
-          number of agents changed the problem faster than it changed the algorithm: shared-policy PPO remained a
-          reasonable baseline, but evaluation and safety logic became central. World-model progress was also easier to
-          overstate than direct-policy progress; a hallucination video can look compelling while still failing at the
-          future-turn dynamics that actually matter for control.
-        </p>
-        <p>
-          The most important scientific lesson is that the bottleneck shifted over time. Single-car PPO primarily
-          stressed optimization and reward design. Multi-agent PPO stressed scale, safety, and evaluation. The
-          world-model stage stressed whether the model truly understood pose evolution rather than merely reconstructing
-          local appearance. That shift is one of the clearest indicators that the project moved from an implementation
-          exercise into a genuine representation-learning investigation.
+        <div class="two-column">
+          <p>
+            The project produced three main outcomes. First, the single-car PPO branch achieved a stable, executable
+            baseline with meaningful evaluation behavior and enough quality to support demonstration notebooks. Second,
+            the multi-agent branch substantially hardened the training and evaluation infrastructure, even when behavior
+            quality lagged behind the ambition of ten-car racing. Third, the world-model branch produced a functioning
+            offline RSSM pipeline with qualitative and quantitative diagnostics that exposed where model-based control
+            was still failing.
+          </p>
+          <p>
+            In report form, the strongest result is not a single scalar score. It is the emergence of a coherent
+            experimental arc: from making PPO stable in a visual racing domain, to discovering the engineering demands
+            of multi-agent scaling, to identifying predictive representation quality as the next bottleneck. That arc is
+            what makes the repository suitable for a final-project research narrative.
+          </p>
+          <p>
+            Several practical lessons followed. Reward and rollout curves alone were not sufficient for racing; visual
+            artifacts, progress metrics, contact metrics, and replay videos all mattered. Scaling the number of agents
+            changed the problem faster than it changed the algorithm: shared-policy PPO remained a reasonable baseline,
+            but evaluation and safety logic became central. World-model progress was also easier to overstate than
+            direct-policy progress; a hallucination video can look compelling while still failing at the future-turn
+            dynamics that actually matter for control.
+          </p>
+        </div>
+
+        <table class="results-table">
+          <thead>
+            <tr>
+              <th>Checkpoint</th>
+              <th>Reward Corr.</th>
+              <th>Reward Sign Match</th>
+              <th>Speed Corr.</th>
+              <th>Steer Corr.</th>
+              <th>Off-track Acc.</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>P2_d4_pilot_telemetry_smoke</td>
+              <td>0.009</td>
+              <td>0.163</td>
+              <td>-0.031</td>
+              <td>0.026</td>
+              <td>0.970</td>
+            </tr>
+            <tr>
+              <td>P4_d4_main_telemetry_horizon</td>
+              <td>0.842</td>
+              <td>0.880</td>
+              <td>0.626</td>
+              <td>0.655</td>
+              <td>1.000</td>
+            </tr>
+            <tr>
+              <td>P5_d4_main_telemetry_a100_bs128_e15</td>
+              <td>0.839</td>
+              <td>0.892</td>
+              <td>0.775</td>
+              <td>0.648</td>
+              <td>1.000</td>
+            </tr>
+          </tbody>
+        </table>
+        <p class="table-note">
+          Table 1. World-model reward-faithfulness summary from the tracked benchmark JSON. Telemetry supervision
+          improved reward, speed, steer, and off-track faithfulness substantially, while progress-delta prediction
+          remained weak and turn evolution remained the key qualitative limitation.
         </p>
       </section>
 
       <section id="limitations">
         <h2>7. Limitations and Future Work</h2>
-        <p>
-          The current site draft intentionally omits final embedded media, but the research limitations are more
-          important than the missing assets. The single-car branch still reflects the strengths and weaknesses of
-          on-policy visual RL: it can learn strong reactive behavior but does not necessarily yield reusable structure.
-          The multi-agent branch remains difficult to judge without richer competitive metrics and stronger race
-          completion rates. The world-model branch, while technically substantial, has not yet produced the kind of
-          reliable imagined control that would justify replacing direct PPO end to end.
-        </p>
-        <p>
-          Future work naturally splits in two directions. One direction is pragmatic: continue improving the direct
-          multi-agent PPO branch, especially around contact handling, long-horizon race completion, and evaluation
-          visibility. The other direction is representational: continue the world-model branch with more explicit
-          modeling of viewpoint or pose evolution, improved sharp-turn datasets, and stronger side-by-side diagnostics.
-          These directions are not mutually exclusive. Strong PPO policies can generate replay for the world-model
-          branch, and world-model diagnostics can in turn clarify which aspects of the racing task direct policies are
-          solving reactively rather than structurally.
-        </p>
+        <div class="two-column">
+          <p>
+            The single-car branch still reflects the strengths and weaknesses of on-policy visual RL: it can learn
+            strong reactive behavior but does not necessarily yield reusable structure. The multi-agent branch remains
+            difficult to judge without richer competitive metrics and stronger race completion rates. The world-model
+            branch, while technically substantial, has not yet produced the kind of reliable imagined control that would
+            justify replacing direct PPO end to end.
+          </p>
+          <p>
+            Future work naturally splits in two directions. One direction is pragmatic: continue improving the direct
+            multi-agent PPO branch, especially around contact handling, long-horizon race completion, and evaluation
+            visibility. The other direction is representational: continue the world-model branch with more explicit
+            modeling of viewpoint or pose evolution, improved sharp-turn datasets, and stronger side-by-side
+            diagnostics. These directions are complementary rather than competitive.
+          </p>
+        </div>
       </section>
 
       <section id="reproducibility">
         <h2>8. Reproducibility and Repo Map</h2>
-        <p>
-          The repository already contains the material needed to turn this report into a richer final project page. The
-          training and evaluation entry points live in the root scripts. Colab notebooks provide executable demos. The
-          multi-agent infrastructure is supported by dedicated config files and cloud runbooks. The world-model branch
-          includes progress logs, handoff documents, intervention notes, replay collection utilities, benchmark
-          summaries, and side-by-side demo generation.
-        </p>
-        <ul>
-          <li><strong>Single-car PPO:</strong> <code>train.py</code>, <code>evaluate.py</code>, <code>colab_training.ipynb</code></li>
-          <li><strong>Multi-agent PPO:</strong> <code>config/multi_car_marl_config.yaml</code>, prime scripts, evaluation JSON and videos</li>
-          <li><strong>World model:</strong> <code>world_model_train.py</code>, <code>world_model_train_control.py</code>, <code>WORLD_MODEL_PROGRESS.md</code></li>
-          <li><strong>Executable demo:</strong> <code>colab_ppo_world_model_demo.ipynb</code></li>
-        </ul>
-        <p>
-          As a GitHub Pages site, this document can be expanded incrementally. The next natural step is to add actual
-          figures, benchmark tables, and evaluation videos in the placeholder blocks above. That will turn the page
-          from a polished report draft into a public-facing project artifact suitable for final submission.
-        </p>
+        <div class="two-column">
+          <p>
+            The repository already contains the material needed to reproduce the main branches of the project. Training
+            and evaluation entry points live in the root scripts. Colab notebooks provide executable demos. The
+            multi-agent infrastructure is supported by dedicated config files and cloud runbooks. The world-model branch
+            includes progress logs, handoff documents, intervention notes, replay collection utilities, benchmark
+            summaries, and demo generation.
+          </p>
+          <p>
+            Concretely, the most important entry points are <code>train.py</code> and <code>evaluate.py</code> for PPO,
+            <code>config/multi_car_marl_config.yaml</code> for shared-policy multi-agent training,
+            <code>world_model_train.py</code> and <code>world_model_train_control.py</code> for the world-model branch,
+            and <code>colab_ppo_world_model_demo.ipynb</code> for the executable demonstration notebook. This page can
+            be extended further with additional benchmark plots, PDFs, and higher-resolution videos without changing the
+            report structure.
+          </p>
+        </div>
       </section>
 
       <section id="references">
@@ -443,7 +456,7 @@
           </li>
         </ol>
       </section>
-    </article>
-  </main>
+    </main>
+  </div>
 </body>
 </html>
