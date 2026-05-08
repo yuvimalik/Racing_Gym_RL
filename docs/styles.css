@@ -164,11 +164,24 @@ code {
   background: #faf8f2;
 }
 
-.media-figure video {
+.video-embed {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  background: #000;
+}
+
+.video-embed iframe {
   display: block;
   width: 100%;
-  height: auto;
-  background: #000;
+  height: 100%;
+  border: 0;
+}
+
+.video-direct-link {
+  margin: 0.65rem 0 0;
+  font-size: 0.92rem;
+  color: var(--muted);
 }
 
 .media-grid {
