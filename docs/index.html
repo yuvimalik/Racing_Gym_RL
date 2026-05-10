@@ -341,31 +341,308 @@ for _ in range(n_epochs):
         <h2>3. Multi-Agent Bridge</h2>
         <div class="two-column">
           <p>
-            The multi-agent branch is better understood as an infrastructure and evaluation bridge
-            than as the main benchmark contribution of the final report. The repository contains a
-            shared-policy PPO stack for dense racing, ten-car evaluation assets, anti-contact
-            heuristics, and cloud execution scripts. However, the logs available in the workspace
-            do not provide a comparably clean quantitative benchmark ladder for this phase.
-            Accordingly, this report treats multi-agent racing as the experimental bridge between a
-            single-car controller and a representation-learning agenda rather than as the core
-            empirical centerpiece.
+            The move from single-car PPO to multi-agent racing was not a simple increase in the
+            number of cars. It required a change in learning topology, data layout, reward
+            semantics, and evaluation. In the maintained torch stack, the relevant paradigm is
+            explicitly `shared_policy_ippo`: one trained network is reused across all cars, each
+            car receives only its own local image observation, and PPO updates are computed from
+            the union of all per-agent trajectories.
+          </p>
+          <p>
+            That design choice was pragmatic and statistically efficient. The single-agent policy
+            already encoded useful low-level control priors for throttle, steering smoothness, and
+            corner entry. The multi-agent problem therefore did not require a separate "brain" per
+            vehicle. Instead, it required a way to expose one policy to a richer state
+            distribution in which the same local controller sometimes leads, sometimes drafts,
+            sometimes defends position, and sometimes attempts a pass.
+          </p>
+          <p>
+            Formally, if car <span class="inline-math">i</span> receives observation
+            <span class="inline-math">o<sub>i,t</sub></span> and produces action
+            <span class="inline-math">a<sub>i,t</sub></span>, then the policy is shared:
+            <span class="inline-math">&pi;<sub>&theta;</sub>(a<sub>i,t</sub> | o<sub>i,t</sub>)</span>
+            for every agent <span class="inline-math">i</span>. The PPO objective is still the
+            clipped surrogate, but now it is aggregated over all agent streams:
+          </p>
+        </div>
+        <div class="equation">
+          L<sup>MARL</sup>(&theta;) =
+          1 / M &Sigma;<sub>i=1</sub><sup>M</sup>
+          E<sub>t</sub>[L<sup>CLIP</sup><sub>i,t</sub>(&theta;)],
+        </div>
+        <div class="two-column">
+          <p>
+            where <span class="inline-math">M</span> denotes the total number of active agent
+            streams in the rollout buffer. This is precisely how the implementation behaves: with
+            `n_envs` environments and `num_agents` cars per environment, the rollout buffer is
+            allocated over `n_streams = n_envs * num_agents`, and timesteps are counted per stream
+            rather than per environment.
+          </p>
+        </div>
+
+        <h3>3.1 Architectural Transition: One Car to Many Cars</h3>
+        <table class="results-table">
+          <thead>
+            <tr>
+              <th>Single-agent PPO</th>
+              <th>Shared-policy multi-agent PPO</th>
+              <th>Why the change mattered</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>One observation tensor for one car.</td>
+              <td>Per-step policy batch assembled from all agent-local observations.</td>
+              <td>The network had to process multiple concurrent local racing situations with one parameter set.</td>
+            </tr>
+            <tr>
+              <td>One action vector per environment step.</td>
+              <td>One action vector per car, then reassembled into the simulator action layout.</td>
+              <td>The trainer needed explicit flatten/unflatten logic between policy space and environment space.</td>
+            </tr>
+            <tr>
+              <td>Reward measures driving competence.</td>
+              <td>Reward must distinguish pace, positioning, safe proximity, and clean overtaking.</td>
+              <td>Naive reuse of the single-agent reward would encourage contact-heavy shortcut behaviors.</td>
+            </tr>
+            <tr>
+              <td>Evaluation focuses on progress and staying on track.</td>
+              <td>Evaluation must also measure rank, overtakes, contact, hook events, and front-gap behavior.</td>
+              <td>Multi-agent competence is partly relational; raw reward alone is insufficient.</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <div class="listing-block">
+          <p class="listing-title">Listing 2. Shared-policy rollout topology distilled from `train.py`.</p>
+          <pre><code>n_envs = env.num_envs
+n_streams = n_envs * num_agents
+buffer = RolloutBuffer(n_steps, n_streams, obs_shape, action_dim)
+
+obs_policy = obs_to_policy_batch(obs)          # one row per car
+raw_action, log_prob, value = policy.act(obs_policy)
+env_actions = action_batch_to_env(raw_action)  # regroup by environment
+
+buffer.add(
+    obs=obs_policy,
+    action=raw_action,
+    reward=flatten_transition_array(rewards),
+    done=flatten_transition_array(dones),
+    value=value,
+    log_prob=log_prob,
+)</code></pre>
+        </div>
+
+        <div class="two-column">
+          <p>
+            At the code level, this transition is visible in three places. First,
+            `TorchPPOTrainer` infers a multi-agent observation/action contract from the environment
+            and validates it before training. Second, `_collect_rollout()` converts the environment
+            state into a batched per-agent policy tensor, queries a single policy, and then maps
+            the resulting per-agent actions back into the simulator layout. Third, reward, `done`,
+            and value tensors are flattened into per-agent streams so that PPO updates treat all
+            cars as training data for one shared policy.
+          </p>
+          <p>
+            This is why the multi-agent section should be understood as a true architectural
+            extension rather than a superficial wrapper. The model is still a single visual actor
+            critic, but the training system around it becomes relational and stream-based.
+          </p>
+        </div>
+
+        <h3>3.2 What Was Preserved from the Single-Agent Stack</h3>
+        <div class="two-column">
+          <p>
+            One of the strongest engineering decisions in the repository was to preserve the parts
+            of the single-agent reward that were already doing useful work. The multi-agent config
+            still keeps the control-first prior: strong progress shaping, explicit off-track
+            termination, corner-entry discipline, steering smoothness, and no-progress failure
+            detection. In other words, competition was added on top of competent driving rather
+            than used as a substitute for it.
+          </p>
+          <p>
+            This design philosophy is explicit in the maintained multi-agent config, which
+            bootstraps from the promoted single-agent control surface `autoresearch_run_008`,
+            preserves `corner_target_speed = 7.0`, keeps steering-smoothness penalties active, and
+            terminates off-track episodes early. From an ML perspective, this is the correct bias:
+            good racing emerges more reliably when control stability is treated as a prerequisite
+            rather than as an emergent side effect of competitive pressure.
+          </p>
+        </div>
+
+        <h3>3.3 Reward Redesign for Racing Rather Than Driving</h3>
+        <table class="results-table">
+          <thead>
+            <tr>
+              <th>Reward family</th>
+              <th>Representative terms in code/config</th>
+              <th>Intended behavioral effect</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Single-agent control retained</td>
+              <td>`forward_progress_scale`, `corner_target_speed`, `apex_decel_reward_scale`, `steer_smoothness_penalty`, `off_track_terminal_penalty`</td>
+              <td>Keep the car on track, stable, and physically controllable before asking it to race.</td>
+            </tr>
+            <tr>
+              <td>Ranking and race pace</td>
+              <td>`rank_reward_scale`, `relative_velocity_scale`, `relative_velocity_cap`, `overtake_bonus`</td>
+              <td>Reward actually gaining race position rather than merely matching lane-following behavior.</td>
+            </tr>
+            <tr>
+              <td>Front-gap and spacing</td>
+              <td>`front_gap_hard_distance`, `front_gap_soft_distance`, `front_speed_penalty_scale`, `side_clearance_penalty_scale`, `proximity_soft_penalty_scale`</td>
+              <td>Discourage unsafe drafting, side rubbing, and closing into blocked space.</td>
+            </tr>
+            <tr>
+              <td>Contact severity</td>
+              <td>`collision_low_penalty`, `collision_medium_penalty`, `collision_high_penalty`, `contact_penalty`, `sustained_contact_penalty`</td>
+              <td>Make low-speed nudges and high-speed collisions measurably different events.</td>
+            </tr>
+            <tr>
+              <td>Hooking and stickiness</td>
+              <td>`pre_hook_penalty`, `hook_contact_penalty`, `terminate_on_hook_contact`, `stick_penalty_per_step`, `overlap_step_penalty`</td>
+              <td>Prevent wheel-hooking and exploitative "leaning" behavior from being interpreted as successful defense or overtaking.</td>
+            </tr>
+            <tr>
+              <td>Clean overtakes only</td>
+              <td>`overtake_requires_clean_contact`, `overtake_contact_dampen`, `overtake_min_pairwise_distance`</td>
+              <td>Ensure a pass is rewarded for spatial separation and rank transition, not for bumping through traffic.</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <div class="two-column">
+          <p>
+            The user-provided design notes are consistent with the final code: the relevant
+            multi-agent shift is not just "add an overtake bonus." It is a move from a
+            progress-only reward to a structured competitive objective in which rank incentives are
+            explicitly filtered by spatial safety. In the implementation, overtake reward is tied
+            to pairwise progress-order changes, then softened or suppressed when spacing is poor.
+          </p>
+          <p>
+            This matters because racing admits pathological equilibria. A naive competitive reward
+            can teach the agent that contact is a shortcut to position change. The repo's later
+            safety rails therefore penalize collisions by severity, escalate prolonged contact into
+            termination, and explicitly track front-gap and side-clearance telemetry. The reward is
+            not merely asking "did the car move forward?" but "did it improve race position in a
+            way that still looks like driving?"
+          </p>
+        </div>
+
+        <h3>3.4 How Overtaking and Safety Were Evaluated</h3>
+        <div class="two-column">
+          <p>
+            The evaluation protocol had to change as much as the reward. For single-agent PPO,
+            progress, off-track rate, and steering variance were enough to tell whether the policy
+            was useful. For multi-agent racing, those metrics become incomplete because an apparent
+            gain in reward can come from blocking, hooking, or rubbing rather than from an actual
+            clean pass.
+          </p>
+          <p>
+            The maintained evaluator therefore records competitive and safety metrics directly from
+            per-agent `info` dictionaries. In addition to reward and progress, it tracks
+            `mean_rank`, `mean_overtakes`, `collision_rate`, `contact_rate`,
+            `hook_contact_rate`, `contact_termination_rate`, `mean_max_contact_steps`,
+            `mean_front_gap`, and `min_front_gap`. This is the correct lens for multi-agent RL:
+            we do not only ask whether the cars are faster, but whether they are interacting in a
+            way that deserves to be called racing.
+          </p>
+        </div>
+
+        <table class="results-table">
+          <thead>
+            <tr>
+              <th>Metric</th>
+              <th>Meaning</th>
+              <th>Why it was necessary</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>`mean_rank`</td>
+              <td>Average final race position across agents and episodes.</td>
+              <td>Separates mere motion from competitive advancement.</td>
+            </tr>
+            <tr>
+              <td>`mean_overtakes`</td>
+              <td>Count of logged overtake events per episode.</td>
+              <td>Measures whether the policy actually changes race order.</td>
+            </tr>
+            <tr>
+              <td>`contact_rate` and `collision_rate`</td>
+              <td>Whether the episode contained physical overlap or collision events.</td>
+              <td>Detects the most obvious degeneracy: brute-force contact.</td>
+            </tr>
+            <tr>
+              <td>`hook_contact_rate`</td>
+              <td>Frequency of hook-style contact events.</td>
+              <td>Targets a particularly damaging exploit in close racing.</td>
+            </tr>
+            <tr>
+              <td>`contact_termination_rate`</td>
+              <td>How often safety rails ended the interaction.</td>
+              <td>Shows whether a “competitive” branch is actually relying on unsafe trajectories.</td>
+            </tr>
+            <tr>
+              <td>`mean_max_contact_steps`</td>
+              <td>Average longest sustained contact streak per episode.</td>
+              <td>Distinguishes brief touches from structurally bad leaning or sticking.</td>
+            </tr>
+            <tr>
+              <td>`mean_front_gap` and `min_front_gap`</td>
+              <td>Average and minimum longitudinal spacing to the car ahead.</td>
+              <td>Connects overtaking intent to actual available space.</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <div class="two-column">
+          <p>
+            This evaluation design also explains the shift in mentality visible in the project
+            notes: the correct ordering was <em>control and safety first, competition second</em>.
+            Without that ordering, the system can produce superficially aggressive agents that are
+            merely learning to occupy space destructively. With it, multi-agent traversal becomes a
+            genuine extension of the single-agent controller rather than a collapse of it.
+          </p>
+          <p>
+            For the broader report, the multi-agent branch therefore serves as the bridge between
+            two research questions. It shows how direct PPO had to become relational and
+            safety-aware before dense racing could be studied seriously, and it motivates why a
+            richer world model later became appealing: once interaction structure matters, mere
+            lane-following is no longer a sufficient representation of the task.
           </p>
         </div>
 
         <div class="media-grid">
           <figure class="media-figure">
-            <video controls preload="metadata">
-              <source src="assets/video1.mp4" type="video/mp4">
-            </video>
+            <div class="video-embed">
+              <iframe
+                src="https://www.youtube.com/embed/bWVPx-RFm7o"
+                title="Video 1: PPO control behavior"
+                loading="lazy"
+                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                referrerpolicy="strict-origin-when-cross-origin"
+                allowfullscreen
+              ></iframe>
+            </div>
             <figcaption>
               <strong>Video 1.</strong> PPO control behavior after the single-car stack became
               stable enough to serve as an executable baseline.
             </figcaption>
           </figure>
           <figure class="media-figure">
-            <video controls preload="metadata">
-              <source src="assets/video2.mp4" type="video/mp4">
-            </video>
+            <div class="video-embed">
+              <iframe
+                src="https://www.youtube.com/embed/HT_xuh_xvNc"
+                title="Video 2: Multi-car shared-policy evaluation"
+                loading="lazy"
+                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                referrerpolicy="strict-origin-when-cross-origin"
+                allowfullscreen
+              ></iframe>
+            </div>
             <figcaption>
               <strong>Video 2.</strong> Multi-car shared-policy evaluation, retained as evidence
               that the control stack scaled operationally even when race quality remained mixed.
@@ -656,18 +933,32 @@ for t in range(time_steps):
 
         <div class="media-grid">
           <figure class="media-figure">
-            <video controls preload="metadata">
-              <source src="assets/video3.mp4" type="video/mp4">
-            </video>
+            <div class="video-embed">
+              <iframe
+                src="https://www.youtube.com/embed/7V6KswtlJ9U"
+                title="Video 3: Earlier world-model hallucination behavior"
+                loading="lazy"
+                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                referrerpolicy="strict-origin-when-cross-origin"
+                allowfullscreen
+              ></iframe>
+            </div>
             <figcaption>
               <strong>Video 3.</strong> Earlier world-model hallucination behavior, useful as a
               qualitative baseline before the telemetry-enabled refinement ladder.
             </figcaption>
           </figure>
           <figure class="media-figure">
-            <video controls preload="metadata">
-              <source src="assets/video4.mp4" type="video/mp4">
-            </video>
+            <div class="video-embed">
+              <iframe
+                src="https://www.youtube.com/embed/4S0UCY6mb-c"
+                title="Video 4: Later world-model hallucination behavior"
+                loading="lazy"
+                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                referrerpolicy="strict-origin-when-cross-origin"
+                allowfullscreen
+              ></iframe>
+            </div>
             <figcaption>
               <strong>Video 4.</strong> Later world-model behavior illustrating why clean geometry
               and convincing pose evolution are not the same achievement.
