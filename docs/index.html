@@ -4,455 +4,735 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Racing Gym RL Final Report</title>
-  <meta name="description" content="Professional research-style final report for the Racing Gym RL project: single-car PPO, ten-car racing, and world-model experiments.">
+  <meta
+    name="description"
+    content="ICML-style final report for the Racing Gym RL project, covering PPO control and world-model development through an agentic research loop."
+  >
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
   <div class="page-shell">
     <header class="report-header">
-      <div class="report-rule"></div>
-      <p class="report-type">Course Project Final Report</p>
-      <h1>From Single-Car PPO to Multi-Agent Racing and World Models</h1>
-      <p class="author-line">
-        Yuv Malik, Pablo Echevarria, Matthew Lobo
-      </p>
-      <p class="affiliation-line">
-        Racing Gym RL Project Repository:
-        <a href="https://github.com/yuvimalik/Racing_Gym_RL">github.com/yuvimalik/Racing_Gym_RL</a>
-      </p>
+      <p class="report-type">Final Research Report</p>
+      <h1>Agentic Racing Research with PPO and Offline World Models</h1>
+      <p class="author-line">Yuv Malik, Pablo Echevarria, Matthew Lobo</p>
+      <p class="affiliation-line">STAT 4830 Project Repository and Benchmark Record</p>
       <nav class="top-links" aria-label="Project links">
         <a href="https://github.com/yuvimalik/Racing_Gym_RL">Repository</a>
-        <a href="https://colab.research.google.com/github/yuvimalik/Racing_Gym_RL/blob/main/colab_training.ipynb">PPO Colab</a>
-        <a href="https://colab.research.google.com/github/yuvimalik/Racing_Gym_RL/blob/main/colab_ppo_world_model_demo.ipynb">World-Model Colab</a>
-        <a href="https://github.com/yuvimalik/Racing_Gym_RL/blob/main/WORLD_MODEL_PROGRESS.md">Progress Log</a>
-        <a href="https://github.com/yuvimalik/Racing_Gym_RL/blob/main/WORLD_MODEL_HANDOFF.md">Handoff</a>
+        <a href="https://github.com/yuvimalik/Racing_Gym_RL/blob/main/README.md">Benchmark README</a>
+        <a href="https://github.com/yuvimalik/Racing_Gym_RL/blob/main/TRAINING_HISTORY.md">PPO Log</a>
+        <a href="https://github.com/yuvimalik/Racing_Gym_RL/blob/main/WORLD_MODEL_PROGRESS.md">World-Model Log</a>
+        <a href="https://github.com/yuvimalik/Racing_Gym_RL/blob/main/WORLD_MODEL_HANDOFF.md">World-Model Handoff</a>
       </nav>
-      <div class="report-rule"></div>
     </header>
 
     <main class="paper">
-      <section class="abstract-block" id="abstract">
+      <section id="abstract">
         <h2>Abstract</h2>
         <div class="two-column">
           <p>
-            This project studies how far a reinforcement learning pipeline can be pushed in a visually rich racing
-            simulator, starting from a single-car Proximal Policy Optimization (PPO) baseline and then extending toward
-            multi-agent racing and world-model-based control. The first stage established a stable single-car control
-            pipeline using image observations, continuous actions, and a local torch PPO implementation inspired by the
-            clipped-surrogate formulation of PPO <a href="#ref-ppo">[1]</a>. The second stage increased task complexity
-            by scaling to multi-car racing and eventually ten-car shared-policy training, which required changes in
-            environment wrapping, evaluation, anti-contact logic, and experiment management.
+            This report documents a reinforcement-learning project that evolved through an
+            autonomous research loop rather than a single fixed implementation. The project began
+            with PPO control for pixel-based racing and later shifted toward an offline recurrent
+            state-space world model when direct control improvements became bottlenecked by
+            representation quality. Throughout the project, the research process itself was
+            agentic: AutoResearch proposed hypotheses, executed targeted configuration changes,
+            screened failures, and promoted only those candidates that survived observation-driven
+            gates.
           </p>
           <p>
-            The third stage introduced an offline world-model branch based on recurrent state-space models, following
-            the lineage from PlaNet <a href="#ref-planet">[2]</a> through Dreamer <a href="#ref-dreamer">[3]</a>,
-            DreamerV2 <a href="#ref-dreamerv2">[4]</a>, DreamerV3 <a href="#ref-dreamerv3">[5]</a>, and Dreamer 4
-            <a href="#ref-dreamer4">[6]</a>. In our codebase, the world-model branch learned coherent short-horizon
-            hallucinations and useful telemetry prediction, but still struggled with hard-turn future dynamics and
-            reliable policy transfer. The strongest outcome is therefore not a single metric, but a coherent research
-            progression: PPO became stable, ten-car scaling exposed infrastructure and interaction challenges, and
-            predictive representation quality emerged as the next major bottleneck.
+            The PPO phase established a working visual control baseline after early failures such
+            as steering collapse, off-track reward hacking, and no-progress circling were diagnosed
+            and repaired in the training loop. The strongest early AutoResearch single-car result
+            was `run_008`, which reached mean reward `205.46`, mean progress `0.5551`, and
+            off-track rate `0.036` after `49,152` timesteps. A later recursive control branch
+            promoted `g003_c03`, which combined broader brake exploration with a lower corner
+            target speed and reached mean reward `232.58` with mean progress `0.7376`.
+          </p>
+          <p>
+            The world-model phase was driven by a different question: whether an RSSM could learn a
+            reusable latent dynamics model of racing rather than merely optimize local control.
+            Fixed-architecture experiments from `E1` through `P5` improved corridor persistence,
+            reward faithfulness, and telemetry prediction, culminating in the stable checkpoint
+            `P5_d4_main_telemetry_a100_bs128_e15`. The decisive improvement sequence inside that
+            ladder was the telemetry pivot `P3 -> P4 -> P5`, which converted the project from
+            generic visual continuation into physics-aware prediction. However, the primary
+            unresolved failure mode remained sharp-turn future dynamics. Later data, objective, and
+            structural ablations were therefore valuable mainly as negative evidence: they
+            demonstrated that curated turn-heavy replay, perceptual or progress-only objective
+            tweaks, a wider stochastic latent, and a lightweight world-motion factorization were
+            insufficient to solve turn evolution.
+          </p>
+          <p>
+            The central contribution of the repository is thus a transparent benchmark record of
+            hypothesis-driven iteration. The strongest result is not a single headline number but a
+            reproducible chronology: PPO became operational through explicit bug repair and
+            AutoResearch-guided reward tuning, while the world-model branch clarified that future
+            progress most likely requires explicit pose evolution rather than additional
+            fixed-objective training on the existing RSSM family.
           </p>
         </div>
       </section>
 
-      <section class="summary-table-section">
-        <table class="summary-table">
+      <section id="loop">
+        <h2>1. Agentic Research Loop</h2>
+        <div class="two-column">
+          <p>
+            The project was organized as a repeated <em>Reasoning -&gt; Action -&gt; Observation</em>
+            cycle. In the PPO branch, the cycle was implemented by AutoResearch over candidate
+            training programs and reward-shaping variants. In the world-model branch, the same
+            logic appeared as a sequence of explicit intervention memos, benchmark summaries, and
+            promotion gates. This matters methodologically: the repository is not merely a final
+            model dump, but a record of which hypotheses survived contact with the simulator.
+          </p>
+          <p>
+            Formally, let the research state at iteration <em>k</em> be
+            <span class="inline-math">s<sup>(k)</sup></span>, the proposed code or configuration
+            change be <span class="inline-math">a<sup>(k)</sup></span>, and the resulting measured
+            telemetry be <span class="inline-math">o<sup>(k)</sup></span>. The agentic loop can be
+            summarized as
+          </p>
+        </div>
+        <div class="equation">
+          h<sup>(k)</sup> = &pi;(s<sup>(k)</sup>),&nbsp;
+          a<sup>(k)</sup> = f(h<sup>(k)</sup>),&nbsp;
+          o<sup>(k)</sup> = Eval(a<sup>(k)</sup>),&nbsp;
+          s<sup>(k+1)</sup> = U(s<sup>(k)</sup>, o<sup>(k)</sup>).
+        </div>
+        <p class="section-note">
+          Here <span class="inline-math">&pi;</span> denotes hypothesis generation,
+          <span class="inline-math">f</span> denotes the concrete intervention, and
+          <span class="inline-math">U</span> denotes promotion, rejection, or reframing after
+          evaluation.
+        </p>
+      </section>
+
+      <section id="ppo">
+        <h2>2. PPO Control Stack</h2>
+        <div class="two-column">
+          <p>
+            The control branch used PPO on `96 x 96` RGB observations with continuous steering,
+            throttle, and brake actions. The maintained local policy implementation used a
+            tanh-squashed Gaussian actor with corrected log-probabilities, together with separate
+            multilayer perceptrons for the policy and value heads. This separation was not a
+            stylistic preference: it followed directly from an early failure analysis in which a
+            shared head allowed value gradients to corrupt policy features.
+          </p>
+          <p>
+            PPO optimization followed the standard clipped objective,
+          </p>
+        </div>
+        <div class="equation">
+          L<sup>CLIP</sup>(&theta;) =
+          E<sub>t</sub>[
+          min(r<sub>t</sub>(&theta;) A&#770;<sub>t</sub>,
+          clip(r<sub>t</sub>(&theta;), 1 - &epsilon;, 1 + &epsilon;) A&#770;<sub>t</sub>)
+          ],
+          &nbsp; r<sub>t</sub>(&theta;) =
+          exp(log &pi;<sub>&theta;</sub>(a<sub>t</sub> | s<sub>t</sub>) -
+          log &pi;<sub>&theta;old</sub>(a<sub>t</sub> | s<sub>t</sub>)).
+        </div>
+        <div class="two-column">
+          <p>
+            Returns were estimated with generalized advantage estimation,
+          </p>
+        </div>
+        <div class="equation">
+          A&#770;<sub>t</sub> =
+          &delta;<sub>t</sub> +
+          (&gamma;&lambda;) &delta;<sub>t+1</sub> +
+          ...,
+          &nbsp;
+          &delta;<sub>t</sub> =
+          r<sub>t</sub> +
+          &gamma; V(s<sub>t+1</sub>) - V(s<sub>t</sub>).
+        </div>
+        <div class="two-column">
+          <p>
+            The key project lesson from this stage is that apparently small implementation details
+            such as action squashing, bootstrapping across terminal states, and progress
+            computation determined whether PPO behaved as a driver or as a reward hacker. The
+            strongest control results arose only after those low-level pathologies were resolved.
+          </p>
+        </div>
+
+        <h3>2.1 Developmental History</h3>
+        <table class="results-table">
           <thead>
             <tr>
-              <th>Phase</th>
-              <th>Primary question</th>
-              <th>Main result</th>
+              <th>Stage</th>
+              <th>Evidence</th>
+              <th>Observation</th>
+              <th>Agentic conclusion</th>
             </tr>
           </thead>
           <tbody>
             <tr>
-              <td>Single-car PPO</td>
-              <td>Can a pixel-based driver learn stable lane-following and recovery?</td>
-              <td>Yes. This became the executable control baseline.</td>
+              <td>Initial baseline</td>
+              <td>`TRAINING_HISTORY.md` records the historical SB3 baseline at `500k` steps with reward `282+`.</td>
+              <td>The simulator and reward scaffold were learnable in principle.</td>
+              <td>Proceed to the custom torch backend instead of abandoning the task definition.</td>
             </tr>
             <tr>
-              <td>Ten-car PPO</td>
-              <td>Can the pipeline scale to dense interaction and shared-policy racing?</td>
-              <td>Partially. Infrastructure matured faster than race quality.</td>
+              <td>Negative result: GAE bug</td>
+              <td>Early torch run: reward `-1872`, progress `0%`, off-track `100%`.</td>
+              <td>Advantage bootstraps leaked across episode boundaries.</td>
+              <td>Repair the off-by-one in `compute_returns_advantages()`.</td>
             </tr>
             <tr>
-              <td>World model</td>
-              <td>Can a learned RSSM support useful imagination for control?</td>
-              <td>Short-horizon fidelity improved, but turn evolution remained unstable.</td>
+              <td>Negative result: steering collapse</td>
+              <td>Step `57,344` eval: speed `11.28`, steer variance `0.00000`, progress `0.00%`.</td>
+              <td>A shared `log_std` caused throttle saturation and steering collapse.</td>
+              <td>Introduce per-dimension log-std bounds and higher entropy.</td>
+            </tr>
+            <tr>
+              <td>Negative result: shared-head collapse</td>
+              <td>Step `73,728` eval: speed `0.00`, steer variance `0.00000`, fail-fast triggered.</td>
+              <td>Value gradients corrupted the policy representation.</td>
+              <td>Split policy and value MLPs and reduce the value coefficient pressure.</td>
+            </tr>
+            <tr>
+              <td>Negative result: reward hacking</td>
+              <td>`best_model_torch.pt`: reward `6861.91`, progress `0.00%`, off-track `100%`.</td>
+              <td>Velocity aligned with track direction yielded reward on grass.</td>
+              <td>Replace surrogate forward reward with actual tile progress and terminate off-track episodes.</td>
+            </tr>
+            <tr>
+              <td>Negative result: donut spinning</td>
+              <td>Fast circular motion survived the original stuck detector.</td>
+              <td>Speed-based stuck logic missed high-speed zero-progress behavior.</td>
+              <td>Add no-progress termination and a yaw-rate penalty.</td>
+            </tr>
+            <tr>
+              <td>AutoResearch promotion</td>
+              <td>`run_008`: reward `205.46`, progress `0.5551`, speed `28.32`, off-track `0.036`.</td>
+              <td>The torch PPO stack became a credible single-car control baseline.</td>
+              <td>Promote the run and use it as the maintained policy variant.</td>
+            </tr>
+            <tr>
+              <td>Recursive pivot</td>
+              <td>`g002_c03` then `g003_c03` in `recursive_cap100`.</td>
+              <td>Brake discovery and earlier corner setup produced the clearest late-stage gain.</td>
+              <td>Promote the branch that lowered `corner_target_speed` and widened brake exploration.</td>
             </tr>
           </tbody>
         </table>
-      </section>
 
-      <section id="introduction">
-        <h2>1. Introduction</h2>
-        <div class="two-column">
-          <p>
-            The project began with a straightforward but technically demanding question: can an agent learn robust
-            racing behavior directly from raw pixels in a simulator that is visually small but behaviorally unforgiving?
-            Racing is an appealing benchmark because it combines perception, smooth continuous control, anticipation of
-            upcoming turns, recovery after drift, and eventually interaction with other agents. Even the single-car task
-            already contains many of the elements that make visual reinforcement learning brittle in practice: noisy
-            observations, long-horizon credit assignment, and sensitivity to reward shaping and action parameterization.
-          </p>
-          <p>
-            The work therefore evolved in stages rather than attempting an ambitious end-to-end solution immediately.
-            We first sought a reliable single-car PPO baseline, because without a competent policy it is hard to
-            distinguish optimizer failures from task-definition failures. Once that baseline stabilized, we expanded
-            toward multi-car and ten-car racing, where the problem shifts from pure track-following to contact,
-            ranking, blocking, and overtaking. In parallel, we started a world-model branch to test whether a
-            predictive latent model could capture enough structure about racing to support imagination-based control or,
-            at minimum, provide a more reusable representation than direct policy optimization.
-          </p>
-          <p>
-            This report is written as a research narrative rather than a changelog. The emphasis is on progression:
-            why PPO remained the practical control baseline, why multi-agent scaling demanded more engineering than
-            expected, and why the world-model branch became attractive despite the practicality of direct PPO. PPO
-            provides the policy-gradient backbone <a href="#ref-ppo">[1]</a>. For latent dynamics, the relevant
-            lineage begins with PlaNet <a href="#ref-planet">[2]</a>, moves through Dreamer-style latent imagination
-            <a href="#ref-dreamer">[3]</a>, and extends through DreamerV2 and DreamerV3
-            <a href="#ref-dreamerv2">[4]</a>, <a href="#ref-dreamerv3">[5]</a>. For the multi-agent framing,
-            MAPPO-style results demonstrate that PPO-based shared-policy systems can remain surprisingly competitive
-            once implementation details are treated seriously <a href="#ref-mappo">[7]</a>.
-          </p>
+        <h3>2.2 PPO Benchmark Record</h3>
+        <table class="results-table">
+          <thead>
+            <tr>
+              <th>Artifact</th>
+              <th>Reward</th>
+              <th>Progress</th>
+              <th>Off-track</th>
+              <th>Speed</th>
+              <th>Interpretation</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>SB3 historical baseline</td>
+              <td>`282+`</td>
+              <td>approximately full lap</td>
+              <td>low</td>
+              <td>not logged here</td>
+              <td>Working reference used to validate that the simulator was learnable.</td>
+            </tr>
+            <tr>
+              <td>`autoresearch/results/run_008/metrics.json`</td>
+              <td>`205.46`</td>
+              <td>`0.5551`</td>
+              <td>`0.0360`</td>
+              <td>`28.32`</td>
+              <td>Best early AutoResearch single-car promotion.</td>
+            </tr>
+            <tr>
+              <td>`autoresearch/results/run_013/metrics.json`</td>
+              <td>`179.83`</td>
+              <td>`0.4967`</td>
+              <td>`0.2370`</td>
+              <td>`28.48`</td>
+              <td>Competitive but inferior to `run_008` on cleanliness.</td>
+            </tr>
+            <tr>
+              <td>`autoresearch/results/run_016/metrics.json`</td>
+              <td>`186.50`</td>
+              <td>`0.5089`</td>
+              <td>`0.1163`</td>
+              <td>`28.32`</td>
+              <td>Later strong candidate, still below the promoted run on reward.</td>
+            </tr>
+            <tr>
+              <td>`recursive_cap100/g002_c03`</td>
+              <td>`-77.93`</td>
+              <td>`0.6662`</td>
+              <td>`0.4911`</td>
+              <td>`35.49`</td>
+              <td>Useful braking pivot, but not yet a stable positive reward regime.</td>
+            </tr>
+            <tr>
+              <td>`recursive_cap100/g003_c03`</td>
+              <td>`232.58`</td>
+              <td>`0.7376`</td>
+              <td>`0.2678`</td>
+              <td>`44.52`</td>
+              <td>Best documented late-stage recursive control result.</td>
+            </tr>
+            <tr>
+              <td>`models/v2_progress/best_model_torch.pt`</td>
+              <td>`382.86`</td>
+              <td>`0.9993`</td>
+              <td>`0.6000`</td>
+              <td>not logged here</td>
+              <td>Best whole-track completion reference in `TRAINING_HISTORY.md`.</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h3>2.3 AutoResearch Pivots</h3>
+        <table class="results-table">
+          <thead>
+            <tr>
+              <th>Reasoning</th>
+              <th>Action</th>
+              <th>Observation</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>`g002_c03` diagnosed persistent `throttle_saturation_no_brake`.</td>
+              <td>Add `reward_shaping.brake_penalty_scale = 0.01`, `apex_decel_reward_scale = 0.2`, and `apex_decel_reward_cap = 2.0`.</td>
+              <td>Progress rose to `0.6662`, but reward stayed negative because the branch remained too dirty.</td>
+            </tr>
+            <tr>
+              <td>`g003_c03` reframed the issue as missing brake exploration and late corner setup.</td>
+              <td>Change `ppo.min_log_std` from `-1.0` to `-0.75` and lower `corner_target_speed` from `8.0` to `7.0`.</td>
+              <td>The branch reached reward `232.58` and progress `0.7376`, which became the best documented recursive promotion.</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <div class="listing-block">
+          <p class="listing-title">Listing 1. PPO update loop distilled from `train.py` and `autoresearch/train_ppo.py`.</p>
+          <pre><code>advantages = normalize(advantages)
+for _ in range(n_epochs):
+    for batch in rollout_buffer:
+        values, new_log_probs, entropy = policy.evaluate_actions(
+            batch["obs"], batch["actions"]
+        )
+        ratio = exp(new_log_probs - batch["old_log_probs"])
+        unclipped = batch["advantages"] * ratio
+        clipped = batch["advantages"] * clamp(
+            ratio, 1.0 - clip_range, 1.0 + clip_range
+        )
+        policy_loss = -min(unclipped, clipped).mean()
+        value_loss = mse(values, batch["returns"])
+        entropy_loss = -entropy.mean()
+        loss = policy_loss + vf_coef * value_loss + ent_coef * entropy_loss
+        optimizer.zero_grad()
+        loss.backward()
+        clip_grad_norm_(policy.parameters(), max_grad_norm)
+        optimizer.step()</code></pre>
         </div>
       </section>
 
-      <section id="environment">
-        <h2>2. Task and Environment</h2>
+      <section id="marl">
+        <h2>3. Multi-Agent Bridge</h2>
         <div class="two-column">
           <p>
-            All phases of the project were built around the <code>multi_car_racing</code> environment, a Gym-style
-            simulator that emits 96x96 RGB observations and expects continuous control actions for steering, throttle,
-            and braking. In the single-car setting, the problem is a visual continuous-control task. In the multi-car
-            setting, the same environment becomes an interaction-heavy racing problem in which ranking, contact
-            persistence, and lane discipline matter as much as raw forward speed.
-          </p>
-          <p>
-            A useful property of the environment is that it supports consistent evaluation across multiple control
-            paradigms. A direct PPO agent can act online in the simulator, while a world-model pipeline can collect
-            replay from the same substrate and evaluate hallucinations under the same observation semantics. This kept
-            the project grounded on a shared benchmark rather than letting the modeling branches drift apart.
-          </p>
-          <p>
-            The environment's apparent simplicity is deceptive. The observation is small but visually dense: road
-            boundaries, grass, opponent positions, and ego-car attitude must all be inferred from compressed RGB input.
-            That makes the benchmark useful as a bridge between standard deep RL and more representation-heavy
-            world-model methods. It is complicated enough to motivate latent modeling, but still compact enough for a
-            course-scale project.
-          </p>
-        </div>
-      </section>
-
-      <section id="single-car">
-        <h2>3. Single-Car PPO: Establishing a Baseline</h2>
-        <div class="two-column">
-          <p>
-            The initial phase focused on training a single racing agent from images using PPO <a href="#ref-ppo">[1]</a>.
-            This was the stabilizing step for the entire project, because it answered the most practical early question:
-            can the simulator, reward shaping, and observation pipeline support competent learning at all? If the answer
-            had been no, later work on multi-agent racing or world models would have been premature.
-          </p>
-          <p>
-            Early versions of the stack followed a standard image-based actor-critic pattern with a convolutional
-            encoder feeding policy and value heads. The project later moved toward a local torch implementation with a
-            tanh-squashed Gaussian policy and corrected log-probabilities under action squashing. That detail mattered:
-            in racing, the agent is sensitive not just to which actions are chosen, but to how the action distribution
-            is represented and optimized under PPO.
-          </p>
-          <p>
-            This phase also established the importance of instrumentation. The project did not only log reward; it
-            tracked progress, speed, off-track behavior, and evaluation videos. That became essential later, because
-            racing rewards can be deceptive: a policy can exploit local shaping terms without becoming a strong driver.
-            The single-car baseline therefore served not just as an optimizer benchmark, but as the first version of a
-            broader evaluation philosophy.
-          </p>
-          <p>
-            Methodologically, the single-car phase acted as an ablation filter. Before adding more agents or latent
-            imagination, the project first had to settle practical issues such as action squashing, evaluation cadence,
-            rollout inspection, and run promotion criteria. Many apparent RL improvements disappear once the environment
-            wrapper or evaluation protocol changes; this stage reduced that ambiguity.
-          </p>
-        </div>
-
-        <figure class="media-figure">
-          <div class="video-embed">
-            <iframe
-              src="https://www.youtube.com/embed/bWVPx-RFm7o"
-              title="Video 1: Two-car racing behavior"
-              loading="lazy"
-              allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-              referrerpolicy="strict-origin-when-cross-origin"
-              allowfullscreen
-            ></iframe>
-          </div>
-          <p class="video-direct-link">
-            If the embedded player is blocked, <a href="https://youtu.be/bWVPx-RFm7o">watch Video 1 on YouTube</a>.
-          </p>
-          <figcaption>
-            <strong>Video 1.</strong> Two-car racing behavior from the PPO branch, included as a compact demonstration
-            of the control stack after the single-car baseline matured into interaction-capable racing.
-          </figcaption>
-        </figure>
-      </section>
-
-      <section id="multi-agent">
-        <h2>4. Scaling from One Car to Multi-Agent and Ten-Car PPO</h2>
-        <div class="two-column">
-          <p>
-            Once the single-car baseline became usable, the natural next question was whether the same control approach
-            could survive a more complex racing setting. The answer was not simply "increase the number of cars."
-            Multi-agent racing changed the optimization landscape in several ways. Behavior that is acceptable in
-            single-car training becomes pathological once opponents are present: bumping, hooking, lane blocking, and
-            progress-through-contact can all look locally rewarding while producing obviously poor racing.
-          </p>
-          <p>
-            The codebase therefore moved toward a shared-policy PPO setup closer in spirit to PPO-based multi-agent
-            baselines, informed by the practical lesson from MAPPO-style work that PPO-derived methods often remain
-            stronger than expected in multi-agent settings <a href="#ref-mappo">[7]</a>. Our implementation is not a
-            direct reproduction of MAPPO, because the project remained grounded in a custom simulator and a local torch
-            stack, but the same high-level lesson applied: simple PPO-based systems can stay competitive when the
-            evaluation logic and engineering details are treated seriously.
-          </p>
-          <p>
-            Relative to the single-car case, the ten-car setting changed both the state distribution and the semantics
-            of success. The policy now had to react not only to track geometry but also to non-stationary visual clutter
-            from opponents, while the training system had to distinguish genuine overtakes from contact-based
-            exploitation. This was the phase where the project most clearly shifted from "train a driver" to "design an
-            experimental system for racing."
-          </p>
-          <p>
-            The engineering work expanded substantially in this phase. Environment wrapping had to respect per-agent
-            observations and action semantics. Evaluation logic had to report race-specific metrics rather than a single
-            scalar reward. Anti-contact and anti-hooking heuristics became necessary to prevent degenerate competitive
-            behavior. Training infrastructure also became more demanding, which explains the presence of cloud and pod
-            orchestration material in the repository.
-          </p>
-        </div>
-
-        <figure class="media-figure">
-          <div class="video-embed">
-            <iframe
-              src="https://www.youtube.com/embed/HT_xuh_xvNc"
-              title="Video 2: Ten-car shared-policy PPO evaluation"
-              loading="lazy"
-              allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-              referrerpolicy="strict-origin-when-cross-origin"
-              allowfullscreen
-            ></iframe>
-          </div>
-          <p class="video-direct-link">
-            If the embedded player is blocked, <a href="https://youtu.be/HT_xuh_xvNc">watch Video 2 on YouTube</a>.
-          </p>
-          <figcaption>
-            <strong>Video 2.</strong> Ten-car shared-policy PPO evaluation. This branch was less important for a single
-            headline metric than for exposing the infrastructure, safety, and evaluation demands of scaling beyond the
-            original one-car setup.
-          </figcaption>
-        </figure>
-      </section>
-
-      <section id="world-models">
-        <h2>5. World Models: From RSSMs to Dreamer-Style Imagination</h2>
-        <div class="two-column">
-          <p>
-            The world-model branch emerged from a broader scientific motivation. Direct PPO learns a policy, but it does
-            not explicitly learn a reusable predictive representation of the environment. For racing, that limitation
-            matters: the central challenge is not just choosing the next steering command, but understanding track
-            geometry, ego-motion, and future consequences over extended horizons. This makes the world-model literature
-            particularly relevant.
-          </p>
-          <p>
-            The starting point for our conceptual framing was PlaNet <a href="#ref-planet">[2]</a>, which introduced
-            latent dynamics planning from pixels using a recurrent state-space model with deterministic and stochastic
-            components. Dreamer then shifted from online planning to learning behaviors through latent imagination
-            <a href="#ref-dreamer">[3]</a>, allowing policy optimization directly inside the learned model. DreamerV2
-            strengthened this line by using discrete latent representations and showing strong Atari performance inside a
-            world-model framework <a href="#ref-dreamerv2">[4]</a>. DreamerV3 pushed further toward broad-domain
-            robustness, arguing that one world-model RL algorithm with fixed hyperparameters can remain competitive
-            across many task families <a href="#ref-dreamerv3">[5]</a>. Dreamer 4 extends the frontier toward scalable
-            imagination training inside fast and accurate world models, with a more explicit large-scale offline control
-            framing <a href="#ref-dreamer4">[6]</a>.
-          </p>
-          <p>
-            Our implementation does not attempt to reproduce DreamerV3 or Dreamer 4 directly. Instead, it adopts a
-            narrower course-project path: an offline RSSM-style model trained on replay from the racing simulator,
-            followed by latent actor-critic diagnostics and telemetry-faithfulness evaluation. The repository includes
-            an encoder-decoder backbone, deterministic GRU dynamics, stochastic prior and posterior latent heads, reward
-            prediction, replay collection, hallucination video generation, and a frozen-world-model control wrapper.
-            Over time, the branch also gained telemetry supervision for speed, progress delta, steering, corner angle,
-            and off-track probability.
-          </p>
-          <p>
-            This pipeline was useful in two distinct ways. First, it produced qualitative artifacts such as side-by-side
-            hallucination videos that made the model's strengths and weaknesses concrete. Second, it supported a more
-            targeted diagnostic lens than direct PPO. Instead of asking only whether the final policy improves, we could
-            ask whether the latent model preserved road geometry, whether reward prediction remained correlated with held
-            out replay, whether off-track classification was faithful, and whether failures were local or structural.
-          </p>
-          <p>
-            The main technical conclusion of this branch is mixed but informative. Short-horizon straight-line
-            hallucinations became broadly coherent, and telemetry supervision materially improved local faithfulness.
-            However, turn evolution remained the dominant weakness. The project logs repeatedly identify an ego/world
-            inconsistency problem: the model can preserve local appearance and still fail to produce convincing future
-            turning dynamics. This is why the frontier in the repository shifted away from simple loss reweighting and
-            toward more structural interventions around pose evolution and explicit motion conditioning.
+            The multi-agent branch is better understood as an infrastructure and evaluation bridge
+            than as the main benchmark contribution of the final report. The repository contains a
+            shared-policy PPO stack for dense racing, ten-car evaluation assets, anti-contact
+            heuristics, and cloud execution scripts. However, the logs available in the workspace
+            do not provide a comparably clean quantitative benchmark ladder for this phase.
+            Accordingly, this report treats multi-agent racing as the experimental bridge between a
+            single-car controller and a representation-learning agenda rather than as the core
+            empirical centerpiece.
           </p>
         </div>
 
         <div class="media-grid">
-          <figure class="media-figure media-figure--half">
-            <div class="video-embed">
-              <iframe
-                src="https://www.youtube.com/embed/YV4F1aTz_VY"
-                title="Video 3: Hallucination epoch 20"
-                loading="lazy"
-                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-                referrerpolicy="strict-origin-when-cross-origin"
-                allowfullscreen
-              ></iframe>
-            </div>
-            <p class="video-direct-link">
-              If the embedded player is blocked, <a href="https://youtu.be/YV4F1aTz_VY">watch Video 3 on YouTube</a>.
-            </p>
+          <figure class="media-figure">
+            <video controls preload="metadata">
+              <source src="assets/video1.mp4" type="video/mp4">
+            </video>
             <figcaption>
-              <strong>Video 3.</strong> Early hallucinations from the world-model branch. Local appearance is partially
-              preserved, but future structure remains unstable.
+              <strong>Video 1.</strong> PPO control behavior after the single-car stack became
+              stable enough to serve as an executable baseline.
             </figcaption>
           </figure>
-
-          <figure class="media-figure media-figure--half">
-            <div class="video-embed">
-              <iframe
-                src="https://www.youtube.com/embed/9rFQFrb9b3o"
-                title="Video 4: Later side-by-side hallucination progress"
-                loading="lazy"
-                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-                referrerpolicy="strict-origin-when-cross-origin"
-                allowfullscreen
-              ></iframe>
-            </div>
-            <p class="video-direct-link">
-              If the embedded player is blocked, <a href="https://youtu.be/9rFQFrb9b3o">watch Video 4 on YouTube</a>.
-            </p>
+          <figure class="media-figure">
+            <video controls preload="metadata">
+              <source src="assets/video2.mp4" type="video/mp4">
+            </video>
             <figcaption>
-              <strong>Video 4.</strong> Later side-by-side hallucination progress. Structural stability improves, though
-              sharp-turn future dynamics remain the central failure mode.
+              <strong>Video 2.</strong> Multi-car shared-policy evaluation, retained as evidence
+              that the control stack scaled operationally even when race quality remained mixed.
             </figcaption>
           </figure>
         </div>
       </section>
 
-      <section id="results">
-        <h2>6. Results and Lessons Learned</h2>
+      <section id="world-model">
+        <h2>4. World Modeling Agenda</h2>
         <div class="two-column">
           <p>
-            The project produced three main outcomes. First, the single-car PPO branch achieved a stable, executable
-            baseline with meaningful evaluation behavior and enough quality to support demonstration notebooks. Second,
-            the multi-agent branch substantially hardened the training and evaluation infrastructure, even when behavior
-            quality lagged behind the ambition of ten-car racing. Third, the world-model branch produced a functioning
-            offline RSSM pipeline with qualitative and quantitative diagnostics that exposed where model-based control
-            was still failing.
+            The world-model branch asked a more structural question than the PPO branch. Instead
+            of learning a direct control policy, the model attempted to compress racing into a
+            latent dynamical system that could reconstruct observations, predict rewards, and carry
+            enough physical structure to support imagination. The implementation centered on an
+            RSSM with an image encoder, a deterministic GRU state, stochastic prior and posterior
+            heads, a decoder, and telemetry predictors for speed, progress delta, steer, corner
+            angle, and off-track probability.
           </p>
           <p>
-            In report form, the strongest result is not a single scalar score. It is the emergence of a coherent
-            experimental arc: from making PPO stable in a visual racing domain, to discovering the engineering demands
-            of multi-agent scaling, to identifying predictive representation quality as the next bottleneck. That arc is
-            what makes the repository suitable for a final-project research narrative.
+            Intuitively, the challenge was not simply to redraw a road. The model had to learn the
+            difference between a stable world and a moving camera. A corridor can remain visually
+            plausible while the imagined ego vehicle fails to progress through a turn in a
+            physically meaningful way. That distinction explains why some later runs looked
+            geometrically tidy but still failed on the curated `sharp_turn` clip.
           </p>
           <p>
-            Several practical lessons followed. Reward and rollout curves alone were not sufficient for racing; visual
-            artifacts, progress metrics, contact metrics, and replay videos all mattered. Scaling the number of agents
-            changed the problem faster than it changed the algorithm: shared-policy PPO remained a reasonable baseline,
-            but evaluation and safety logic became central. World-model progress was also easier to overstate than
-            direct-policy progress; a hallucination video can look compelling while still failing at the future-turn
-            dynamics that actually matter for control.
+            The sequence model followed the familiar latent-dynamics pattern
           </p>
         </div>
+        <div class="equation">
+          h<sub>t</sub> = GRU(h<sub>t-1</sub>, z<sub>t-1</sub>, a<sub>t-1</sub>),&nbsp;
+          p<sub>&phi;</sub>(z<sub>t</sub> | h<sub>t</sub>),&nbsp;
+          q<sub>&phi;</sub>(z<sub>t</sub> | h<sub>t</sub>, x<sub>t</sub>).
+        </div>
+        <div class="two-column">
+          <p>
+            Training optimized reconstruction, reward, KL, and auxiliary telemetry losses:
+          </p>
+        </div>
+        <div class="equation">
+          L(&phi;) =
+          L<sub>recon</sub> +
+          &lambda;<sub>r</sub> L<sub>reward</sub> +
+          &lambda;<sub>KL</sub> KL(q<sub>&phi;</sub> || p<sub>&phi;</sub>) +
+          &lambda;<sub>tele</sub> L<sub>telemetry</sub> +
+          &lambda;<sub>ego</sub> L<sub>ego</sub>.
+        </div>
 
+        <div class="listing-block">
+          <p class="listing-title">Listing 2. RSSM sequence logic distilled from `world_model/models.py`.</p>
+          <pre><code>state = initial_state(batch_size, device)
+prev_action = zeros(batch_size, action_dim)
+for t in range(time_steps):
+    deterministic = sequence_model(
+        state.stochastic, prev_action, state.deterministic
+    )
+    prior = dynamics_model(deterministic)
+    posterior = posterior_model(deterministic, encoder(images[:, t]))
+    stochastic = sample(posterior)
+    reward_t = reward_predictor(deterministic, stochastic)
+    telemetry_t = telemetry_predictor(deterministic, stochastic)
+    reconstruction_t = decoder(concat(deterministic, stochastic))
+    state = RSSMState(deterministic=deterministic, stochastic=stochastic)
+    prev_action = actions[:, t]</code></pre>
+        </div>
+      </section>
+
+      <section id="wm-chronology">
+        <h2>5. World-Model Developmental History</h2>
         <table class="results-table">
           <thead>
             <tr>
-              <th>Checkpoint</th>
-              <th>Reward Corr.</th>
-              <th>Reward Sign Match</th>
-              <th>Speed Corr.</th>
-              <th>Steer Corr.</th>
-              <th>Off-track Acc.</th>
+              <th>Phase</th>
+              <th>Recorded result</th>
+              <th>Interpretation</th>
             </tr>
           </thead>
           <tbody>
             <tr>
-              <td>P2_d4_pilot_telemetry_smoke</td>
-              <td>0.009</td>
-              <td>0.163</td>
-              <td>-0.031</td>
-              <td>0.026</td>
-              <td>0.970</td>
+              <td>`E1_baseline_narrow`</td>
+              <td>`hallucination_ssim = 0.9351`, `sharp_turn_ssim = 0.9429`, `total_loss = 1.183450`.</td>
+              <td>Credible initial baseline, but turn geometry degraded too early to support the final story.</td>
             </tr>
             <tr>
-              <td>P4_d4_main_telemetry_horizon</td>
-              <td>0.842</td>
-              <td>0.880</td>
-              <td>0.626</td>
-              <td>0.655</td>
-              <td>1.000</td>
+              <td>`E2` / diversity</td>
+              <td>Logged qualitatively in `WORLD_MODEL_PROGRESS.md` as broader structural plausibility.</td>
+              <td>Diverse replay improved the prior over road geometry.</td>
             </tr>
             <tr>
-              <td>P5_d4_main_telemetry_a100_bs128_e15</td>
-              <td>0.839</td>
-              <td>0.892</td>
-              <td>0.775</td>
-              <td>0.648</td>
-              <td>1.000</td>
+              <td>`E3` / diversity plus horizon</td>
+              <td>`sharp_turn_ssim = 0.9257`, `mean_ssim = 0.9470`, longer sequence training.</td>
+              <td>The horizon ladder improved corridor persistence, but did not yet define the strongest physics-aware branch.</td>
+            </tr>
+            <tr>
+              <td>`P3_d4_main_telemetry_warmstart_fast`</td>
+              <td>Reward correlation `0.7728`, speed `0.4966`, progress `0.0772`, steer `0.4068`.</td>
+              <td>First unequivocal physics-aware gain after the telemetry recollection pivot.</td>
+            </tr>
+            <tr>
+              <td>`P4_d4_main_telemetry_horizon`</td>
+              <td>`mean_ssim = 0.9665`, `sharp_turn_ssim = 0.9241`, `telemetry_loss = 0.86074`.</td>
+              <td>Longer horizon strengthened general reconstruction while leaving `progress_delta` as the main weak target.</td>
+            </tr>
+            <tr>
+              <td>`P5_d4_main_telemetry_a100_bs128_e15`</td>
+              <td>`mean_ssim = 0.9651`, `sharp_turn_ssim = 0.9159`, reward correlation `0.8387`.</td>
+              <td>Best stable checkpoint under the fixed RSSM family.</td>
+            </tr>
+            <tr>
+              <td>`D6` broad hard-turn mix</td>
+              <td>Reclassified in the logs as an over-injection failure.</td>
+              <td>Curated turn-heavy data can damage the visual prior when mixed too aggressively.</td>
+            </tr>
+            <tr>
+              <td>`D6b` curated supplement</td>
+              <td>`146` episodes, `19,579` train frames, manual share about `28.5%` of train frames.</td>
+              <td>Better controlled than `D6`, but still not sufficient by itself.</td>
+            </tr>
+            <tr>
+              <td>`P6b_d6b_curated_quick`</td>
+              <td>Epoch-1 `sharp_turn_ssim = 0.9148`; epoch-2 `0.9088`.</td>
+              <td>Cleaner than `D6`, yet still not a decisive turn-modeling breakthrough.</td>
+            </tr>
+            <tr>
+              <td>`P8_p5_finetune_d6b`</td>
+              <td>Logged qualitatively as average rather than clearly positive or negative.</td>
+              <td>A small low-learning-rate fine-tune could not replace `P5` as the cleanest checkpoint.</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h3>5.1 Negative Results as Evidence</h3>
+        <table class="results-table">
+          <thead>
+            <tr>
+              <th>Branch</th>
+              <th>Observed outcome</th>
+              <th>Research lesson</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>`I1B-1` perceptual-only</td>
+              <td>Neutral-to-worse on `sharp_turn`.</td>
+              <td>Perceptual loss alone did not solve turn dynamics.</td>
+            </tr>
+            <tr>
+              <td>`I1B-2` progress-only</td>
+              <td>General hallucinations remained decent; sharp-turn dynamics remained weak.</td>
+              <td>The bottleneck was not generic decoder quality.</td>
+            </tr>
+            <tr>
+              <td>`I1B-3` combined-safe precursor</td>
+              <td>Destabilized by `progress_delta` scaling.</td>
+              <td>`progress_delta` is numerically small and easy to overweight.</td>
+            </tr>
+            <tr>
+              <td>`S2A_p5_ego_motion_local`</td>
+              <td>Non-transformative relative to `P5`.</td>
+              <td>An auxiliary ego-motion head was too weak a structural change.</td>
+            </tr>
+            <tr>
+              <td>`S2B_p5_stoch64_local`</td>
+              <td>Weaker sharp-turn behavior and weaker general hallucination quality.</td>
+              <td>More latent capacity was a blunt and negative intervention.</td>
+            </tr>
+            <tr>
+              <td>`S2C_p5_factorized_local`</td>
+              <td>At best geometrically steadier, but still not meaningfully turning.</td>
+              <td>Factorization without explicit pose evolution remained insufficient.</td>
+            </tr>
+            <tr>
+              <td>`2D` pose-conditioned proposal</td>
+              <td>Documented as the active frontier, but not implemented as a checked-in completed run.</td>
+              <td>The logs converge on pose evolution as the next serious hypothesis rather than as an accomplished result.</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section id="wm-benchmark">
+        <h2>6. World-Model Benchmark and Ablation Record</h2>
+        <table class="results-table">
+          <thead>
+            <tr>
+              <th>Run</th>
+              <th>Reward corr.</th>
+              <th>Speed corr.</th>
+              <th>Progress corr.</th>
+              <th>Steer corr.</th>
+              <th>Off-track acc.</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>`P2_d4_pilot_telemetry_smoke`</td>
+              <td>`0.0086`</td>
+              <td>`-0.0306`</td>
+              <td>`-0.0100`</td>
+              <td>`0.0265`</td>
+              <td>`0.9700`</td>
+            </tr>
+            <tr>
+              <td>`P4_d4_main_telemetry_horizon`</td>
+              <td>`0.8425`</td>
+              <td>`0.6258`</td>
+              <td>`0.0517`</td>
+              <td>`0.6550`</td>
+              <td>`1.0000`</td>
+            </tr>
+            <tr>
+              <td>`P5_d4_main_telemetry_a100_bs128_e15`</td>
+              <td>`0.8387`</td>
+              <td>`0.7750`</td>
+              <td>`0.0713`</td>
+              <td>`0.6478`</td>
+              <td>`1.0000`</td>
             </tr>
           </tbody>
         </table>
         <p class="table-note">
-          Table 1. World-model reward-faithfulness summary from the tracked benchmark JSON. Telemetry supervision
-          improved reward, speed, steer, and off-track faithfulness substantially, while progress-delta prediction
-          remained weak and turn evolution remained the key qualitative limitation.
+          The ablation message is precise: telemetry supervision produced a large jump in reward,
+          speed, steer, and off-track faithfulness from `P2` to `P4/P5`, but `progress_delta`
+          remained the weakest continuous signal throughout the strongest runs.
         </p>
+
+        <table class="results-table">
+          <thead>
+            <tr>
+              <th>Component</th>
+              <th>Evidence</th>
+              <th>Contribution to final understanding</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Telemetry supervision</td>
+              <td>`P2` to `P4/P5` correlations improve sharply.</td>
+              <td>Essential positive contributor; retained in the mainline.</td>
+            </tr>
+            <tr>
+              <td>Longer horizon continuation</td>
+              <td>`P4` improves overall `mean_ssim` and losses over earlier checkpoints.</td>
+              <td>Useful for corridor persistence, but not sufficient for turn evolution.</td>
+            </tr>
+            <tr>
+              <td>Curated hard-turn replay</td>
+              <td>`D6` regressed quality; `D6b` was cleaner but still non-decisive.</td>
+              <td>Helpful only as a controlled supplement, not as a dominant mixture.</td>
+            </tr>
+            <tr>
+              <td>Perceptual-only or progress-only losses</td>
+              <td>`I1B` ladder failed to unlock the sharp-turn clip.</td>
+              <td>Objective-only tuning was largely exhausted.</td>
+            </tr>
+            <tr>
+              <td>Wider or factorized latent branches</td>
+              <td>`S2B` and `S2C` remained weak or negative.</td>
+              <td>Latent reorganization without pose evolution did not solve the bottleneck.</td>
+            </tr>
+          </tbody>
+        </table>
       </section>
 
-      <section id="limitations">
-        <h2>7. Limitations and Future Work</h2>
+      <section id="wm-intuition">
+        <h2>7. Intuitive Reading of the World-Model Failure Mode</h2>
         <div class="two-column">
           <p>
-            The single-car branch still reflects the strengths and weaknesses of on-policy visual RL: it can learn
-            strong reactive behavior but does not necessarily yield reusable structure. The multi-agent branch remains
-            difficult to judge without richer competitive metrics and stronger race completion rates. The world-model
-            branch, while technically substantial, has not yet produced the kind of reliable imagined control that would
-            justify replacing direct PPO end to end.
+            The final world-model story is more subtle than "the model blurres turns." In the
+            strongest checkpoints, the model frequently preserves the road corridor, keeps the ego
+            car visually plausible, and predicts short-horizon reward and telemetry with genuine
+            competence. The failure is narrower: under the `sharp_turn` probe, the model often
+            continues to render a believable scene without advancing the camera through the turn as
+            a driver would actually experience it.
           </p>
           <p>
-            Future work naturally splits in two directions. One direction is pragmatic: continue improving the direct
-            multi-agent PPO branch, especially around contact handling, long-horizon race completion, and evaluation
-            visibility. The other direction is representational: continue the world-model branch with more explicit
-            modeling of viewpoint or pose evolution, improved sharp-turn datasets, and stronger side-by-side
-            diagnostics. These directions are complementary rather than competitive.
+            That pattern explains the progression from data interventions to structural
+            interventions. If the decoder were globally poor, more telemetry or more data would
+            have been enough. Instead, the evidence points toward a representational mismatch. The
+            model appears better at describing "what a road looks like next" than "how the agent's
+            viewpoint moves through a turning road." This is exactly why the later logs reframe the
+            next experiment around a pose-conditioned branch rather than another broad continuation
+            run.
           </p>
+        </div>
+
+        <div class="media-grid">
+          <figure class="media-figure">
+            <video controls preload="metadata">
+              <source src="assets/video3.mp4" type="video/mp4">
+            </video>
+            <figcaption>
+              <strong>Video 3.</strong> Earlier world-model hallucination behavior, useful as a
+              qualitative baseline before the telemetry-enabled refinement ladder.
+            </figcaption>
+          </figure>
+          <figure class="media-figure">
+            <video controls preload="metadata">
+              <source src="assets/video4.mp4" type="video/mp4">
+            </video>
+            <figcaption>
+              <strong>Video 4.</strong> Later world-model behavior illustrating why clean geometry
+              and convincing pose evolution are not the same achievement.
+            </figcaption>
+          </figure>
         </div>
       </section>
 
       <section id="reproducibility">
-        <h2>8. Reproducibility and Repo Map</h2>
+        <h2>8. Reproducibility and Repository Map</h2>
+        <table class="results-table">
+          <thead>
+            <tr>
+              <th>Claim</th>
+              <th>Primary evidence in repo</th>
+              <th>Notes</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>PPO debugging chronology</td>
+              <td>`TRAINING_HISTORY.md`, `train.py`, `autoresearch/train_ppo.py`</td>
+              <td>Contains the bug-fix ladder and promoted control baselines.</td>
+            </tr>
+            <tr>
+              <td>AutoResearch single-car metrics</td>
+              <td>`autoresearch/results/run_008`, `run_013`, `run_016`, `best_metrics.json`</td>
+              <td>JSON files used directly for the tables in this report.</td>
+            </tr>
+            <tr>
+              <td>Recursive control pivots</td>
+              <td>`autoresearch/results/recursive_cap100/...`</td>
+              <td>`g002_c03` and `g003_c03` supply the clearest late-stage agentic promotions.</td>
+            </tr>
+            <tr>
+              <td>World-model chronology</td>
+              <td>`WORLD_MODEL_PROGRESS.md`, `WORLD_MODEL_HANDOFF.md`, intervention memos</td>
+              <td>These files establish the exact order of baselines, failures, and reframings.</td>
+            </tr>
+            <tr>
+              <td>World-model benchmark metrics</td>
+              <td>`demo_assets/world_model_benchmark_summary.json`</td>
+              <td>Supplies the reward-faithfulness table for `P2`, `P4`, and `P5`.</td>
+            </tr>
+            <tr>
+              <td>Demonstration media</td>
+              <td>`docs/assets/video1.mp4` through `video4.mp4`</td>
+              <td>Local assets are embedded directly so the report remains self-contained.</td>
+            </tr>
+          </tbody>
+        </table>
+
         <div class="two-column">
           <p>
-            The repository already contains the material needed to reproduce the main branches of the project. Training
-            and evaluation entry points live in the root scripts. Colab notebooks provide executable demos. The
-            multi-agent infrastructure is supported by dedicated config files and cloud runbooks. The world-model branch
-            includes progress logs, handoff documents, intervention notes, replay collection utilities, benchmark
-            summaries, and demo generation.
+            The repository should therefore be read as a benchmark record. The positive results are
+            real but scoped. PPO control is operational and documented through a transparent
+            promotion ladder. The world model has crossed the threshold from generic hallucination
+            to meaningful telemetry-aware dynamics, but the evidence does not justify a claim that
+            it yet supports robust imagination through hard turns or reliable downstream control.
           </p>
           <p>
-            Concretely, the most important entry points are <code>train.py</code> and <code>evaluate.py</code> for PPO,
-            <code>config/multi_car_marl_config.yaml</code> for shared-policy multi-agent training,
-            <code>world_model_train.py</code> and <code>world_model_train_control.py</code> for the world-model branch,
-            and <code>colab_ppo_world_model_demo.ipynb</code> for the executable demonstration notebook. This page can
-            be extended further with additional benchmark plots, PDFs, and higher-resolution videos without changing the
-            report structure.
+            This limitation is scientifically useful rather than disappointing. It sharply narrows
+            the next hypothesis: an improved world model will likely require explicit pose
+            evolution, not merely a larger latent or another objective tweak on the current fixed
+            architecture.
           </p>
         </div>
       </section>
@@ -460,40 +740,12 @@
       <section id="references">
         <h2>References</h2>
         <ol class="references">
-          <li id="ref-ppo">
-            John Schulman, Filip Wolski, Prafulla Dhariwal, Alec Radford, and Oleg Klimov.
-            <a href="https://arxiv.org/abs/1707.06347">Proximal Policy Optimization Algorithms</a>. arXiv, 2017.
-          </li>
-          <li id="ref-planet">
-            Danijar Hafner, Timothy Lillicrap, Ian Fischer, Ruben Villegas, David Ha, Honglak Lee, and James Davidson.
-            <a href="https://research.google/pubs/learning-latent-dynamics-for-planning-from-pixels/">Learning Latent Dynamics for Planning from Pixels</a>.
-            ICML, 2019.
-          </li>
-          <li id="ref-dreamer">
-            Danijar Hafner, Timothy Lillicrap, Jimmy Ba, and Mohammad Norouzi.
-            <a href="https://research.google/pubs/dream-to-control-learning-behaviors-by-latent-imagination/">Dream to Control: Learning Behaviors by Latent Imagination</a>.
-            ICLR, 2020.
-          </li>
-          <li id="ref-dreamerv2">
-            Danijar Hafner, Jimmy Ba, Mohammad Norouzi, and Timothy Lillicrap.
-            <a href="https://research.google/pubs/mastering-atari-with-discrete-world-models/">Mastering Atari with Discrete World Models</a>.
-            ICLR, 2021.
-          </li>
-          <li id="ref-dreamerv3">
-            Danijar Hafner, Jurgis Pasukonis, Jimmy Ba, and Timothy Lillicrap.
-            <a href="https://danijar.com/project/dreamerv3/">Mastering Diverse Control Tasks through World Models</a>.
-            Nature, 2025.
-          </li>
-          <li id="ref-dreamer4">
-            Danijar Hafner, Wilson Yan, and Timothy Lillicrap.
-            <a href="https://danijar.com/project/dreamer4/">Training Agents Inside of Scalable World Models</a>.
-            arXiv, 2025.
-          </li>
-          <li id="ref-mappo">
-            Chao Yu, Akash Velu, Eugene Vinitsky, Jiaxuan Gao, Yu Wang, Alexandre Bayen, and Yi Wu.
-            <a href="https://proceedings.neurips.cc/paper_files/paper/2022/hash/9c1535a02f0ce079433344e14d910597-Abstract-Datasets_and_Benchmarks.html">The Surprising Effectiveness of PPO in Cooperative Multi-Agent Games</a>.
-            NeurIPS, 2022.
-          </li>
+          <li id="ref-ppo">Schulman, J., et al. Proximal Policy Optimization Algorithms. 2017.</li>
+          <li id="ref-planet">Hafner, D., et al. Learning Latent Dynamics for Planning from Pixels. 2019.</li>
+          <li id="ref-dreamer">Hafner, D., et al. Dream to Control: Learning Behaviors by Latent Imagination. 2020.</li>
+          <li id="ref-dreamerv2">Hafner, D., et al. Mastering Atari with Discrete World Models. 2021.</li>
+          <li id="ref-dreamerv3">Hafner, D., et al. Mastering Diverse Domains through World Models. 2023.</li>
+          <li id="ref-mappo">Yu, C., et al. The Surprising Effectiveness of PPO in Cooperative Multi-Agent Games. 2022.</li>
         </ol>
       </section>
     </main>
