@@ -1,8 +1,47 @@
-# Racing Gym RL - PPO Training Project
+# Racing Gym RL - Final Project
 
-A reinforcement learning project for training policies in the `multi_car_racing` environment. The repo supports the legacy single-agent SB3 flow and a maintained local torch path for single-agent and multi-agent training.
+A reinforcement learning project for training racing policies in the `multi_car_racing` environment. The final submission combines a custom PPO control baseline, multi-agent racing experiments, and an offline RSSM-style world-model pipeline.
 
-Google Colab:[https://colab.research.google.com/github/yuvimalik/Racing_Gym_RL/blob/main/colab_training.ipynb]
+## Final Submission
+
+This repository contains the required final-project materials:
+
+- **Final written report:** [GitHub Pages report](https://yuvimalik.github.io/Racing_Gym_RL/) with source in [`docs/index.html`](docs/index.html)
+- **Presentation slides:** [`slides/final_project_slides.pdf`](slides/final_project_slides.pdf)
+- **All code:** core training/evaluation in [`train.py`](train.py) and [`evaluate.py`](evaluate.py), world-model code in [`world_model/`](world_model/), experiment utilities in [`scripts/`](scripts/), and configs in [`config/`](config/)
+- **Executable demo:** [PPO + World Model Colab](https://colab.research.google.com/github/yuvimalik/Racing_Gym_RL/blob/main/colab_ppo_world_model_demo.ipynb)
+- **Main training notebook:** [PPO/autoresearch Colab](https://colab.research.google.com/github/yuvimalik/Racing_Gym_RL/blob/main/colab_training.ipynb)
+
+### Quick Demo Path
+
+For the shortest reproducible demonstration, open the [PPO + World Model Colab](https://colab.research.google.com/github/yuvimalik/Racing_Gym_RL/blob/main/colab_ppo_world_model_demo.ipynb), select a GPU runtime if available, and run all cells. It evaluates the tracked PPO checkpoint, summarizes tracked world-model benchmark results, collects a tiny replay dataset, trains a one-epoch world-model smoke run, and renders a side-by-side hallucination video.
+
+To reproduce the tracked PPO checkpoint evaluation locally:
+
+```bash
+python -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+pip install -r requirements_sb3.txt --no-deps
+pip install git+https://github.com/igilitschenski/multi_car_racing.git --no-deps
+python evaluate.py --model models/best_model_torch.pt --config config/multi_car_config.yaml --episodes 5 --seed 42 --no-video
+```
+
+The long multi-agent runs and full P5 world-model training are documented as research artifacts, but they are not required for the executable demo. Supporting logs are available in [`TRAINING_HISTORY.md`](TRAINING_HISTORY.md), [`WORLD_MODEL_PROGRESS.md`](WORLD_MODEL_PROGRESS.md), and [`WORLD_MODEL_HANDOFF.md`](WORLD_MODEL_HANDOFF.md).
+
+## Historical Materials
+
+Older weekly reports and slide decks remain in the repository for project history. The final slide deck for submission is [`slides/final_project_slides.pdf`](slides/final_project_slides.pdf); older PDFs such as `presentation.pdf`, `presentationFeb27th.pdf`, `3_20 Slides.pdf`, `4_3 Slides.pdf`, and the prior STAT 4830 report PDFs should be treated as supporting history rather than the final presentation.
+
+## Supporting Evidence
+
+These files document the experimental path behind the final report, but they are secondary to the final report, slides, and demo:
+
+- [`TRAINING_HISTORY.md`](TRAINING_HISTORY.md): PPO debugging chronology, reward-shaping fixes, and promoted run history
+- [`WORLD_MODEL_PROGRESS.md`](WORLD_MODEL_PROGRESS.md): world-model sprint notes, benchmark progression, and current limitations
+- [`WORLD_MODEL_HANDOFF.md`](WORLD_MODEL_HANDOFF.md): concise world-model status summary and best-checkpoint rationale
+- [`demo_assets/world_model_benchmark_summary.json`](demo_assets/world_model_benchmark_summary.json): tracked benchmark data used by the report and Colab demo
+- [`docs/PRIME_INTELLECT_GPU.md`](docs/PRIME_INTELLECT_GPU.md): cloud GPU runbook for long multi-agent experiments
 
 ## Project Overview
 
@@ -30,12 +69,16 @@ Racing_Gym_RL/
 ├── train.py                       # Main training script
 ├── evaluate.py                    # Model evaluation script
 ├── distributed_train.py           # CUDA-only distributed torch entry point
+├── slides/final_project_slides.pdf # Final presentation slides
+├── docs/index.html                # Final written report / GitHub Pages source
 ├── colab_training.ipynb           # Google Colab notebook for training
+├── colab_ppo_world_model_demo.ipynb # Executable final demo notebook
+├── demo_assets/                   # Tracked benchmark summaries for the demo
 ├── config/
 │   ├── circle_config.yaml         # Legacy config (racecar_gym)
 │   ├── multi_car_config.yaml      # Single-agent torch config
 │   └── multi_car_marl_config.yaml # Shared-policy multi-agent torch config
-├── models/                        # Saved model checkpoints (gitignored)
+├── models/best_model_torch.pt     # Tracked PPO checkpoint for demo/evaluation
 ├── logs/                          # Training logs and TensorBoard data (gitignored)
 └── results/                       # Evaluation results and videos (gitignored)
 ```
@@ -80,13 +123,21 @@ OPENAI_API_KEY=...
 
 ### Google Colab
 
-The project includes a complete Colab notebook (`colab_training.ipynb`) that handles all setup automatically. Simply:
+The project includes:
+
+- [`colab_ppo_world_model_demo.ipynb`](colab_ppo_world_model_demo.ipynb) for the final executable PPO + world-model demo that:
+  - evaluates the tracked PPO checkpoint
+  - summarizes tracked world-model benchmark results
+  - collects a tiny replay and trains a one-epoch world-model smoke run in Colab
+- [`colab_training.ipynb`](colab_training.ipynb) for the longer PPO/autoresearch Colab flow
+
+For either notebook:
 
 1. Upload the notebook to Google Colab
 2. Enable GPU: Runtime -> Change runtime type -> GPU
 3. Run all cells sequentially
 
-The notebook will install all dependencies and create necessary directories automatically.
+The notebooks install dependencies and create their own output directories automatically.
 
 ## Configuration
 
