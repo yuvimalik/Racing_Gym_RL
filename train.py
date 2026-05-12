@@ -115,41 +115,13 @@ def load_external_torch_surface(
 
 
 def debug_log_763171(run_id, hypothesis_id, location, message, data):
-    # #region agent log
-    payload = {
-        "sessionId": "763171",
-        "runId": run_id,
-        "hypothesisId": hypothesis_id,
-        "location": location,
-        "message": message,
-        "data": data,
-        "timestamp": int(time.time() * 1000),
-    }
-    try:
-        with open("/Users/epablo/Documents/UPenn/SophmoreSpring26/STAT4830/WedApr1_Work/Racing_Gym_RL/.cursor/debug-763171.log", "a", encoding="utf-8") as f:
-            f.write(json.dumps(payload, default=str) + "\n")
-    except Exception:
-        pass
-    # #endregion
+    """No-op hook retained for historical AutoResearch call sites."""
+    return None
 
 
 def debug_log(run_id, hypothesis_id, location, message, data):
-    # #region agent log
-    payload = {
-        "sessionId": "52ee9e",
-        "runId": run_id,
-        "hypothesisId": hypothesis_id,
-        "location": location,
-        "message": message,
-        "data": data,
-        "timestamp": int(time.time() * 1000),
-    }
-    try:
-        with open("/Users/epablo/Documents/UPenn/SophmoreSpring26/STAT4830/WedApr1_Work/Racing_Gym_RL/.cursor/debug-52ee9e.log", "a", encoding="utf-8") as f:
-            f.write(json.dumps(payload, default=str) + "\n")
-    except Exception:
-        pass
-    # #endregion
+    """No-op hook retained for historical AutoResearch call sites."""
+    return None
 
 
 def reward_to_scalar(reward):
