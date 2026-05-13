@@ -18,32 +18,43 @@ The `docs/` directory is the final report surface. This README is separate from 
 
 ## Quick Start
 
-### Environment setup
+### Zero-setup: Colab
+
+The fastest way to see something running is Colab — no local install needed.
+
+| Notebook | What it does |
+|---|---|
+| [`colab_ppo_world_model_demo.ipynb`](colab_ppo_world_model_demo.ipynb) | Evaluate the tracked PPO checkpoint, display the world-model benchmark table, collect a tiny replay dataset, train a 1-epoch smoke RSSM, and generate a hallucination comparison video. |
+| [`colab_training.ipynb`](colab_training.ipynb) | Clone, install, show the best autoresearch hyperparams, optionally train from scratch, and record an evaluation video. |
+
+Open either notebook in Colab, switch the runtime to GPU (Runtime → Change runtime type → T4), and run all cells in order.
+
+### Local setup
 
 ```bash
 python -m venv venv
-source venv/bin/activate
+source venv/bin/activate        # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 pip install -r requirements_sb3.txt --no-deps
 pip install git+https://github.com/igilitschenski/multi_car_racing.git --no-deps
 ```
 
-If you want to use the AutoResearch loops, create a `.env` file with whichever provider you plan to use:
+If you want to use the AutoResearch loops, create a `.env` file:
 
 ```bash
 OPENAI_API_KEY=...
 GOOGLE_API_KEY=...
 ```
 
-### Main ways to run the repo
+### Main commands
 
-Train the maintained single-car torch PPO path:
+Train the single-car torch PPO path:
 
 ```bash
 python train.py --config config/multi_car_config.yaml --seed 42
 ```
 
-Train the maintained shared-policy multi-agent path:
+Train the shared-policy multi-agent path:
 
 ```bash
 python train.py --config config/multi_car_marl_config.yaml --seed 42
@@ -55,10 +66,10 @@ Run a short multi-agent smoke test:
 python train.py --config config/multi_car_marl_smoke_config.yaml --seed 42
 ```
 
-Evaluate a torch checkpoint:
+Evaluate a checkpoint:
 
 ```bash
-python evaluate.py --model models/v3_marl_control_bootstrap/best_model_torch.pt --config config/multi_car_marl_config.yaml --episodes 10
+python evaluate.py --model models/v2_progress/best_model_torch.pt --config config/multi_car_config.yaml --episodes 10
 ```
 
 Run the classic AutoResearch PPO loop:
@@ -67,13 +78,13 @@ Run the classic AutoResearch PPO loop:
 python -m autoresearch.run_loop --provider openai --model gpt-4.1-mini
 ```
 
-Run a recursive control search branch:
+Run a recursive control search:
 
 ```bash
 python -m autoresearch.run_recursive
 ```
 
-Run the offline world-model trainer:
+Train the offline world model:
 
 ```bash
 python world_model_train.py --config config/world_model_config.yaml --epochs 1
@@ -85,16 +96,12 @@ Run the world-model control diagnostic:
 python world_model_train_control.py --config config/world_model_config.yaml
 ```
 
-### Colab entry points
-
-- `colab_training.ipynb`
-- `colab_ppo_world_model_demo.ipynb`
-
 ## How To Read The Project
 
 There are two different reading modes for this repository.
 
-- If you want to run code: start with `train.py`, `evaluate.py`, `config/`, and the commands above.
+- If you want to run code without installing anything: open `colab_ppo_world_model_demo.ipynb` in Colab.
+- If you want to run code locally: start with `train.py`, `evaluate.py`, and the commands above.
 - If you want to understand the research history: read `TRAINING_HISTORY.md`, then `WORLD_MODEL_PROGRESS.md`, then the intervention memos in the repo root.
 
 The repo is not a single clean implementation written in one pass. It is a research record. That means the useful way to understand it is by phase.
