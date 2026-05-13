@@ -671,7 +671,26 @@ buffer.add(
             geometrically tidy but still failed on the curated `sharp_turn` clip.
           </p>
           <p>
-            The sequence model followed the familiar latent-dynamics pattern
+            The choice of RSSM was deliberate. For this project, the representation had to satisfy
+            four constraints simultaneously: it had to remain tractable on modest replay budgets,
+            it had to support long-horizon imagination from pixels, it had to expose a latent state
+            that could later feed an actor-critic, and it had to remain debuggable enough for
+            intervention-based iteration. An RSSM is a natural fit for that design space because
+            it explicitly separates a deterministic memory state from a stochastic uncertainty
+            state. The deterministic branch stabilizes medium-horizon geometry; the stochastic
+            branch absorbs ambiguities in future motion and local observation.
+          </p>
+          <p>
+            The deterministic core was implemented with a GRU rather than a larger transformer-like
+            temporal model because the project's immediate objective was controlled hallucination
+            development, not maximal-scale world-model pretraining. A GRU provides exactly the
+            inductive bias needed for repeated action-conditioned updates on short replay windows:
+            it is sequential, lightweight, and easy to stabilize with LayerNorm. In a racing
+            environment where local continuity matters and data are relatively narrow compared with
+            internet-scale video corpora, that bias was an asset rather than a limitation.
+          </p>
+          <p>
+            The sequence model therefore followed the familiar latent-dynamics pattern
           </p>
         </div>
         <div class="equation">
@@ -691,6 +710,89 @@ buffer.add(
           &lambda;<sub>KL</sub> KL(q<sub>&phi;</sub> || p<sub>&phi;</sub>) +
           &lambda;<sub>tele</sub> L<sub>telemetry</sub> +
           &lambda;<sub>ego</sub> L<sub>ego</sub>.
+        </div>
+
+        <h3>4.1 Why RSSM and Why GRU</h3>
+        <table class="results-table">
+          <thead>
+            <tr>
+              <th>Design choice</th>
+              <th>Why it fit this project</th>
+              <th>Tradeoff accepted</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>RSSM latent state</td>
+              <td>Provided an explicit deterministic memory plus stochastic uncertainty decomposition, which is well suited to imagination from replay.</td>
+              <td>The model family is expressive but still narrower than the most modern large-scale video world models.</td>
+            </tr>
+            <tr>
+              <td>GRU sequence model</td>
+              <td>Matched the need for action-conditioned recurrent updates on moderate sequence lengths and modest compute budgets.</td>
+              <td>Long-range interaction modeling is less flexible than in newer transformer-heavy architectures.</td>
+            </tr>
+            <tr>
+              <td>LayerNorm after GRU steps</td>
+              <td>Improved stability for longer hallucination horizons and reduced hidden-state drift.</td>
+              <td>Stability was improved, but not enough to solve hard-turn pose evolution by itself.</td>
+            </tr>
+            <tr>
+              <td>Auxiliary telemetry heads</td>
+              <td>Made the latent state legible and testable against speed, steer, progress delta, and off-track signals.</td>
+              <td>The model became easier to debug, but still not immediately suitable for downstream control.</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <div class="two-column">
+          <p>
+            From a high-level ML perspective, the GRU should be read as a strategic simplification.
+            The project needed a recurrent memory mechanism that could absorb track continuity,
+            action history, and ego-motion cues without introducing a second difficult scaling
+            problem before the first one was solved. The repository's own intervention history
+            justifies that choice: the main bottleneck was not that the temporal core was too
+            exotic or too small in the abstract, but that pose evolution and progress modeling
+            remained weak even after replay, horizon, and objective refinements.
+          </p>
+          <p>
+            In other words, the RSSM/GRU choice was not accidental minimalism. It was the right
+            baseline for a project whose immediate goal was to establish faithful hallucination and
+            only then move to policy learning in imagination. The architecture was simple enough to
+            diagnose and modify, yet expressive enough to produce nontrivial gains from `E1`
+            through `P5`.
+          </p>
+        </div>
+
+        <h3>4.2 Relation to DreamerV3 and Dreamer 4</h3>
+        <div class="two-column">
+          <p>
+            The present implementation is best understood as closer in spirit to the classical
+            Dreamer lineage than to a full modern Dreamer system. DreamerV3 demonstrated that
+            world-model reinforcement learning can scale across many domains with fixed
+            hyperparameters, and it trains an actor-critic inside latent imagination rather than
+            treating hallucination as an endpoint. Our project adopted the world-model side of that
+            agenda first: recurrent latent state modeling, reconstruction, reward prediction, and
+            action-conditioned rollout analysis. It did not yet complete the full DreamerV3 loop of
+            robust behavior learning inside the imagined latent dynamics.
+          </p>
+          <p>
+            The more recent Dreamer 4 agenda goes further still. Its emphasis is not merely on
+            learning a usable recurrent latent model, but on learning agents <em>inside</em> a fast
+            and accurate world model at larger scale, including stronger object-interaction
+            fidelity and more scalable imagination training. Relative to that standard, the current
+            repository should be seen as a pre-Dreamer4 stage: it built the hallucination and
+            telemetry foundation, but it did not yet reach the point where latent actor-critic
+            training could be trusted as the main learning engine.
+          </p>
+          <p>
+            This comparison is useful because it clarifies the roadmap. A more DreamerV3-like next
+            version would tighten the latent actor-critic loop around the current RSSM and improve
+            normalization, replay coverage, and imagination objectives. A more Dreamer4-like next
+            version would likely require a broader shift toward a higher-capacity world model that
+            is better at procedural variation, contact-rich interactions, and large-scale action
+            conditioning, potentially moving beyond the current GRU-centered temporal core.
+          </p>
         </div>
 
         <div class="listing-block">
@@ -967,8 +1069,84 @@ for t in range(time_steps):
         </div>
       </section>
 
+      <section id="wm-next-steps">
+        <h2>8. Next Steps for World Models</h2>
+        <div class="two-column">
+          <p>
+            The original ambition of the world-model branch was not merely to produce visually
+            pleasing hallucinations. The intended downstream milestone was latent actor-critic
+            training inside the learned simulator. That downstream goal is already visible in the
+            repository through `world_model_train_control.py`, which freezes the learned RSSM and
+            trains a latent actor and critic on top of it. The fact that this diagnostic did not
+            yet transfer well is therefore not a side note; it is the clearest indicator of what
+            the next phase must solve.
+          </p>
+          <p>
+            Three critical factors now define the frontier. First, the world model must preserve
+            pose evolution well enough that progress through turns is represented faithfully rather
+            than cosmetically. Second, it must remain accurate under richer procedural variation:
+            more track geometries, more interaction modes, and more diverse replay than the current
+            relatively narrow offline datasets. Third, it must be accurate enough that imagined
+            actor-critic optimization does not exploit model errors faster than it learns driving
+            behavior.
+          </p>
+        </div>
+
+        <table class="results-table">
+          <thead>
+            <tr>
+              <th>Next-step factor</th>
+              <th>Why it matters</th>
+              <th>Dreamer-style interpretation</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Pose-faithful latent dynamics</td>
+              <td>The current failure mode is weak turn evolution despite decent corridor rendering.</td>
+              <td>A stronger Dreamer-style model would need imagination states that preserve ego-world transformation, not just texture continuity.</td>
+            </tr>
+            <tr>
+              <td>Procedural coverage</td>
+              <td>Future control will require robustness across more track layouts and interaction patterns than the present replay provides.</td>
+              <td>More DreamerV3/Dreamer4-like scaling suggests broader replay, larger models, and stronger action-conditioned generalization.</td>
+            </tr>
+            <tr>
+              <td>Accurate imagination for control</td>
+              <td>The latent actor-critic diagnostic already shows that plausible prediction is not enough.</td>
+              <td>The next system must support policy learning in imagination rather than only post hoc hallucination evaluation.</td>
+            </tr>
+            <tr>
+              <td>Control-oriented objectives</td>
+              <td>Reward, progress, contact, and race-position signals must remain coherent under imagined rollout.</td>
+              <td>This is the bridge from the current RSSM benchmark to a full Dreamer-like agent stack.</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <div class="two-column">
+          <p>
+            Concretely, a near-term extension would be a more DreamerV3-like phase in which the
+            current RSSM is upgraded from a hallucination benchmark into a real imagination
+            training substrate. That would mean revisiting the latent actor-critic pipeline after
+            improving pose evolution, replay diversity, and reward-faithfulness under imagined
+            rollout. The project already has the scaffolding for this step; what it lacks is a
+            world model accurate enough to justify trusting the imagined gradients.
+          </p>
+          <p>
+            A more ambitious follow-up would be a Dreamer 4-like rearchitecture aimed at richer
+            procedural generation and stronger interaction modeling. In this report, "procedural"
+            should be read practically: not only more track variation, but also more consistent
+            action-conditioned world evolution across novel layouts and race situations. That level
+            of generality is exactly what would make latent actor-critic training valuable for the
+            next generation of the project, especially once the goal shifts from single-car
+            hallucination toward competitive multi-agent imagination.
+          </p>
+        </div>
+      </section>
+
       <section id="reproducibility">
-        <h2>8. Reproducibility and Repository Map</h2>
+        <h2>9. Reproducibility and Repository Map</h2>
         <table class="results-table">
           <thead>
             <tr>
@@ -1029,7 +1207,7 @@ for t in range(time_steps):
       </section>
 
       <section id="references">
-        <h2>References</h2>
+        <h2>10. References</h2>
         <ol class="references">
           <li id="ref-ppo">Schulman, J., et al. Proximal Policy Optimization Algorithms. 2017.</li>
           <li id="ref-planet">Hafner, D., et al. Learning Latent Dynamics for Planning from Pixels. 2019.</li>
