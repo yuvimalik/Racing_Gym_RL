@@ -185,6 +185,26 @@ pre {
   line-height: 1.38;
 }
 
+.architecture-figure {
+  margin: 1rem 0;
+  padding: 0.8rem;
+  border: 1px solid var(--line);
+  background: #fcfcfc;
+}
+
+.architecture-figure svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  border: 1px solid var(--line);
+  background: #fff;
+}
+
+.architecture-figure figcaption {
+  margin-top: 0.55rem;
+  font-size: 0.93rem;
+}
+
 .media-grid {
   margin-top: 1rem;
   display: grid;
