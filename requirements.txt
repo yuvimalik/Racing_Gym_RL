@@ -10,7 +10,9 @@ pandas>=1.3.0
 
 # multi_car_racing dependencies (install package separately with --no-deps)
 # gym 0.17.3 requires pyglet<=1.5.0; do not raise above 1.5.0 or pip fails (Python 3.11+ resolver).
-shapely==1.8.5.post1
+# shapely 2.x has manylinux binary wheels for Python 3.10+; 1.8.x had none and fails to compile on Colab.
+# multi_car_racing uses basic shapely geometry (Polygon, Point) that is compatible with 2.x.
+shapely>=2.0,<3.0
 box2d-py==2.3.8
 pyglet>=1.4.0,<=1.5.0
 
