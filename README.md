@@ -3,7 +3,6 @@
 A reinforcement learning project for training policies in the `multi_car_racing` environment. The repo supports the legacy single-agent SB3 flow and a maintained local torch path for single-agent and multi-agent training.
 
 Google Colab:
-- PPO training notebook: [https://colab.research.google.com/github/yuvimalik/Racing_Gym_RL/blob/main/colab_training.ipynb]
 - Executable PPO + world-model demo: [https://colab.research.google.com/github/yuvimalik/Racing_Gym_RL/blob/main/colab_ppo_world_model_demo.ipynb]
 
 ## Project Overview
