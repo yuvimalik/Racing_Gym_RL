@@ -5,6 +5,8 @@ This repository contains the full project history for a racing-agent research ef
 1. Single-car PPO stabilization
 2. Multi-agent and shared-policy racing infrastructure
 3. Offline world modeling with RSSM-style latent dynamics
+Google Colab:
+- Executable PPO + world-model demo: [https://colab.research.google.com/github/yuvimalik/Racing_Gym_RL/blob/main/colab_ppo_world_model_demo.ipynb]
 
 The `docs/` directory is the final report surface. This README is separate from that report. Its job is to help a reader run the project, understand the chronology, and navigate the codebase.
 
