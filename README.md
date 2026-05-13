@@ -5,8 +5,8 @@ This repository contains the full project history for a racing-agent research ef
 1. Single-car PPO stabilization
 2. Multi-agent and shared-policy racing infrastructure
 3. Offline world modeling with RSSM-style latent dynamics
-Google Colab:
-- Executable PPO + world-model demo: [https://colab.research.google.com/github/yuvimalik/Racing_Gym_RL/blob/main/colab_ppo_world_model_demo.ipynb]
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/yuvimalik/Racing_Gym_RL/blob/yuv-dev/colab_ppo_world_model_demo.ipynb)
 
 The `docs/` directory is the final report surface. This README is separate from that report. Its job is to help a reader run the project, understand the chronology, and navigate the codebase.
 
@@ -24,10 +24,10 @@ The fastest way to see something running is Colab — no local install needed.
 
 | Notebook | What it does |
 |---|---|
-| [`colab_ppo_world_model_demo.ipynb`](colab_ppo_world_model_demo.ipynb) | Evaluate the tracked PPO checkpoint, display the world-model benchmark table, collect a tiny replay dataset, train a 1-epoch smoke RSSM, and generate a hallucination comparison video. |
-| [`colab_training.ipynb`](colab_training.ipynb) | Clone, install, show the best autoresearch hyperparams, optionally train from scratch, and record an evaluation video. |
+| [`colab_ppo_world_model_demo.ipynb`](colab_ppo_world_model_demo.ipynb) | **No install required.** Loads pre-committed benchmark JSONs, plots the AutoResearch experiment chart, displays inline agent and hallucination videos, and prints the RSSM architecture. CPU runtime, under 2 minutes. |
+| [`colab_training.ipynb`](colab_training.ipynb) | Full environment install, train from scratch, record an evaluation video. GPU recommended. |
 
-Open either notebook in Colab, switch the runtime to GPU (Runtime → Change runtime type → T4), and run all cells in order.
+Open the demo notebook directly from the badge above, or open `colab_training.ipynb` in Colab for the full training path.
 
 ### Local setup
 
